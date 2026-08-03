@@ -196,10 +196,12 @@ const renderControls = () => {
   el.like.classList.toggle('on', like === 'LIKE');
   el.like.title = like === 'LIKE' ? 'Remove like' : 'Like';
 
-  const volume = state.muted ? 0 : state.volume;
-  el.volFill.style.width = `${clamp(volume, 0, 100)}%`;
-  el.volumeIcon.firstElementChild.setAttribute('href', state.muted ? '#i-muted' : '#i-volume');
-  el.mute.classList.toggle('on', state.muted);
+  // Volume 0 reads as muted even when the player's own mute flag is off.
+  const silent = state.muted || state.volume === 0;
+  el.volFill.style.width = `${clamp(state.muted ? 0 : state.volume, 0, 100)}%`;
+  el.volumeIcon.firstElementChild.setAttribute('href', silent ? '#i-muted' : '#i-volume');
+  el.mute.classList.toggle('on', silent);
+  el.mute.title = `Volume ${Math.round(state.muted ? 0 : state.volume)}%`;
 };
 
 const renderProgress = () => {
@@ -239,7 +241,15 @@ const applyState = (next) => {
   const songChanged = next.song?.videoId !== state.song?.videoId;
   const appearanceChanged = next.appearance !== state.appearance;
 
+  // Keep the level the user is actually setting while our own echoes drain.
+  const heldVolume = holdingVolume() ? { volume: state.volume, muted: state.muted } : null;
+
   state = next;
+
+  if (heldVolume) {
+    state.volume = heldVolume.volume;
+    state.muted = heldVolume.muted;
+  }
 
   // The dropdown has its own fixed size; only the floating widget follows the
   // Normal/Compact setting.
@@ -310,13 +320,23 @@ const ratioFromEvent = (event, node) => {
   return clamp((event.clientX - rect.left) / rect.width, 0, 1);
 };
 
+/** Pointer capture throws if the id is no longer active; a failed capture just
+ *  means the drag ends when the pointer leaves the element. */
+const capturePointer = (node, pointerId) => {
+  try {
+    node.setPointerCapture(pointerId);
+  } catch {
+    /* not capturable */
+  }
+};
+
 el.seek.addEventListener('pointerdown', (event) => {
   const duration = state.song?.songDuration || 0;
   if (!duration) return;
 
   seeking = true;
   el.seek.classList.add('dragging');
-  el.seek.setPointerCapture(event.pointerId);
+  capturePointer(el.seek, event.pointerId);
   seekPreview = ratioFromEvent(event, el.seek) * duration;
   renderProgress();
 });
@@ -349,26 +369,64 @@ el.seek.addEventListener('pointercancel', endSeek);
 // ------------------------------------------------------------ volume drag
 
 let volumeDragging = false;
+let volumeSendTimer = null;
+let volumePeekTimer = null;
+
+// Every volume we POST comes back as a VOLUME_CHANGED echo. While the user is
+// dragging there are several in flight at once, and the last ones to land are
+// not necessarily the newest — that is what made the slider jump on release.
+// So: throttle what we send, always send the final value, and ignore echoes
+// until the server has had time to settle on it.
+let ignoreVolumeUntil = 0;
+const VOLUME_SETTLE_MS = 900;
+const VOLUME_THROTTLE_MS = 70;
+
+const holdingVolume = () => volumeDragging || performance.now() < ignoreVolumeUntil;
+
+/** Briefly reveal the slider so wheel and keyboard changes are visible. */
+const peekVolume = () => {
+  el.volPop.classList.add('peek');
+  clearTimeout(volumePeekTimer);
+  volumePeekTimer = setTimeout(() => el.volPop.classList.remove('peek'), 1100);
+};
+
+const flushVolume = () => {
+  clearTimeout(volumeSendTimer);
+  volumeSendTimer = null;
+  send('volume', { volume: Math.round(state.volume) });
+};
+
+const setVolume = (value, { immediate = false } = {}) => {
+  const volume = clamp(value, 0, 100);
+  if (state.muted && volume > 0) state.muted = false;
+  state.volume = volume;
+  ignoreVolumeUntil = performance.now() + VOLUME_SETTLE_MS;
+  renderControls();
+
+  if (immediate) {
+    flushVolume();
+    return;
+  }
+  if (volumeSendTimer) return;
+  volumeSendTimer = setTimeout(() => {
+    volumeSendTimer = null;
+    send('volume', { volume: Math.round(state.volume) });
+  }, VOLUME_THROTTLE_MS);
+};
 
 // Events land on the padded hit area, but the ratio is measured against the
 // visible rail so the ends of the slider map to 0 and 100.
-const applyVolumeFromEvent = (event) => {
-  const volume = Math.round(ratioFromEvent(event, el.volRail) * 100);
-  state.volume = volume;
-  state.muted = volume === 0;
-  renderControls();
-  send('volume', { volume });
-};
+const volumeFromEvent = (event) => ratioFromEvent(event, el.volRail) * 100;
 
 el.volHit.addEventListener('pointerdown', (event) => {
   volumeDragging = true;
   el.volPop.classList.add('dragging');
-  el.volHit.setPointerCapture(event.pointerId);
-  applyVolumeFromEvent(event);
+  capturePointer(el.volHit, event.pointerId);
+  setVolume(volumeFromEvent(event));
 });
 
 el.volHit.addEventListener('pointermove', (event) => {
-  if (volumeDragging) applyVolumeFromEvent(event);
+  if (volumeDragging) setVolume(volumeFromEvent(event));
 });
 
 const endVolume = (event) => {
@@ -380,26 +438,57 @@ const endVolume = (event) => {
   } catch {
     /* pointer already released */
   }
+  // Whatever the throttle last sent, the value under the cursor wins.
+  setVolume(state.volume, { immediate: true });
 };
 
 el.volHit.addEventListener('pointerup', endVolume);
 el.volHit.addEventListener('pointercancel', endVolume);
 
-// Scrolling anywhere on the card nudges the volume.
+// ------------------------------------------------- wheel / trackpad / keys
+
+// A trackpad emits many small deltas where a mouse wheel emits few large ones.
+// Carrying a float between events lets both feel proportional instead of the
+// trackpad being ignored to rounding.
+let wheelVolume = null;
+let wheelResetTimer = null;
+const WHEEL_SENSITIVITY = 0.12;
+
 el.card.addEventListener(
   'wheel',
   (event) => {
     if (state.status !== 'connected') return;
-    const delta = event.deltaY > 0 ? -3 : 3;
-    const volume = clamp(Math.round((state.muted ? 0 : state.volume) + delta), 0, 100);
-    if (volume === state.volume && !state.muted) return;
-    state.volume = volume;
-    state.muted = false;
-    renderControls();
-    send('volume', { volume });
+    // With macOS natural scrolling, swiping up reports a positive deltaY, so
+    // adding it is what makes "scroll up" raise the volume.
+    const from = wheelVolume ?? (state.muted ? 0 : state.volume);
+    wheelVolume = clamp(from + event.deltaY * WHEEL_SENSITIVITY, 0, 100);
+
+    clearTimeout(wheelResetTimer);
+    wheelResetTimer = setTimeout(() => {
+      wheelVolume = null;
+    }, 400);
+
+    setVolume(wheelVolume);
+    peekVolume();
   },
   { passive: true },
 );
+
+const VOLUME_STEP = 5;
+const VOLUME_STEP_FINE = 1;
+
+// Up/down adjust volume whenever the widget or the dropdown has focus.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  if (state.status !== 'connected') return;
+
+  event.preventDefault();
+  const step = event.shiftKey ? VOLUME_STEP_FINE : VOLUME_STEP;
+  const from = state.muted ? 0 : state.volume;
+  wheelVolume = null;
+  setVolume(from + (event.key === 'ArrowUp' ? step : -step), { immediate: true });
+  peekVolume();
+});
 
 // ------------------------------------------------------------------- boot
 

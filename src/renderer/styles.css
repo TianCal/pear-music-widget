@@ -465,10 +465,17 @@ body.panel .resize-edges {
 }
 
 .volume:hover .vol-pop,
-.vol-pop.dragging {
+.vol-pop.dragging,
+.vol-pop.peek {
   opacity: 1;
-  pointer-events: auto;
   transform: translate(-50%, 0);
+}
+
+/* 'peek' is a transient readout for wheel and keyboard changes, so it must not
+   start swallowing clicks the way a hovered or dragged slider does. */
+.volume:hover .vol-pop,
+.vol-pop.dragging {
+  pointer-events: auto;
 }
 
 /* Generous invisible hit area around a deliberately thin rail. */

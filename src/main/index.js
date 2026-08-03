@@ -77,6 +77,55 @@ const normaliseSong = (song) => {
 
 let coverToken = 0;
 
+// YouTube Music applies its own curve between the volume we POST and the volume
+// it reports back — measured on 3.12.0 as reported = 100*(15^(sent/100)-1)/14,
+// so POSTing 80 echoes back as 55. Rather than hardcode that curve (it comes
+// from a plugin the user can turn off), treat the value we set as the truth for
+// a moment afterwards. Without this the slider visibly snaps to the curved
+// number about a second after the user lets go of the drag.
+const VOLUME_ECHO_MS = 1500;
+let volumeEchoUntil = 0;
+let volumeWeSet = null;
+
+const ownVolumeEcho = () => Date.now() < volumeEchoUntil && volumeWeSet !== null;
+
+// The reported value follows 100*(b^(x/100)-1)/(b-1) — measured at b≈15 on
+// 3.12.0, but the curve comes from a plugin the user can turn off, so learn b
+// from the first (sent, echoed) pair instead of hardcoding it. Every reported
+// value is then mapped back onto the scale the slider actually uses, which is
+// what keeps a late echo, or a volume change made inside YouTube Music, from
+// yanking the slider onto a different scale.
+let volumeCurveBase = null; // null = not calibrated yet, 1 = no curve applied
+let volumeSendSeq = 0;
+let volumeAwaitingEcho = null;
+
+/** Numerically solve b for a single observed (sent → echoed) pair. */
+const solveVolumeCurve = (sent, echoed) => {
+  const u = sent / 100;
+  const v = echoed / 100;
+  if (u <= 0.05 || u >= 0.95) return null; // endpoints are fixed for every b
+  if (Math.abs(sent - echoed) <= 2) return 1; // identity
+  if (v <= 0 || v >= u) return null; // not the shape we expect
+
+  // (b^u - 1)/(b - 1) decreases monotonically in b, so bisect in log space.
+  let lo = 1.0001;
+  let hi = 1e6;
+  for (let i = 0; i < 60; i += 1) {
+    const mid = Math.sqrt(lo * hi);
+    if ((Math.pow(mid, u) - 1) / (mid - 1) > v) lo = mid;
+    else hi = mid;
+  }
+  return Math.sqrt(lo * hi);
+};
+
+const reportedToSlider = (reported) => {
+  if (typeof reported !== 'number') return undefined;
+  const b = volumeCurveBase;
+  if (!b || b <= 1.001) return reported;
+  const slider = (100 * Math.log(1 + ((b - 1) * reported) / 100)) / Math.log(b);
+  return Math.round(Math.min(100, Math.max(0, slider)));
+};
+
 /** Swap in a new song, then resolve its artwork and like state out of band. */
 const applySong = async (raw) => {
   const song = normaliseSong(raw);
@@ -111,7 +160,7 @@ const refreshAll = async () => {
   if (song) await applySong(song);
   update({
     shuffle: shuffle?.state ?? undefined,
-    volume: typeof volume?.state === 'number' ? volume.state : undefined,
+    volume: ownVolumeEcho() ? volumeWeSet : reportedToSlider(volume?.state),
     muted: typeof volume?.isMuted === 'boolean' ? volume.isMuted : undefined,
     isPlaying: song ? !song.isPaused : undefined,
     position: typeof song?.elapsedSeconds === 'number' ? song.elapsedSeconds : undefined,
@@ -152,9 +201,23 @@ realtime.on('message', (msg) => {
     case 'POSITION_CHANGED':
       update({ position: msg.position ?? 0 });
       break;
-    case 'VOLUME_CHANGED':
-      update({ volume: msg.volume ?? state.volume, muted: !!msg.muted });
+    case 'VOLUME_CHANGED': {
+      const reported = typeof msg.volume === 'number' ? msg.volume : null;
+
+      // Only calibrate against the most recent send: mid-drag there are several
+      // echoes in flight and none of them pairs with the value we last set.
+      if (reported !== null && volumeAwaitingEcho?.seq === volumeSendSeq) {
+        const base = solveVolumeCurve(volumeAwaitingEcho.value, reported);
+        if (base) volumeCurveBase = base;
+        volumeAwaitingEcho = null;
+      }
+
+      update({
+        volume: ownVolumeEcho() ? volumeWeSet : reportedToSlider(reported) ?? state.volume,
+        muted: !!msg.muted,
+      });
       break;
+    }
     case 'SHUFFLE_CHANGED':
       update({ shuffle: !!msg.shuffle });
       break;
@@ -179,7 +242,15 @@ const commands = {
   next: () => api.actions.next(),
   previous: () => api.actions.previous(),
   seek: ({ seconds }) => api.actions.seekTo(Math.max(0, Math.round(seconds))),
-  volume: ({ volume }) => api.actions.setVolume(Math.min(100, Math.max(0, Math.round(volume)))),
+  volume: ({ volume }) => {
+    const value = Math.min(100, Math.max(0, Math.round(volume)));
+    volumeWeSet = value;
+    volumeEchoUntil = Date.now() + VOLUME_ECHO_MS;
+    volumeSendSeq += 1;
+    volumeAwaitingEcho = { value, seq: volumeSendSeq };
+    update({ volume: value });
+    return api.actions.setVolume(value);
+  },
   toggleMute: () => api.actions.toggleMute(),
   shuffle: () => api.actions.shuffle(),
   like: async () => {

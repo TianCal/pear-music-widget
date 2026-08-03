@@ -12,8 +12,6 @@ as push events rather than on a timer.
 
 ![The floating widget on the desktop](docs/widget.png)
 
-![The menu-bar dropdown](docs/menu-bar-dropdown.png)
-
 ## Two surfaces
 
 **A menu-bar dropdown.** Click the play icon in the menu bar and a 400×148
@@ -75,8 +73,10 @@ parked bottom-right stays bottom-right.
   `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED`
 - Full transport: play/pause, next, previous, **scrubable** progress bar
 - Shuffle and like (right-click the heart to dislike)
-- Volume popover on the speaker icon; scrolling anywhere on the card also nudges
-  volume
+- Volume three ways: drag the popover on the speaker icon, scroll anywhere on
+  the card, or press **↑ / ↓** while the widget or dropdown has focus (hold
+  **Shift** for 1% steps). Scroll and keyboard flash the slider so you can see
+  the level
 - Cover art, title, artist and album, with the title drifting when it overflows
 - Accent colour derived from the artwork
 - Light and dark appearance
@@ -111,6 +111,55 @@ xattr -dr com.apple.quarantine "/Applications/Pear Music Widget.app"
 - macOS
 - Node 18+ (built and tested on Node 26)
 - pear-desktop or th-ch/youtube-music, with the **API Server** plugin enabled
+
+## Compatibility
+
+This talks to the `api-server` plugin, which is versioned independently of the
+host app and can change its protocol. Pinned here so a future break is easy to
+diagnose:
+
+| | |
+| --- | --- |
+| API surface | `/api/v1` (the plugin's `API_VERSION`) |
+| Verified against | YouTube Music **3.12.0**, bundle `com.github.th-ch.youtube-music` |
+| Default endpoint | `http://127.0.0.1:26538` |
+| Auth | `POST /auth/{clientId}` → JWT; `Authorization: Bearer` on REST, `?token=` on the socket |
+
+Everything the widget depends on:
+
+| Kind | Used |
+| --- | --- |
+| WebSocket | `GET /api/v1/ws` |
+| Socket events | `PLAYER_INFO`, `VIDEO_CHANGED`, `PLAYER_STATE_CHANGED`, `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED` |
+| Read | `GET /song`, `/like-state`, `/shuffle`, `/volume` |
+| Write | `POST /play`, `/pause`, `/toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle` |
+
+If the plugin bumps to `/api/v2`, change `API` in [src/main/api.js](src/main/api.js)
+and the socket path in [src/main/ws.js](src/main/ws.js). `npm run doctor` reports
+the server's own OpenAPI title and version and will fail loudly on a protocol
+change rather than leaving the widget silently blank.
+
+Two quirks of the current plugin the widget works around, both worth re-checking
+after an upgrade:
+
+- **`GET /repeat-mode` always returns `{"mode": null}`**, which is why there is
+  no repeat button. `/shuffle` and `/like-state` return real values, so this is
+  specific to repeat.
+- **The volume you POST is not the volume reported back.** The player applies an
+  exponential curve — measured at `reported = 100*(15^(sent/100)-1)/14` on
+  3.12.0, so POSTing 80 echoes back 55. The widget learns the curve at runtime
+  from the first (sent, echoed) pair rather than hardcoding it, since it comes
+  from a plugin that can be turned off. See `solveVolumeCurve` in
+  [src/main/index.js](src/main/index.js).
+
+## Assets
+
+There are no third-party assets and nothing to attribute. The transport glyphs
+are hand-authored SVG paths in the `<symbol>` sprite at the top of
+[src/renderer/index.html](src/renderer/index.html); the menu-bar icons and the
+app icon are computed procedurally at build time by
+[scripts/make-icon.js](scripts/make-icon.js). The only binary in the repo is the
+screenshot.
 
 ## Setup
 
@@ -251,6 +300,21 @@ in fixed device pixels, so the CSS radius is divided by the zoom to stay flush.
 
 A frameless window resizes from its edges, but `-webkit-app-region: drag` on the
 card would swallow those edges — hence the 5px no-drag ring in the markup.
+
+### Why the volume slider holds its position
+
+Three separate things conspired to make a released drag land somewhere arbitrary,
+and all three are handled in `setVolume` / the `VOLUME_CHANGED` case:
+
+1. Every `pointermove` used to POST, so a drag put a dozen requests in flight and
+   the last echo to arrive was not necessarily the newest. Sends are now
+   throttled to 70ms, and the value under the cursor is always flushed on
+   release.
+2. The player echoes each change back, and adopting the echo mid-drag fought the
+   user. Our own value wins for 1.5s after we set it.
+3. The echo is on a different scale entirely (the exponential curve above), so
+   even a correctly-ordered echo moved the slider. Reported values are mapped
+   back through the learned curve before they are displayed.
 
 ### Reporting "offline"
 

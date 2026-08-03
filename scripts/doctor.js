@@ -25,7 +25,18 @@ const main = async () => {
   try {
     const res = await fetch(`${base}/doc`, { signal: AbortSignal.timeout(3000) });
     doc = await res.json();
-    ok(`API server reachable — ${doc.info?.title || 'unknown server'}`);
+    ok(`API server reachable — ${doc.info?.title || 'unknown server'} v${doc.info?.version || '?'}`);
+
+    // The widget is written against /api/v1; say so loudly if that has moved.
+    const paths = Object.keys(doc.paths || {});
+    const versions = [...new Set(paths.map((p) => p.match(/^\/api\/(v\d+)\//)?.[1]).filter(Boolean))];
+    if (versions.length && !versions.includes('v1')) {
+      bad(`Server speaks ${versions.join(', ')} but this widget targets v1`);
+      info('Update API in src/main/api.js and the socket path in src/main/ws.js.');
+      process.exitCode = 1;
+    } else {
+      ok(`API version v1 present (server exposes: ${versions.join(', ') || 'unknown'})`);
+    }
   } catch (err) {
     bad('API server not reachable');
     info(err.cause?.code === 'ECONNREFUSED' ? 'Nothing is listening on that port.' : err.message);
