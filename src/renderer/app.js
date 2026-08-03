@@ -33,6 +33,11 @@ const el = {
   volFill: $('vol-fill'),
   volPop: document.querySelector('.vol-pop'),
   cornerSearch: $('btn-search'),
+  cornerLyrics: $('btn-lyrics'),
+  lyrics: $('lyrics'),
+  lyricsScroll: $('lyrics-scroll'),
+  lyricsLines: $('lyrics-lines'),
+  lyricsNote: $('lyrics-note'),
   search: $('search'),
   searchInput: $('search-input'),
   searchClose: $('search-close'),
@@ -51,6 +56,8 @@ let state = {
   skin: 'classic',
   panelSkin: 'classic',
   upnext: [],
+  lyrics: null,
+  lyricsState: 'idle',
   song: null,
   cover: null,
   isPlaying: false,
@@ -139,8 +146,11 @@ const renderStatus = () => {
   const showSetup = state.status !== 'connected' || !state.song;
 
   // Nothing to search against unless the API server is answering.
-  el.cornerSearch.hidden = state.status !== 'connected';
-  if (el.cornerSearch.hidden && searching) closeSearch();
+  const offline = state.status !== 'connected';
+  el.cornerSearch.hidden = offline;
+  el.cornerLyrics.hidden = offline;
+  if (offline && searching) closeSearch();
+  if (offline && openPanel === 'lyrics') setPanel(null);
 
   if (!showSetup) {
     el.setup.hidden = true;
@@ -270,6 +280,8 @@ const renderProgress = () => {
 
   el.fill.style.width = `${ratio * 100}%`;
   el.knob.style.left = `${ratio * 100}%`;
+
+  rollLyrics(position);
 };
 
 const tick = () => {
@@ -320,6 +332,7 @@ const applyState = (next) => {
   renderSong();
   renderControls();
   renderUpNext();
+  renderLyrics();
   renderProgress();
 };
 
@@ -328,7 +341,132 @@ el.upnextGrid.addEventListener('click', (event) => {
   if (row?.dataset.videoId) window.widget.playResult(row.dataset.videoId);
 });
 
+// ------------------------------------------------------------------ lyrics
+
+let lyricLines = [];       // [{ time, text }]
+let lyricSynced = false;
+let lyricActive = -1;
+let lyricRendered = null;  // identity of what is currently in the DOM
+
+const LYRIC_NOTE = {
+  idle: '',
+  loading: 'Looking for lyrics…',
+  none: 'No lyrics found for this track.',
+};
+
+const renderLyrics = () => {
+  const data = state.lyrics;
+  const identity = `${state.song?.videoId || ''}:${state.lyricsState}:${data?.lines?.length || 0}`;
+  if (identity === lyricRendered) return;
+  lyricRendered = identity;
+
+  lyricLines = data?.lines || [];
+  lyricSynced = !!data?.synced;
+  lyricActive = -1;
+
+  el.lyrics.classList.toggle('plain', !!data && !lyricSynced);
+  el.lyricsLines.replaceChildren();
+  el.lyricsLines.style.transform = '';
+
+  if (!lyricLines.length) {
+    el.lyricsNote.textContent = LYRIC_NOTE[state.lyricsState] || LYRIC_NOTE.none;
+    el.lyricsNote.hidden = !el.lyricsNote.textContent;
+    return;
+  }
+
+  el.lyricsNote.textContent = lyricSynced ? '' : 'Unsynced lyrics — these do not follow along.';
+  el.lyricsNote.hidden = lyricSynced;
+
+  lyricLines.forEach((line, index) => {
+    const row = document.createElement(lyricSynced ? 'button' : 'p');
+    row.className = line.text ? 'lyric' : 'lyric gap';
+    if (lyricSynced) {
+      row.type = 'button';
+      row.dataset.index = String(index);
+    }
+    row.textContent = line.text;
+    el.lyricsLines.append(row);
+  });
+};
+
+/** Index of the last line whose timestamp has passed. */
+const lyricIndexAt = (position) => {
+  let lo = 0;
+  let hi = lyricLines.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lyricLines[mid].time <= position) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+};
+
+/** Called from the rAF tick with the interpolated playhead. */
+const rollLyrics = (position) => {
+  if (openPanel !== 'lyrics' || !lyricSynced || !lyricLines.length) return;
+
+  const index = lyricIndexAt(position);
+  if (index === lyricActive) return;
+  lyricActive = index;
+
+  const rows = el.lyricsLines.children;
+  for (let i = 0; i < rows.length; i += 1) {
+    rows[i].classList.toggle('active', i === index);
+    rows[i].classList.toggle('past', i < index);
+  }
+
+  // Centre the active line in the viewport.
+  const row = rows[index];
+  const offset = row
+    ? row.offsetTop + row.offsetHeight / 2 - el.lyricsScroll.clientHeight / 2
+    : 0;
+  el.lyricsLines.style.transform = `translateY(${-Math.max(0, offset)}px)`;
+};
+
+const toggleLyrics = () => {
+  if (openPanel === 'lyrics') {
+    setPanel(null);
+    return;
+  }
+  if (searching) resetSearch(false);
+  lyricActive = -1;
+  setPanel('lyrics');
+};
+
+el.cornerLyrics.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleLyrics();
+});
+
+// Clicking a line seeks to it — the timestamps are right there.
+el.lyricsLines.addEventListener('click', (event) => {
+  const row = event.target.closest('.lyric');
+  if (!row || !lyricSynced || !row.dataset.index) return;
+  const line = lyricLines[Number(row.dataset.index)];
+  if (!line) return;
+  clock.position = line.time;
+  clock.at = performance.now();
+  ignorePositionUntil = performance.now() + 1200;
+  send('seek', { seconds: line.time });
+});
+
 // ------------------------------------------------------------------ search
+
+let openPanel = null; // 'search' | 'lyrics' | null
+
+const setPanel = (which) => {
+  openPanel = which;
+  document.body.classList.toggle('panel-open', !!which);
+  el.search.hidden = which !== 'search';
+  el.lyrics.hidden = which !== 'lyrics';
+  el.cornerLyrics.classList.toggle('on', which === 'lyrics');
+  return window.widget.setPanel(which);
+};
 
 let searching = false;
 let searchSeq = 0;
@@ -420,13 +558,11 @@ const runSearch = async (query) => {
 const openSearch = async () => {
   if (searching || state.status !== 'connected') return;
   searching = true;
-  document.body.classList.add('searching');
-  el.search.hidden = false;
   results = [];
   activeResult = -1;
   renderResults();
   setNote('Type to search.');
-  await window.widget.setSearchOpen(true);
+  await setPanel('search');
   el.searchInput.focus();
   el.searchInput.select();
 };
@@ -436,13 +572,19 @@ const resetSearch = (pushed) => {
   searching = false;
   searchSeq += 1;
   clearTimeout(searchTimer);
-  document.body.classList.remove('searching');
-  el.search.hidden = true;
   el.searchInput.value = '';
   results = [];
   activeResult = -1;
   el.results.replaceChildren();
-  if (!pushed) window.widget.setSearchOpen(false);
+  if (pushed) {
+    openPanel = null;
+    document.body.classList.remove('panel-open');
+    el.search.hidden = true;
+    el.lyrics.hidden = true;
+    el.cornerLyrics.classList.remove('on');
+  } else {
+    setPanel(null);
+  }
 };
 
 const closeSearch = () => {
@@ -477,8 +619,14 @@ el.results.addEventListener('click', (event) => {
 });
 
 // The dropdown collapses itself when it loses focus; mirror that here.
-window.widget.onSearchCollapsed(() => {
+window.widget.onPanelCollapsed(() => {
   if (searching) resetSearch(true);
+  else if (openPanel) {
+    openPanel = null;
+    document.body.classList.remove('panel-open');
+    el.lyrics.hidden = true;
+    el.cornerLyrics.classList.remove('on');
+  }
 });
 
 window.widget.onOpenSearch(() => openSearch());

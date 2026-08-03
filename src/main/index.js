@@ -5,11 +5,12 @@ const { app, ipcMain, BrowserWindow } = require('electron');
 const api = require('./api');
 const store = require('./store');
 const { parseSearchResults, parseQueueUpcoming, queueEntries } = require('./search');
+const { fetchLyrics } = require('./lyrics');
 const { RealtimeClient } = require('./ws');
 const {
   createWindow,
   applySkin,
-  setSearchExpanded,
+  setExpanded,
   skinOf,
   panelSkinOf,
   SKINS,
@@ -44,6 +45,8 @@ const state = {
   song: null,
   cover: null,
   upnext: [],
+  lyrics: null,
+  lyricsState: 'idle', // idle | loading | ready | none
   isPlaying: false,
   position: 0,
   volume: 100,
@@ -158,6 +161,7 @@ const applySong = async (raw) => {
   if (token !== coverToken) return; // a newer song won the race
   update({ cover, like: like?.state ?? null });
   refreshUpNext().catch(() => {});
+  refreshLyrics().catch(() => {});
 };
 
 /**
@@ -186,6 +190,36 @@ const refreshUpNext = async () => {
   // Arrays are never === so compare identity by the ids they carry.
   const key = (list) => list.map((i) => i.videoId).join(',');
   if (key(upnext) !== key(state.upnext)) update({ upnext });
+};
+
+/**
+ * Lyrics come from LRCLib (see src/main/lyrics.js) and are only fetched while a
+ * lyrics panel is actually open — no point reaching out to the network for a
+ * panel nobody is looking at.
+ */
+let lyricsToken = 0;
+let lyricsWantedBy = new Set();
+
+const refreshLyrics = async () => {
+  if (!lyricsWantedBy.size || !state.song) {
+    if (state.lyrics || state.lyricsState !== 'idle') {
+      update({ lyrics: null, lyricsState: 'idle' });
+    }
+    return;
+  }
+
+  const token = ++lyricsToken;
+  const forVideoId = state.song.videoId;
+  update({ lyrics: null, lyricsState: 'loading' });
+
+  const result = await fetchLyrics(state.song).catch(() => null);
+  // A newer request, or the track moved on while we were waiting.
+  if (token !== lyricsToken || state.song?.videoId !== forVideoId) return;
+
+  update({
+    lyrics: result ? { synced: result.synced, lines: result.lines } : null,
+    lyricsState: result ? 'ready' : 'none',
+  });
 };
 
 /** Ground truth pull — the websocket's initial values for shuffle/volume are
@@ -375,12 +409,16 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let panelView = null;
 
-ipcMain.handle('widget:search-open', (event, open) => {
+ipcMain.handle('widget:panel', (event, which) => {
   const sender = BrowserWindow.fromWebContents(event.sender);
   if (!sender) return { ok: false };
 
-  if (panel && sender.id === panel.id) panelView?.setSearchExpanded(!!open);
-  else setSearchExpanded(sender, !!open);
+  if (panel && sender.id === panel.id) panelView?.setExpanded(which);
+  else setExpanded(sender, which);
+
+  if (which === 'lyrics') lyricsWantedBy.add(sender.id);
+  else lyricsWantedBy.delete(sender.id);
+  refreshLyrics().catch(() => {});
 
   return { ok: true };
 });

@@ -94,6 +94,35 @@ It has its own `--well` backdrop because the ambient artwork layer bleeds
 through the whole card — without it, queue legibility depends on whatever cover
 happens to be playing.
 
+## Panels
+
+`search` and `lyrics` share one slot — only one can be open at a time, which is
+what keeps the height arithmetic to a single addition. `PANEL_HEIGHT` in
+`src/main/window.js` must match the `flex-basis` of `.search` and `.lyrics` in
+the stylesheet; the window grows by exactly what the panel occupies.
+
+`applyCollapsedSize` exists because changing skin or resetting while a panel is
+open would otherwise shrink the window to the collapsed size *under* the open
+panel, and the panel would overlap whatever is above it. Anything that resizes
+the window has to go through it.
+
+## Lyrics
+
+`src/main/lyrics.js` is **the only code that talks to a non-localhost host**
+(LRCLib). Keep it that way: the renderer's CSP allows no network at all, so
+anything fetched has to come through the main process.
+
+Matching is three-tier, because YouTube Music titles carry soundtrack credits
+and 《…》 wrappers that LRCLib will not match on: exact with everything we know,
+exact on a cleaned title, then free-text search picking the hit whose duration
+is closest. Empty LRC lines are kept — they are the instrumental gaps and the
+roll needs them.
+
+The roll is a `transform` on `.lyrics-lines`, not `scrollTop`: it animates on the
+compositor and lands on sub-pixel offsets, which is what makes it glide. The
+active index comes from the same interpolated playhead the progress bar uses, so
+it stays smooth between the server's ~1/sec position pushes.
+
 ## Search
 
 `POST /search` returns ~270KB of raw innertube JSON with no stable path to the
@@ -146,6 +175,14 @@ flight and none of them pairs with anything.
 
 The slider is linear in slider units — the player's curve is what makes it
 perceptually exponential. Do not add a second curve in the widget.
+
+## Sizing
+
+`sizes` in the store holds the width the user last left **each skin** at, so
+switching back to a skin restores it. Only the width is stored — the height is
+always re-derived from the skin's aspect ratio, so a stored size can never drift
+off it. `resetWindow` forgets the current skin's entry and returns it to the
+natural size in the default corner.
 
 ## Resizing
 

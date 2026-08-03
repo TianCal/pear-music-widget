@@ -231,7 +231,7 @@ body.panel .resize-edges {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  padding-right: 24px; /* keeps the title clear of the corner search button */
+  padding-right: 46px; /* clears both corner buttons */
 }
 
 .marquee {
@@ -515,13 +515,145 @@ body.panel .resize-edges {
   background: var(--accent);
 }
 
+/* --------------------------------------------------------------- lyrics */
+
+/* Height must match PANEL_HEIGHT.lyrics in src/main/window.js. */
+.lyrics {
+  position: relative;
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--well);
+  box-shadow: inset 0 0.5px 0 var(--hairline);
+  -webkit-app-region: no-drag;
+}
+
+.lyrics[hidden] {
+  display: none;
+}
+
+/* The roll is a transform on .lyrics-lines rather than scrollTop: it animates
+   on the compositor and lands on sub-pixel offsets, which is what makes the
+   movement read as gliding instead of stepping. */
+.lyrics-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 82%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 82%, transparent 100%);
+}
+
+.lyrics-lines {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  padding: 0 16px;
+  transition: transform 0.45s cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform;
+}
+
+.lyric {
+  display: block;
+  width: 100%;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--fg-faint);
+  cursor: pointer;
+  transition: color 0.25s ease, opacity 0.25s ease;
+}
+
+.lyric.past {
+  color: var(--fg-faint);
+  opacity: 0.5;
+}
+
+.lyric.active {
+  color: var(--fg);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.lyric.gap::before {
+  content: '♪';
+  opacity: 0.5;
+}
+
+/* Unsynced lyrics cannot roll, so present them as a plain readable block. */
+.lyrics.plain .lyrics-lines {
+  position: static;
+  transition: none;
+}
+
+.lyrics.plain .lyrics-scroll {
+  overflow-y: auto;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.lyrics.plain .lyric {
+  cursor: default;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.lyrics-note {
+  flex: 0 0 auto;
+  padding: 8px 14px 12px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+.lyrics-note[hidden] {
+  display: none;
+}
+
+/* Classic is a small card: tighter type, tighter rhythm. */
+body.skin-classic .lyric {
+  font-size: 11.5px;
+  padding: 4px 0;
+}
+
+body.skin-classic .lyric.active {
+  font-size: 13px;
+}
+
+/* Stack is wider and already vertical, so it can carry a larger, airier roll
+   that matches the scale of its artwork and titles. */
+body.skin-stack .lyrics-lines {
+  padding: 0 20px;
+}
+
+body.skin-stack .lyric {
+  font-size: 13px;
+  padding: 7px 0;
+}
+
+body.skin-stack .lyric.active {
+  font-size: 15px;
+}
+
 /* --------------------------------------------------------------- search */
 
-.corner {
+.corner-bar {
   position: absolute;
   top: 7px;
   right: 7px;
   z-index: 20;
+  display: flex;
+  gap: 2px;
+}
+
+.corner {
   display: grid;
   place-items: center;
   width: 20px;
@@ -555,9 +687,15 @@ body.panel .resize-edges {
   display: none;
 }
 
-body.searching .corner {
+/* The open panel owns the card; its own controls take over. */
+body.panel-open .corner-bar {
   opacity: 0;
   pointer-events: none;
+}
+
+.corner.on {
+  color: var(--accent);
+  background: var(--hover);
 }
 
 /* Height must match SEARCH_PANEL_CSS in src/main/window.js and panel.js — the
@@ -731,7 +869,7 @@ body.skin-stack .meta {
 
 body.skin-stack .titles {
   text-align: right;
-  padding-right: 22px; /* clears the corner search button */
+  padding-right: 44px; /* clears both corner buttons */
   gap: 1px;
 }
 
@@ -888,15 +1026,18 @@ body.skin-classic .player {
   gap: 10px;
 }
 
-body.skin-classic .corner {
+body.skin-classic .corner-bar {
   top: 6px;
   right: 6px;
+}
+
+body.skin-classic .corner {
   width: 18px;
   height: 18px;
 }
 
 body.skin-classic .titles {
-  padding-right: 21px;
+  padding-right: 42px;
 }
 
 body.skin-classic .search {

@@ -37,7 +37,7 @@ const BASE = {
 
 const SKINS = Object.keys(BASE);
 
-// 'compact' was folded into 'classic'; map old settings files onto it.
+// The settings file is hand-editable, so never trust the value blindly.
 const validSkin = (skin) => (BASE[skin] ? skin : 'classic');
 const skinOf = () => validSkin(store.get('skin'));
 const panelSkinOf = () => validSkin(store.get('panelSkin'));
@@ -53,9 +53,10 @@ const heightFor = (width, skin = skinOf()) => Math.round(width / aspectOf(skin))
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 760;
 
-// Height the search panel adds, in CSS pixels. Must match `.search` in
-// styles.css — the window grows by exactly what the panel occupies.
-const SEARCH_PANEL_CSS = 216;
+// Height each expanding panel adds, in CSS pixels. Must match `.search` and
+// `.lyrics` in styles.css — the window grows by exactly what the panel occupies.
+// Only one can be open at a time, which keeps the height arithmetic trivial.
+const PANEL_HEIGHT = { search: 216, lyrics: 240 };
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
@@ -96,15 +97,26 @@ const applyZoom = (win) => {
   win.webContents.send('zoom', zoom);
 };
 
-const savedSize = () => {
-  const saved = store.get('bounds');
-  const width = saved?.width ? clamp(saved.width, MIN_WIDTH, MAX_WIDTH) : null;
-  if (!width) return baseFor();
-  return { width, height: heightFor(width) };
+/**
+ * The size the user last left this skin at, falling back to its natural size.
+ * Only the width is stored back — the height is always re-derived, so a size
+ * can never drift off the skin's aspect ratio.
+ */
+const sizeForSkin = (skin = skinOf()) => {
+  const width = store.get('sizes')?.[skin]?.width;
+  if (!width) return baseFor(skin);
+
+  const clamped = clamp(width, MIN_WIDTH, MAX_WIDTH);
+  return { width: clamped, height: heightFor(clamped, skin) };
+};
+
+/** Remember the current width against the skin that is showing. */
+const rememberSize = (skin, width) => {
+  store.set({ sizes: { ...(store.get('sizes') || {}), [skin]: { width } } });
 };
 
 const createWindow = () => {
-  const size = savedSize();
+  const size = sizeForSkin();
   const saved = store.get('bounds');
   const position = saved && isOnScreen(saved, size) ? { x: saved.x, y: saved.y } : defaultPosition(size);
 
@@ -154,8 +166,9 @@ const createWindow = () => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (win.isDestroyed()) return;
-      const { x, y, width, height } = win.getBounds();
-      store.set({ bounds: { x, y, width, height } });
+      const { x, y, width } = win.getBounds();
+      store.set({ bounds: { x, y } });
+      rememberSize(skinOf(), width);
     }, 400);
   };
 
@@ -163,9 +176,9 @@ const createWindow = () => {
   win.on('moved', persist);
 
   win.on('resize', () => {
-    // Growing for the search panel is our own doing: it must not be persisted
-    // as the user's preferred size, nor re-evaluated against the breakpoint.
-    if (win.searchExpanded) return;
+    // Growing for a panel is our own doing: it must not be persisted as the
+    // user's preferred size.
+    if (win.expandedBy) return;
 
     applyZoom(win);
     persist();
@@ -175,20 +188,25 @@ const createWindow = () => {
 };
 
 /**
- * Grow the widget downwards to make room for the search panel, and put it back
+ * Grow the widget downwards to make room for a panel, and put it back
  * afterwards. The aspect ratio has to be released while expanded or a drag would
  * snap the panel away, and the collapsed bounds are remembered rather than
  * recomputed so an odd size the user chose survives the round trip.
+ *
+ * `panel` is a key of PANEL_HEIGHT, or null to collapse.
  */
-const setSearchExpanded = (win, open) => {
-  if (!win || win.isDestroyed() || !!win.searchExpanded === open) return;
+const setExpanded = (win, panel) => {
+  if (!win || win.isDestroyed()) return;
+  if ((win.expandedBy || null) === (panel || null)) return;
 
-  if (open) {
-    const collapsed = win.getBounds();
+  if (panel && PANEL_HEIGHT[panel]) {
+    // Switching straight from one panel to another: measure from the collapsed
+    // size we already remembered, not from the currently expanded window.
+    const collapsed = win.collapsedBounds || win.getBounds();
     win.collapsedBounds = collapsed;
-    win.searchExpanded = true;
+    win.expandedBy = panel;
 
-    const extra = Math.round(SEARCH_PANEL_CSS * win.webContents.getZoomFactor());
+    const extra = Math.round(PANEL_HEIGHT[panel] * win.webContents.getZoomFactor());
     const height = collapsed.height + extra;
 
     // Slide up if the taller window would hang off the bottom of the screen.
@@ -209,7 +227,7 @@ const setSearchExpanded = (win, open) => {
   if (collapsed) win.setBounds(collapsed, false);
   win.setAspectRatio(aspectOf());
 
-  win.searchExpanded = false;
+  win.expandedBy = null;
   win.collapsedBounds = null;
 };
 
@@ -217,9 +235,13 @@ const setSearchExpanded = (win, open) => {
  * Jump to a layout's natural size from the menu, pinning whichever corner of the
  * window is nearest a screen corner so a widget parked bottom-right stays there.
  */
-/** Resize to `next`, pinning whichever corner of the window is nearest a screen corner. */
+/**
+ * Resize to `next`, pinning whichever corner of the window is nearest a screen
+ * corner. Measures against the collapsed bounds when a panel is open, so the
+ * panel's extra height does not skew which corner looks nearest.
+ */
 const resizeKeepingCorner = (win, next) => {
-  const current = win.getBounds();
+  const current = win.collapsedBounds || win.getBounds();
   const { workArea } = screen.getDisplayMatching(current);
 
   const distLeft = Math.abs(current.x - workArea.x);
@@ -230,9 +252,26 @@ const resizeKeepingCorner = (win, next) => {
   const x = Math.round(distRight < distLeft ? current.x + current.width - next.width : current.x);
   const y = Math.round(distBottom < distTop ? current.y + current.height - next.height : current.y);
 
-  win.setBounds({ x, y, ...next }, false);
-  return { x, y, ...next };
+  applyCollapsedSize(win, { x, y, ...next });
+  return { x, y };
 };
+
+/**
+ * Set the window to a collapsed size, re-adding the open panel's height if one
+ * is showing. Without this, changing skin or resetting while lyrics or search
+ * are open would shrink the window under the panel and the two would overlap.
+ */
+function applyCollapsedSize(win, bounds) {
+  const panel = win.expandedBy;
+  if (!panel || !PANEL_HEIGHT[panel]) {
+    win.setBounds(bounds, false);
+    return;
+  }
+
+  win.collapsedBounds = bounds;
+  const extra = Math.round(PANEL_HEIGHT[panel] * win.webContents.getZoomFactor());
+  win.setBounds({ ...bounds, height: bounds.height + extra }, false);
+}
 
 /**
  * Switch layout wholesale. Each skin has its own aspect ratio, so the lock has
@@ -246,8 +285,9 @@ const applySkin = (win, skin) => {
   win.setMinimumSize(MIN_WIDTH, 40);
   win.setMaximumSize(MAX_WIDTH, 4000);
 
-  const bounds = resizeKeepingCorner(win, baseFor(skin));
-  store.set({ bounds });
+  // Come back to whatever size the user last left this skin at.
+  const position = resizeKeepingCorner(win, sizeForSkin(skin));
+  store.set({ bounds: position });
 
   win.setMinimumSize(MIN_WIDTH, heightFor(MIN_WIDTH, skin));
   win.setMaximumSize(MAX_WIDTH, heightFor(MAX_WIDTH, skin));
@@ -255,11 +295,19 @@ const applySkin = (win, skin) => {
   applyZoom(win);
 };
 
-const resetPosition = (win) => {
-  const { width, height } = win.getBounds();
-  const { x, y } = defaultPosition({ width, height });
-  win.setPosition(x, y, true);
-  store.set({ bounds: { x, y, width, height } });
+/** Back to the skin's natural size, in the default corner, forgetting the
+ *  size the user had chosen for it. */
+const resetWindow = (win) => {
+  const skin = skinOf();
+  const size = baseFor(skin);
+  const { x, y } = defaultPosition(size);
+
+  const sizes = { ...(store.get('sizes') || {}) };
+  delete sizes[skin];
+  store.set({ sizes, bounds: { x, y } });
+
+  applyCollapsedSize(win, { x, y, ...size });
+  applyZoom(win);
 };
 
 module.exports = {
@@ -268,10 +316,10 @@ module.exports = {
   skinOf,
   panelSkinOf,
   baseFor,
-  resetPosition,
+  resetWindow,
   applySkin,
-  setSearchExpanded,
+  setExpanded,
   BASE,
   SKINS,
-  SEARCH_PANEL_CSS,
+  PANEL_HEIGHT,
 };

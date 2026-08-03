@@ -9,7 +9,8 @@ const DEFAULTS = {
   port: 26538,
   clientId: 'PearMusicWidget',
   token: null,
-  bounds: null,
+  bounds: null, // last window position
+  sizes: {}, // last width the user chose, per skin
   skin: 'classic', // floating widget layout: 'classic' | 'stack'
   panelSkin: 'classic', // menu-bar dropdown layout, chosen independently
   alwaysOnTop: true,

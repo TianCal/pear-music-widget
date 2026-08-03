@@ -25,7 +25,7 @@ Both are the same renderer on the same state, so they never disagree.
 | Tray icon | |
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
-| **Right click** | Settings — widget visibility, skin, dropdown skin, opacity, always on top, open at login, reconnect, quit |
+| **Right click** | Settings — widget visibility, skin, dropdown skin, opacity, always on top, reset size and position, open at login, reconnect, quit |
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
@@ -53,6 +53,19 @@ They are independent, so you can run one layout on the desktop and the other in
 the dropdown. Dragging an edge scales whichever skin is showing — it never
 switches between them.
 
+## Lyrics
+
+The list icon in the corner opens a rolling lyrics panel, on either skin. The
+active line is highlighted and centred as the track plays, and clicking a line
+seeks to it. Classic gets tighter type to suit the small card; Stack gets a
+larger, airier roll to match its scale.
+
+Lyrics come from [LRCLib](https://lrclib.net) — the same source YouTube Music's
+own `synced-lyrics` plugin uses, since the api-server exposes no lyrics route.
+**This is the only time the widget talks to anything other than localhost**; it
+sends the track title and artist to look them up. Tracks with no synced lyrics
+fall back to a plain unsynced block, and tracks with none say so.
+
 ## Search
 
 The magnifier in the top-right corner opens a search panel: the widget grows
@@ -72,7 +85,7 @@ index, so a song ending mid-click cannot make it play the wrong thing.
   card, or **↑ / ↓** while focused (**Shift** for 1% steps)
 - Drag any edge to resize — aspect locked, and the layout scales rather than
   reflowing
-- Light and dark appearance; position, size and skins remembered across launches
+- Light and dark appearance; position and skins remembered across launches, with the size you chose remembered **per skin**
 - No Dock icon
 
 There is no repeat button: `GET /api/v1/repeat-mode` returns `null`
@@ -130,8 +143,8 @@ are in [AGENTS.md](AGENTS.md).
 ## Configuration
 
 `~/Library/Application Support/pear-music-widget/settings.json` — `host`, `port`,
-`clientId`, cached `token`, window `bounds`, `skin`, `panelSkin`, `alwaysOnTop`,
-`opacity`. Quit the app before editing.
+`clientId`, cached `token`, window `bounds` (position), `sizes` (width per
+skin), `skin`, `panelSkin`, `alwaysOnTop`, `opacity`. Quit the app before editing.
 
 ## Assets
 

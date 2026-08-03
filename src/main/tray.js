@@ -5,7 +5,7 @@ const { Menu, Tray, app, nativeImage } = require('electron');
 
 const store = require('./store');
 const TRAY_ICONS = require('./tray-icons');
-const { resetPosition } = require('./window');
+const { resetWindow } = require('./window');
 
 /** Build a template image from the generated base64 pair. */
 const buildIcon = (variant) => {
@@ -128,10 +128,10 @@ const items = {
     },
   }),
 
-  resetPosition: (window) => ({
-    label: 'Reset position',
+  resetWindow: (window) => ({
+    label: 'Reset size and position',
     enabled: alive(window),
-    click: () => onWindow(window, resetPosition),
+    click: () => onWindow(window, resetWindow),
   }),
 
   openApp: () => ({ label: 'Open YouTube Music', click: openMusicApp }),
@@ -161,7 +161,7 @@ const buildWidgetMenu = ({ window, setSkin, setPanelSkin }) =>
     items.opacity(window),
     items.alwaysOnTop(window),
     { type: 'separator' },
-    items.resetPosition(window),
+    items.resetWindow(window),
     { label: 'Hide widget', enabled: alive(window), click: () => onWindow(window, (w) => w.hide()) },
     { type: 'separator' },
     items.openApp(),
@@ -193,7 +193,7 @@ const createTray = ({ window, realtime, getState, setSkin, setPanelSkin, toggleP
       items.skin(setSkin),
       items.panelSkin(setPanelSkin),
       items.opacity(window),
-      items.resetPosition(window),
+      items.resetWindow(window),
       { type: 'separator' },
       {
         label: 'Open at login',

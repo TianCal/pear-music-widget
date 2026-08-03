@@ -73,26 +73,6 @@ const parseSearchResults = (payload) => {
   return results;
 };
 
-/**
- * Index of a videoId in `GET /queue`. Items are not uniformly shaped — some are
- * `playlistPanelVideoRenderer`, others are wrapped — so search each item's
- * subtree rather than assuming a path.
- */
-const findQueueIndex = (queue, videoId) => {
-  const items = queue?.items;
-  if (!Array.isArray(items) || !videoId) return -1;
-
-  const contains = (node, depth = 0) => {
-    if (!node || depth > 12) return false;
-    if (Array.isArray(node)) return node.some((child) => contains(child, depth + 1));
-    if (typeof node !== 'object') return false;
-    if (node.videoId === videoId) return true;
-    return Object.values(node).some((value) => contains(value, depth + 1));
-  };
-
-  return items.findIndex((item) => contains(item));
-};
-
 /** Flat view of the queue: one entry per slot, with the playing one marked. */
 const queueEntries = (queue) => {
   const items = Array.isArray(queue?.items) ? queue.items : [];
@@ -138,7 +118,6 @@ const parseQueueUpcoming = (queue, limit = 4) => {
 
 module.exports = {
   parseSearchResults,
-  findQueueIndex,
   parseQueueUpcoming,
   queueEntries,
   MAX_RESULTS,

@@ -4,7 +4,7 @@ const path = require('node:path');
 const { BrowserWindow, screen } = require('electron');
 
 const store = require('./store');
-const { hideInsteadOfClose, panelSkinOf, baseFor } = require('./window');
+const { hideInsteadOfClose, panelSkinOf, baseFor, PANEL_HEIGHT } = require('./window');
 
 // The dropdown renders whichever skin is configured for it, independently of the
 // floating widget, so its size follows that skin rather than being fixed.
@@ -16,9 +16,6 @@ const GAP_BELOW_MENU_BAR = 6;
 // and then 'click' (which would immediately reopen it). Ignore a toggle that
 // arrives right after a blur-close so the icon behaves like a real toggle.
 const REOPEN_GUARD_MS = 250;
-
-// Must match `.search` in styles.css. The dropdown never zooms, so this is 1:1.
-const SEARCH_PANEL_CSS = 216;
 
 const createPanel = () => {
   const panel = new BrowserWindow({
@@ -54,13 +51,13 @@ const createPanel = () => {
   });
 
   let hiddenAt = 0;
-  let searchExpanded = false;
+  let expandedBy = null;
 
-  /** Grow downwards for the search panel, clamped to the screen. */
-  const resize = (expanded) => {
+  /** Grow downwards for whichever panel is open, clamped to the screen. */
+  const resize = () => {
     const size = sizeOf();
     const bounds = panel.getBounds();
-    const height = size.height + (expanded ? SEARCH_PANEL_CSS : 0);
+    const height = size.height + (PANEL_HEIGHT[expandedBy] || 0);
     const { workArea } = screen.getDisplayMatching(bounds);
     const maxY = workArea.y + workArea.height - height;
     const y = Math.round(Math.min(bounds.y, Math.max(workArea.y, maxY)));
@@ -68,22 +65,23 @@ const createPanel = () => {
     panel.setBounds({ x: bounds.x, y, width: size.width, height }, false);
   };
 
-  const setSearchExpanded = (open) => {
-    if (open === searchExpanded) return;
-    searchExpanded = open;
-    resize(open);
+  const setExpanded = (which) => {
+    const next = PANEL_HEIGHT[which] ? which : null;
+    if (next === expandedBy) return;
+    expandedBy = next;
+    resize();
   };
 
   /** Switching the dropdown's skin changes its natural size. */
   const applyPanelSkin = (skin) => {
     store.set({ panelSkin: skin });
-    resize(searchExpanded);
+    resize();
   };
 
   const collapse = () => {
-    if (!searchExpanded) return;
-    setSearchExpanded(false);
-    panel.webContents.send('search-collapsed');
+    if (!expandedBy) return;
+    setExpanded(null);
+    panel.webContents.send('panel-collapsed');
   };
 
   panel.on('blur', () => {
@@ -130,7 +128,7 @@ const createPanel = () => {
     panel.focus();
   };
 
-  return { panel, toggle, setSearchExpanded, applyPanelSkin };
+  return { panel, toggle, setExpanded, applyPanelSkin };
 };
 
 module.exports = { createPanel };
