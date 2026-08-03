@@ -867,12 +867,11 @@ body.skin-stack .volume {
   display: none;
 }
 
-/* Pull the bar back under the artwork so it spans the whole card. */
+/* Below the transport but inside the right-hand column — nothing in this skin
+   extends under the artwork. */
 body.skin-stack .seek {
   order: 99;
-  flex: 0 0 auto;
-  width: calc(100% + 108px);
-  margin-left: -108px;
+  flex: 0 0 100%;
 }
 
 body.skin-stack .rail {
