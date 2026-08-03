@@ -1,6 +1,6 @@
 {
   "name": "pear-music-widget",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "A modern floating macOS now-playing widget for pear-desktop / YouTube Music",
   "main": "src/main/index.js",
