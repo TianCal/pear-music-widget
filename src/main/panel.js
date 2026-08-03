@@ -3,8 +3,10 @@
 const path = require('node:path');
 const { BrowserWindow, screen } = require('electron');
 
-// Roughly the proportions of the system Now Playing popover.
-const SIZE = { width: 400, height: 148 };
+// Roughly the proportions of the system Now Playing popover. The width is set
+// by the control row: the dropdown shows both time readouts as well as all six
+// controls, so it needs more room than the widget's Normal layout, not less.
+const SIZE = { width: 440, height: 148 };
 const EDGE_MARGIN = 8;
 const GAP_BELOW_MENU_BAR = 6;
 
