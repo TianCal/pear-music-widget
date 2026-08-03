@@ -15,6 +15,9 @@ const GAP_BELOW_MENU_BAR = 6;
 // arrives right after a blur-close so the icon behaves like a real toggle.
 const REOPEN_GUARD_MS = 250;
 
+// Must match `.search` in styles.css. The dropdown never zooms, so this is 1:1.
+const SEARCH_PANEL_CSS = 216;
+
 const createPanel = () => {
   const panel = new BrowserWindow({
     ...SIZE,
@@ -48,9 +51,33 @@ const createPanel = () => {
   });
 
   let hiddenAt = 0;
+  let searchExpanded = false;
+
+  /** Grow downwards for the search panel, clamped to the screen. */
+  const setSearchExpanded = (open) => {
+    if (open === searchExpanded) return;
+    searchExpanded = open;
+
+    const bounds = panel.getBounds();
+    const height = open ? SIZE.height + SEARCH_PANEL_CSS : SIZE.height;
+    const { workArea } = screen.getDisplayMatching(bounds);
+    const maxY = workArea.y + workArea.height - height;
+    const y = Math.round(Math.min(bounds.y, Math.max(workArea.y, maxY)));
+
+    panel.setBounds({ x: bounds.x, y, width: SIZE.width, height }, false);
+  };
+
+  const collapse = () => {
+    if (!searchExpanded) return;
+    setSearchExpanded(false);
+    panel.webContents.send('search-collapsed');
+  };
+
   panel.on('blur', () => {
     if (!panel.isVisible()) return;
     panel.hide();
+    // A dropdown that reopens mid-search would be showing a stale query.
+    collapse();
     hiddenAt = Date.now();
   });
 
@@ -79,6 +106,7 @@ const createPanel = () => {
   const toggle = (tray) => {
     if (panel.isVisible()) {
       panel.hide();
+      collapse();
       hiddenAt = Date.now();
       return;
     }
@@ -88,7 +116,7 @@ const createPanel = () => {
     panel.focus();
   };
 
-  return { panel, toggle };
+  return { panel, toggle, setSearchExpanded };
 };
 
 module.exports = { createPanel, PANEL_SIZE: SIZE };

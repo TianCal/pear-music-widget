@@ -47,8 +47,9 @@ is a `body.compact` class.
 | --- | --- |
 | WebSocket | `GET /api/v1/ws?token=…` |
 | Socket events | `PLAYER_INFO`, `VIDEO_CHANGED`, `PLAYER_STATE_CHANGED`, `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED` |
-| Read | `GET /song`, `/like-state`, `/shuffle`, `/volume` |
+| Read | `GET /song`, `/like-state`, `/shuffle`, `/volume`, `/queue` |
 | Write | `POST /play`, `/pause`, `/toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle` |
+| Search | `POST /search`, `POST /queue`, `PATCH /queue` |
 | Auth | `POST /auth/{clientId}` → JWT; `Authorization: Bearer` on REST, `?token=` on the socket |
 
 If the plugin bumps to `/api/v2`: change `API` in `src/main/api.js` and the socket
@@ -61,6 +62,44 @@ path in `src/main/ws.js`. Verified against YouTube Music 3.12.0.
   button. `/shuffle` and `/like-state` return real values, so this is specific to
   repeat. Re-check after a plugin upgrade.
 - **The volume you POST is not the volume reported back** — see below.
+
+## Skins
+
+`src/main/window.js` holds a `BASE` table of natural sizes per skin. Each skin
+has its own aspect ratio, so `applySkin` must release the lock, resize, then
+re-apply it — otherwise the next drag snaps the window back to the old shape.
+Only `classic` has a Compact variant, so the breakpoint in the `resize` handler
+is skipped for the others.
+
+The renderer expresses all three from **one DOM** via `body.skin-*` classes. The
+trick that makes that possible: the seek bar is a flex child of `.controls`
+rather than a sibling, so each skin places it with `order` alone — above the
+buttons (classic, via `flex-basis: 100%` and wrapping), inline between previous
+and next (cinema), or below them (stack). Cinema takes the play button out of
+flow to float it over the artwork, which is why `.controls` there needs a
+`padding-right` to stop the other buttons sliding underneath it.
+
+Stack's "Next tracks" comes from `GET /queue`, parsed by `parseQueueUpcoming`.
+It has its own `--well` backdrop because the ambient artwork layer bleeds
+through the whole card — without it, queue legibility depends on whatever cover
+happens to be playing.
+
+## Search
+
+`POST /search` returns ~270KB of raw innertube JSON with no stable path to the
+results, so `parseSearchResults` collects every `musicResponsiveListItemRenderer`
+in the tree and keeps the ones carrying a videoId. Songs, albums and videos all
+use that renderer.
+
+Playing a result inserts it with `INSERT_AFTER_CURRENT_VIDEO` and then jumps to
+its **queue index** rather than pressing next: if the current song ends between
+the insert and the skip, next lands one past it. YouTube Music sometimes
+re-resolves the id when queueing, so when the index lookup misses it falls back
+to `next()`.
+
+Opening the panel grows the window by `SEARCH_PANEL_CSS` (216, matching `.search`
+in the stylesheet). That growth must not be persisted as the user's preferred
+size — hence the `win.searchExpanded` guard at the top of the `resize` handler.
 
 ## Volume
 

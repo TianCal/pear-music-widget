@@ -20,6 +20,8 @@
         <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3s-7.9-4.6-7.9-9.9A4.6 4.6 0 0 1 12 7.4a4.6 4.6 0 0 1 7.9 3c0 5.3-7.9 9.9-7.9 9.9Z"/></symbol>
         <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11.4 4.2a1 1 0 0 1 1.6.8v14a1 1 0 0 1-1.6.8L6.8 16H4.5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4.5 8h2.3ZM16 8.8a1 1 0 0 1 1.4.2 5 5 0 0 1 0 6 1 1 0 1 1-1.6-1.2 3 3 0 0 0 0-3.6 1 1 0 0 1 .2-1.4Z"/></symbol>
         <symbol id="i-muted" viewBox="0 0 24 24"><path d="M11.4 4.2a1 1 0 0 1 1.6.8v14a1 1 0 0 1-1.6.8L6.8 16H4.5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4.5 8h2.3Zm4.3 5a1 1 0 0 1 1.4 0l1.3 1.3 1.3-1.3a1 1 0 1 1 1.4 1.4L19.8 12l1.3 1.3a1 1 0 0 1-1.4 1.4l-1.3-1.3-1.3 1.3a1 1 0 0 1-1.4-1.4l1.3-1.3-1.3-1.3a1 1 0 0 1 0-1.4Z"/></symbol>
+        <symbol id="i-search" viewBox="0 0 24 24"><path d="M10.5 3a7.5 7.5 0 0 1 5.92 12.11l4.24 4.24a1 1 0 0 1-1.42 1.42l-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/></symbol>
+        <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5a1 1 0 0 0-.7 1.7l5.3 5.3-5.3 5.3a1 1 0 1 0 1.4 1.4l5.3-5.3 5.3 5.3a1 1 0 0 0 1.4-1.4L13.8 12l5.3-5.3a1 1 0 0 0-1.4-1.4L12.4 10.6 7.1 5.3A1 1 0 0 0 6.4 5Z"/></symbol>
         <symbol id="i-note" viewBox="0 0 24 24"><path d="M20 3.6a1 1 0 0 0-1.2-1L9.5 4.7a1 1 0 0 0-.8 1v9.2A3.6 3.6 0 1 0 10.7 18V9.5l7.3-1.6v4.6a3.6 3.6 0 1 0 2 3.2Z"/></symbol>
       </defs>
     </svg>
@@ -35,6 +37,10 @@
           <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
         </div>
 
+        <button class="corner" id="btn-search" title="Search" aria-label="Search">
+          <svg><use href="#i-search" /></svg>
+        </button>
+
         <main class="player" id="player">
           <div class="art">
             <img id="cover" alt="" />
@@ -47,48 +53,67 @@
               <div class="marquee"><span class="subtitle" id="subtitle"></span></div>
             </div>
 
-            <div class="seek" id="seek" role="slider" aria-label="Seek" tabindex="-1">
-              <div class="rail"><div class="fill" id="fill"></div></div>
-              <div class="knob" id="knob"></div>
-            </div>
-
-            <div class="row">
-              <span class="time" id="elapsed">0:00</span>
-
-              <div class="controls">
-                <button class="btn sm" id="btn-shuffle" data-cmd="shuffle" title="Shuffle">
-                  <svg><use href="#i-shuffle" /></svg>
+            <!-- The seek bar lives inside the control row so each skin can
+                 place it with `order`: above the buttons, below them, or
+                 inline between previous and next. -->
+            <div class="controls">
+              <div class="seek" id="seek" role="slider" aria-label="Seek" tabindex="-1">
+                <div class="rail"><div class="fill" id="fill"></div></div>
+                <div class="knob" id="knob"></div>
+              </div>
+              <button class="btn sm" id="btn-shuffle" data-cmd="shuffle" title="Shuffle">
+                <svg><use href="#i-shuffle" /></svg>
+              </button>
+              <button class="btn" id="btn-prev" data-cmd="previous" title="Previous">
+                <svg><use href="#i-prev" /></svg>
+              </button>
+              <button class="btn play" id="btn-play" data-cmd="togglePlay" title="Play/Pause">
+                <svg id="play-icon"><use href="#i-play" /></svg>
+              </button>
+              <button class="btn" id="btn-next" data-cmd="next" title="Next">
+                <svg><use href="#i-next" /></svg>
+              </button>
+              <button class="btn sm" id="btn-like" data-cmd="like" title="Like">
+                <svg><use href="#i-heart" /></svg>
+              </button>
+              <div class="volume" id="volume">
+                <button class="btn sm" id="btn-mute" data-cmd="toggleMute" title="Volume">
+                  <svg id="volume-icon"><use href="#i-volume" /></svg>
                 </button>
-                <button class="btn" data-cmd="previous" title="Previous">
-                  <svg><use href="#i-prev" /></svg>
-                </button>
-                <button class="btn play" id="btn-play" data-cmd="togglePlay" title="Play/Pause">
-                  <svg id="play-icon"><use href="#i-play" /></svg>
-                </button>
-                <button class="btn" data-cmd="next" title="Next">
-                  <svg><use href="#i-next" /></svg>
-                </button>
-                <button class="btn sm" id="btn-like" data-cmd="like" title="Like">
-                  <svg><use href="#i-heart" /></svg>
-                </button>
-                <div class="volume" id="volume">
-                  <button class="btn sm" id="btn-mute" data-cmd="toggleMute" title="Volume">
-                    <svg id="volume-icon"><use href="#i-volume" /></svg>
-                  </button>
-                  <div class="vol-pop">
-                    <div class="vol-panel">
-                      <div class="vol-hit" id="vol-hit">
-                        <div class="vol-rail" id="vol-rail"><div class="vol-fill" id="vol-fill"></div></div>
-                      </div>
+                <div class="vol-pop">
+                  <div class="vol-panel">
+                    <div class="vol-hit" id="vol-hit">
+                      <div class="vol-rail" id="vol-rail"><div class="vol-fill" id="vol-fill"></div></div>
                     </div>
                   </div>
                 </div>
               </div>
-
-              <span class="time" id="duration">0:00</span>
             </div>
           </div>
         </main>
+
+        <section class="upnext" id="upnext" hidden>
+          <p class="upnext-title">Next tracks</p>
+          <div class="upnext-grid" id="upnext-grid"></div>
+        </section>
+
+        <section class="search" id="search" hidden>
+          <div class="search-bar">
+            <svg class="search-glyph" aria-hidden="true"><use href="#i-search" /></svg>
+            <input
+              id="search-input"
+              type="text"
+              placeholder="Search YouTube Music"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button class="btn sm" id="search-close" title="Close" aria-label="Close search">
+              <svg><use href="#i-close" /></svg>
+            </button>
+          </div>
+          <div class="results" id="results"></div>
+          <p class="search-note" id="search-note">Type to search.</p>
+        </section>
 
         <section class="setup" id="setup" hidden>
           <div class="setup-icon"><span class="pulse"></span></div>

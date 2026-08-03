@@ -13,6 +13,8 @@
   --hairline: rgba(255, 255, 255, 0.14);
   --rail: rgba(255, 255, 255, 0.2);
   --hover: rgba(255, 255, 255, 0.12);
+  --well: rgba(12, 12, 16, 0.55);
+  --well-item: rgba(255, 255, 255, 0.1);
   --shadow: 0 18px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
@@ -25,6 +27,8 @@
     --hairline: rgba(0, 0, 0, 0.1);
     --rail: rgba(0, 0, 0, 0.16);
     --hover: rgba(0, 0, 0, 0.08);
+    --well: rgba(255, 255, 255, 0.6);
+    --well-item: rgba(0, 0, 0, 0.06);
     --shadow: 0 16px 36px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.12);
   }
 }
@@ -58,6 +62,8 @@ body {
    so this only paints the translucent surface on top of the vibrancy layer. */
 .card {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   border-radius: var(--radius);
@@ -147,11 +153,14 @@ body.panel .resize-edges {
 
 /* --------------------------------------------------------------- player */
 
+/* The player keeps the card's natural height; the search panel is the extra the
+   window grew by, so neither squeezes the other. */
 .player {
   position: relative;
   display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 14px;
-  height: 100%;
   padding: 14px;
 }
 
@@ -217,6 +226,7 @@ body.panel .resize-edges {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  padding-right: 24px; /* keeps the title clear of the corner search button */
 }
 
 .marquee {
@@ -282,6 +292,7 @@ body.panel .resize-edges {
   align-items: center;
   -webkit-app-region: no-drag;
   cursor: pointer;
+  min-width: 0;
 }
 
 .rail {
@@ -328,32 +339,23 @@ body.panel .resize-edges {
 
 /* ------------------------------------------------------------- controls */
 
-.row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.time {
-  font-size: 10px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  color: var(--fg-faint);
-  flex: 0 0 auto;
-  min-width: 28px;
-}
-
-.time:last-child {
-  text-align: right;
-}
-
+/* The seek bar is a flex item here rather than a sibling, so a skin can move it
+   above, below or between the buttons with `order` alone. Wrapping plus a
+   100% basis is what puts it on its own line. */
 .controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  column-gap: 4px;
+  row-gap: 9px;
   flex: 1;
   min-width: 0;
+}
+
+.seek {
+  order: -1;
+  flex: 0 0 100%;
 }
 
 /* Heights are fixed but widths are not, so a control row one pixel too narrow
@@ -508,6 +510,186 @@ body.panel .resize-edges {
   background: var(--accent);
 }
 
+/* --------------------------------------------------------------- search */
+
+.corner {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.2s ease;
+}
+
+.corner svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.corner:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.corner:active {
+  transform: scale(0.9);
+}
+
+.corner[hidden] {
+  display: none;
+}
+
+body.searching .corner {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Height must match SEARCH_PANEL_CSS in src/main/window.js and panel.js — the
+   window grows by exactly this much. */
+.search {
+  position: relative;
+  flex: 0 0 216px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 12px 10px;
+  -webkit-app-region: no-drag;
+}
+
+.search[hidden] {
+  display: none;
+}
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 4px 0 9px;
+  border-radius: 9px;
+  background: var(--hover);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+.search-glyph {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  fill: var(--fg-faint);
+}
+
+.search-bar input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  padding: 0;
+}
+
+.search-bar input::placeholder {
+  color: var(--fg-faint);
+}
+
+.results {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 8px;
+  scrollbar-width: thin;
+}
+
+.results::-webkit-scrollbar {
+  width: 5px;
+}
+
+.results::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: var(--rail);
+}
+
+.result {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.result:hover,
+.result.active {
+  background: var(--hover);
+}
+
+.result img {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--hover);
+}
+
+.result-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.result-title,
+.result-sub {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.result-sub {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  line-height: 1.35;
+}
+
+.search-note {
+  flex: 0 0 auto;
+  padding: 10px 6px 2px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+.search-note[hidden] {
+  display: none;
+}
+
 /* ----------------------------------------------------------- menu-bar panel */
 
 /* The dropdown is anchored to the tray icon, so it must not be draggable, and
@@ -521,9 +703,282 @@ body.panel .player {
   padding: 16px;
 }
 
-/* Wide enough for the "−6:12" countdown. */
-body.panel .time {
-  min-width: 36px;
+/* ----------------------------------------------------------------- skins */
+
+/* Cinema — artwork bleeds off the right edge, text sits over the dark side,
+   a large play button floats at the leading edge of the art, and the seek bar
+   runs inline between previous and next. */
+
+body.skin-cinema .player {
+  position: relative;
+  display: block;
+  padding: 18px;
+}
+
+/* Artwork sits centred as a full-height band, faded out on every side so the
+   title can sit to its left and the play button to its right without either
+   landing on busy pixels. */
+body.skin-cinema .art {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 33%;
+  width: 45%;
+  height: auto;
+  align-self: stretch;
+  border-radius: 0;
+  box-shadow: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 32%, #000 72%, transparent 100%),
+    linear-gradient(0deg, transparent 4%, #000 36%);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(90deg, transparent 0, #000 32%, #000 72%, transparent 100%),
+    linear-gradient(0deg, transparent 4%, #000 36%);
+  mask-composite: intersect;
+}
+
+body.skin-cinema .meta {
+  position: relative;
+  height: 100%;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+body.skin-cinema .titles {
+  padding-right: 58%;
+  gap: 3px;
+}
+
+body.skin-cinema .title {
+  font-size: 15px;
+}
+
+body.skin-cinema .subtitle {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+body.skin-cinema .controls {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  column-gap: 10px;
+  padding-right: 78px; /* clears the out-of-flow play button */
+}
+
+body.skin-cinema .seek {
+  order: 2;
+  flex: 1 1 auto;
+}
+
+body.skin-cinema #btn-prev {
+  order: 1;
+}
+
+body.skin-cinema #btn-next {
+  order: 3;
+}
+
+body.skin-cinema #btn-like {
+  order: 4;
+}
+
+body.skin-cinema #btn-shuffle,
+body.skin-cinema .volume {
+  display: none;
+}
+
+/* The transport sits over the tail of the artwork, so lift the small glyphs off
+   it rather than relying on the faint colour alone. */
+body.skin-cinema .btn.sm {
+  color: var(--fg-dim);
+}
+
+body.skin-cinema .controls .btn svg {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+}
+
+/* Out of flow so it can sit over the artwork like the reference. */
+body.skin-cinema .btn.play {
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  margin: 0;
+  transform: translateY(-50%);
+}
+
+body.skin-cinema .btn.play:active {
+  transform: translateY(-50%) scale(0.94);
+}
+
+body.skin-cinema .btn.play svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Stack — square artwork with the titles beside it, a centred transport, a
+   full-bleed progress line, and the queue underneath. */
+
+body.skin-stack .player {
+  flex: 0 0 auto;
+  padding: 14px;
+  gap: 12px;
+}
+
+body.skin-stack .art {
+  width: 96px;
+  height: 96px;
+  border-radius: 12px;
+}
+
+body.skin-stack .meta {
+  gap: 12px;
+}
+
+body.skin-stack .titles {
+  text-align: right;
+  padding-right: 0;
+  gap: 1px;
+}
+
+body.skin-stack .title {
+  font-size: 15px;
+}
+
+body.skin-stack .controls {
+  justify-content: center;
+  column-gap: 12px;
+}
+
+body.skin-stack .btn.play {
+  width: 40px;
+  height: 40px;
+}
+
+body.skin-stack .btn.play svg {
+  width: 18px;
+  height: 18px;
+}
+
+body.skin-stack #btn-shuffle,
+body.skin-stack #btn-like,
+body.skin-stack .volume {
+  display: none;
+}
+
+/* Pull the bar back under the artwork so it spans the whole card. */
+body.skin-stack .seek {
+  order: 99;
+  flex: 0 0 auto;
+  width: calc(100% + 108px);
+  margin-left: -108px;
+}
+
+body.skin-stack .rail {
+  height: 4px;
+}
+
+body.skin-stack .upnext {
+  display: flex;
+}
+
+/* --------------------------------------------------------------- up next */
+
+/* Its own backdrop: the ambient artwork layer bleeds through the whole card, so
+   without this the queue's contrast depends on whatever cover is playing. */
+.upnext {
+  display: none;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 14px 14px;
+  background: var(--well);
+  box-shadow: inset 0 0.5px 0 var(--hairline);
+}
+
+.upnext[hidden] {
+  display: none;
+}
+
+.upnext-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg);
+  padding-bottom: 8px;
+}
+
+.upnext-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 40px;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+}
+
+.upnext-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--well-item);
+  text-align: left;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+
+.upnext-item:hover {
+  background: var(--hover);
+}
+
+.upnext-item:active {
+  transform: scale(0.97);
+}
+
+.upnext-item img {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--rail);
+}
+
+.upnext-text {
+  min-width: 0;
+}
+
+.upnext-name,
+.upnext-artist {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upnext-name {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--fg);
+  line-height: 1.3;
+}
+
+.upnext-artist {
+  font-size: 9.5px;
+  color: var(--fg-dim);
+  line-height: 1.3;
+}
+
+/* The queue sits on its own backdrop, so the ambient art must not bleed
+   through it and wash the text out. */
+body.skin-stack .ambient,
+body.skin-stack .scrim {
+  bottom: 142px;
 }
 
 /* --------------------------------------------------------------- compact */
@@ -534,6 +989,21 @@ body.panel .time {
 body.compact .player {
   padding: 11px;
   gap: 10px;
+}
+
+body.compact .corner {
+  top: 6px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+}
+
+body.compact .titles {
+  padding-right: 21px;
+}
+
+body.compact .search {
+  padding: 0 10px 8px;
 }
 
 body.compact .art {
@@ -574,7 +1044,6 @@ body.compact .seek {
   height: 9px;
 }
 
-body.compact .time,
 body.compact #btn-shuffle {
   display: none;
 }
@@ -626,7 +1095,8 @@ body.compact .setup p {
 
 .setup {
   position: relative;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;

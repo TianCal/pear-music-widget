@@ -1,11 +1,12 @@
 'use strict';
 
-const { app, ipcMain } = require('electron');
+const { app, ipcMain, BrowserWindow } = require('electron');
 
 const api = require('./api');
 const store = require('./store');
+const { parseSearchResults, findQueueIndex, parseQueueUpcoming } = require('./search');
 const { RealtimeClient } = require('./ws');
-const { createWindow, applyAppearance } = require('./window');
+const { createWindow, applyAppearance, applySkin, setSearchExpanded } = require('./window');
 const { createPanel } = require('./panel');
 const { createTray, openMusicApp } = require('./tray');
 
@@ -20,6 +21,7 @@ let win = null;
 let panel = null;
 let tray = null;
 let setAppearance = () => {};
+let setSkin = () => {};
 const realtime = new RealtimeClient();
 
 // ------------------------------------------------------------- player state
@@ -30,9 +32,11 @@ const realtime = new RealtimeClient();
 const state = {
   status: 'connecting',
   statusMessage: '',
+  skin: store.get('skin'),
   appearance: store.get('appearance'),
   song: null,
   cover: null,
+  upnext: [],
   isPlaying: false,
   position: 0,
   volume: 100,
@@ -146,6 +150,35 @@ const applySong = async (raw) => {
   ]);
   if (token !== coverToken) return; // a newer song won the race
   update({ cover, like: like?.state ?? null });
+  refreshUpNext().catch(() => {});
+};
+
+/**
+ * "Next tracks" for the stack skin. Only fetched when that skin is showing —
+ * it is an extra request plus artwork on every track change.
+ */
+let upnextToken = 0;
+
+const refreshUpNext = async () => {
+  if (store.get('skin') !== 'stack') {
+    if (state.upnext.length) update({ upnext: [] });
+    return;
+  }
+
+  const token = ++upnextToken;
+  const queue = await api.queries.queue().catch(() => null);
+  if (token !== upnextToken || !queue) return;
+
+  const items = parseQueueUpcoming(queue, 4);
+  const covers = await Promise.all(
+    items.map((item) => api.fetchCover(item.thumbnail).catch(() => null)),
+  );
+  if (token !== upnextToken) return;
+
+  const upnext = items.map((item, i) => ({ ...item, thumbnail: covers[i] }));
+  // Arrays are never === so compare identity by the ids they carry.
+  const key = (list) => list.map((i) => i.videoId).join(',');
+  if (key(upnext) !== key(state.upnext)) update({ upnext });
 };
 
 /** Ground truth pull — the websocket's initial values for shuffle/volume are
@@ -299,6 +332,65 @@ ipcMain.handle('widget:command', async (_event, name, payload) => {
   }
 });
 
+// -------------------------------------------------------------------- search
+
+let panelView = null;
+
+ipcMain.handle('widget:search-open', (event, open) => {
+  const sender = BrowserWindow.fromWebContents(event.sender);
+  if (!sender) return { ok: false };
+
+  if (panel && sender.id === panel.id) panelView?.setSearchExpanded(!!open);
+  else setSearchExpanded(sender, !!open);
+
+  return { ok: true };
+});
+
+ipcMain.handle('widget:search', async (_event, query) => {
+  if (typeof query !== 'string' || !query.trim()) return { ok: true, results: [] };
+  try {
+    const payload = await api.actions.search(query.trim());
+    const results = parseSearchResults(payload);
+
+    // Artwork goes through the main process for the same reason cover art does:
+    // the renderer's CSP allows data: URLs only.
+    const thumbnails = await Promise.all(
+      results.map((item) => api.fetchCover(item.thumbnail).catch(() => null)),
+    );
+    return {
+      ok: true,
+      results: results.map((item, i) => ({ ...item, thumbnail: thumbnails[i] })),
+    };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Search failed' };
+  }
+});
+
+ipcMain.handle('widget:play-result', async (_event, videoId) => {
+  if (typeof videoId !== 'string' || !videoId) return { ok: false };
+  try {
+    await api.actions.addToQueue(videoId, 'INSERT_AFTER_CURRENT_VIDEO');
+
+    // Jump to the track's actual queue index rather than pressing next: if the
+    // current song happens to end between the insert and the skip, next would
+    // land one past it and play the wrong thing.
+    const queue = await api.queries.queue().catch(() => null);
+    const index = findQueueIndex(queue, videoId);
+    if (index >= 0) await api.actions.setQueueIndex(index);
+    else await api.actions.next();
+
+    return { ok: true, index };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('widget:skin', (_event, skin) => {
+  if (!['classic', 'cinema', 'stack'].includes(skin)) return { ok: false };
+  setSkin(skin);
+  return { ok: true };
+});
+
 ipcMain.handle('widget:appearance', (_event, appearance) => {
   if (appearance !== 'normal' && appearance !== 'compact') return { ok: false };
   setAppearance(appearance);
@@ -320,7 +412,7 @@ app.whenReady().then(() => {
   // already the right size by then, so only the renderer needs telling.
   win = createWindow({ onAppearance: (appearance) => update({ appearance }) });
 
-  const panelView = createPanel();
+  panelView = createPanel();
   panel = panelView.panel;
 
   setAppearance = (appearance) => {
@@ -329,10 +421,18 @@ app.whenReady().then(() => {
     tray?.refresh();
   };
 
+  setSkin = (skin) => {
+    applySkin(win, skin);
+    update({ skin, appearance: store.get('appearance') });
+    refreshUpNext().catch(() => {});
+    tray?.refresh();
+  };
+
   tray = createTray({
     window: win,
     realtime,
     getState: () => state,
+    setSkin,
     setAppearance: (appearance) => setAppearance(appearance),
     togglePanel: (trayInstance) => panelView.toggle(trayInstance),
   });

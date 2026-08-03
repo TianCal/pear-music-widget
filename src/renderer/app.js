@@ -17,8 +17,8 @@ const el = {
   seek: $('seek'),
   fill: $('fill'),
   knob: $('knob'),
-  elapsed: $('elapsed'),
-  duration: $('duration'),
+  upnext: $('upnext'),
+  upnextGrid: $('upnext-grid'),
   play: $('btn-play'),
   playIcon: $('play-icon'),
   shuffle: $('btn-shuffle'),
@@ -29,6 +29,12 @@ const el = {
   volRail: $('vol-rail'),
   volFill: $('vol-fill'),
   volPop: document.querySelector('.vol-pop'),
+  cornerSearch: $('btn-search'),
+  search: $('search'),
+  searchInput: $('search-input'),
+  searchClose: $('search-close'),
+  results: $('results'),
+  searchNote: $('search-note'),
   setup: $('setup'),
   setupTitle: $('setup-title'),
   setupBody: $('setup-body'),
@@ -39,7 +45,9 @@ const el = {
 /** Latest snapshot from the main process. */
 let state = {
   status: 'connecting',
+  skin: 'classic',
   appearance: 'normal',
+  upnext: [],
   song: null,
   cover: null,
   isPlaying: false,
@@ -126,6 +134,10 @@ const STATUS_COPY = {
 const renderStatus = () => {
   const showSetup = state.status !== 'connected' || !state.song;
 
+  // Nothing to search against unless the API server is answering.
+  el.cornerSearch.hidden = state.status !== 'connected';
+  if (el.cornerSearch.hidden && searching) closeSearch();
+
   if (!showSetup) {
     el.setup.hidden = true;
     el.player.hidden = false;
@@ -182,8 +194,38 @@ const renderSong = () => {
     requestAnimationFrame(() => setupMarquee(el.subtitle));
   }
 
-  // In panel mode the right-hand readout counts down, so renderProgress owns it.
-  if (!IS_PANEL) el.duration.textContent = formatTime(song?.songDuration || 0);
+};
+
+const renderUpNext = () => {
+  el.upnext.hidden = state.skin !== 'stack';
+  if (el.upnext.hidden) return;
+
+  el.upnextGrid.replaceChildren();
+  for (const item of state.upnext) {
+    const row = document.createElement('button');
+    row.className = 'upnext-item';
+    row.type = 'button';
+    row.dataset.videoId = item.videoId;
+
+    const img = document.createElement('img');
+    img.alt = '';
+    if (item.thumbnail) img.src = item.thumbnail;
+
+    const text = document.createElement('span');
+    text.className = 'upnext-text';
+
+    const name = document.createElement('span');
+    name.className = 'upnext-name';
+    name.textContent = item.title;
+
+    const artist = document.createElement('span');
+    artist.className = 'upnext-artist';
+    artist.textContent = item.artist;
+
+    text.append(name, artist);
+    row.append(img, text);
+    el.upnextGrid.append(row);
+  }
 };
 
 const renderControls = () => {
@@ -221,11 +263,6 @@ const renderProgress = () => {
 
   el.fill.style.width = `${ratio * 100}%`;
   el.knob.style.left = `${ratio * 100}%`;
-  el.elapsed.textContent = formatTime(position);
-
-  if (IS_PANEL) {
-    el.duration.textContent = duration > 0 ? `−${formatTime(duration - position)}` : '0:00';
-  }
 };
 
 const tick = () => {
@@ -240,6 +277,7 @@ const applyState = (next) => {
   const playingChanged = next.isPlaying !== state.isPlaying;
   const songChanged = next.song?.videoId !== state.song?.videoId;
   const appearanceChanged = next.appearance !== state.appearance;
+  const skinChanged = next.skin !== state.skin;
 
   // Keep the level the user is actually setting while our own echoes drain.
   const heldVolume = holdingVolume() ? { volume: state.volume, muted: state.muted } : null;
@@ -251,10 +289,17 @@ const applyState = (next) => {
     state.muted = heldVolume.muted;
   }
 
+  if (skinChanged && !IS_PANEL) {
+    document.body.classList.remove('skin-cinema', 'skin-stack');
+    if (next.skin === 'cinema' || next.skin === 'stack') {
+      document.body.classList.add(`skin-${next.skin}`);
+    }
+  }
+
   // The dropdown has its own fixed size; only the floating widget follows the
   // Normal/Compact setting.
-  if (appearanceChanged && !IS_PANEL) {
-    document.body.classList.toggle('compact', next.appearance === 'compact');
+  if ((appearanceChanged || skinChanged) && !IS_PANEL) {
+    document.body.classList.toggle('compact', next.appearance === 'compact' && next.skin === 'classic');
     // Column widths and font sizes both changed, so the drift maths is stale.
     requestAnimationFrame(() => {
       setupMarquee(el.title);
@@ -274,8 +319,167 @@ const applyState = (next) => {
   renderStatus();
   renderSong();
   renderControls();
+  renderUpNext();
   renderProgress();
 };
+
+el.upnextGrid.addEventListener('click', (event) => {
+  const row = event.target.closest('.upnext-item');
+  if (row?.dataset.videoId) window.widget.playResult(row.dataset.videoId);
+});
+
+// ------------------------------------------------------------------ search
+
+let searching = false;
+let searchSeq = 0;
+let searchTimer = null;
+let results = [];
+let activeResult = -1;
+
+const SEARCH_DEBOUNCE_MS = 400;
+
+const setNote = (text) => {
+  el.searchNote.textContent = text || '';
+  el.searchNote.hidden = !text;
+};
+
+const renderResults = () => {
+  el.results.replaceChildren();
+
+  results.forEach((item, index) => {
+    const row = document.createElement('button');
+    row.className = 'result';
+    row.type = 'button';
+    row.dataset.index = String(index);
+    if (index === activeResult) row.classList.add('active');
+
+    if (item.thumbnail) {
+      const img = document.createElement('img');
+      img.src = item.thumbnail;
+      img.alt = '';
+      row.append(img);
+    } else {
+      const blank = document.createElement('img');
+      blank.alt = '';
+      row.append(blank);
+    }
+
+    const text = document.createElement('span');
+    text.className = 'result-text';
+
+    const title = document.createElement('span');
+    title.className = 'result-title';
+    title.textContent = item.title;
+
+    const sub = document.createElement('span');
+    sub.className = 'result-sub';
+    sub.textContent = item.subtitle;
+
+    text.append(title, sub);
+    row.append(text);
+    el.results.append(row);
+  });
+};
+
+const highlight = (index) => {
+  if (!results.length) return;
+  activeResult = Math.min(results.length - 1, Math.max(0, index));
+  [...el.results.children].forEach((row, i) => row.classList.toggle('active', i === activeResult));
+  el.results.children[activeResult]?.scrollIntoView({ block: 'nearest' });
+};
+
+const runSearch = async (query) => {
+  const seq = ++searchSeq;
+  const trimmed = query.trim();
+
+  if (!trimmed) {
+    results = [];
+    activeResult = -1;
+    renderResults();
+    setNote('Type to search.');
+    return;
+  }
+
+  setNote('Searching…');
+  const res = await window.widget.search(trimmed);
+  if (seq !== searchSeq || !searching) return; // a newer query won, or we closed
+
+  if (!res?.ok) {
+    results = [];
+    renderResults();
+    setNote(res?.error || 'Search failed.');
+    return;
+  }
+
+  results = res.results || [];
+  activeResult = results.length ? 0 : -1;
+  renderResults();
+  setNote(results.length ? '' : 'No results.');
+};
+
+const openSearch = async () => {
+  if (searching || state.status !== 'connected') return;
+  searching = true;
+  document.body.classList.add('searching');
+  el.search.hidden = false;
+  results = [];
+  activeResult = -1;
+  renderResults();
+  setNote('Type to search.');
+  await window.widget.setSearchOpen(true);
+  el.searchInput.focus();
+  el.searchInput.select();
+};
+
+/** Local teardown; `pushed` is true when main already shrank the window for us. */
+const resetSearch = (pushed) => {
+  searching = false;
+  searchSeq += 1;
+  clearTimeout(searchTimer);
+  document.body.classList.remove('searching');
+  el.search.hidden = true;
+  el.searchInput.value = '';
+  results = [];
+  activeResult = -1;
+  el.results.replaceChildren();
+  if (!pushed) window.widget.setSearchOpen(false);
+};
+
+const closeSearch = () => {
+  if (!searching) return;
+  resetSearch(false);
+};
+
+el.cornerSearch.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (searching) closeSearch();
+  else openSearch();
+});
+
+el.searchClose.addEventListener('click', (event) => {
+  event.stopPropagation();
+  closeSearch();
+});
+
+el.searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const query = el.searchInput.value;
+  searchTimer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
+});
+
+el.results.addEventListener('click', (event) => {
+  const row = event.target.closest('.result');
+  if (!row) return;
+  const item = results[Number(row.dataset.index)];
+  if (!item) return;
+  window.widget.playResult(item.videoId);
+  closeSearch();
+});
+
+// The dropdown collapses itself when it loses focus; mirror that here.
+window.widget.onSearchCollapsed(() => {
+  if (searching) resetSearch(true);
+});
 
 // ---------------------------------------------------------------- commands
 
@@ -458,6 +662,7 @@ el.card.addEventListener(
   'wheel',
   (event) => {
     if (state.status !== 'connected') return;
+    if (searching) return; // the wheel belongs to the result list
     // With macOS natural scrolling, swiping up reports a positive deltaY, so
     // adding it is what makes "scroll up" raise the volume.
     const from = wheelVolume ?? (state.muted ? 0 : state.volume);
@@ -477,8 +682,37 @@ el.card.addEventListener(
 const VOLUME_STEP = 5;
 const VOLUME_STEP_FINE = 1;
 
+// While the search panel is open the arrows belong to the result list, and
+// Escape closes it. Volume only gets the keys once search is out of the way.
+document.addEventListener('keydown', (event) => {
+  if (!searching) return;
+
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeSearch();
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    highlight(activeResult + (event.key === 'ArrowDown' ? 1 : -1));
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    clearTimeout(searchTimer);
+    const item = results[activeResult];
+    if (item) {
+      window.widget.playResult(item.videoId);
+      closeSearch();
+    } else {
+      runSearch(el.searchInput.value);
+    }
+  }
+});
+
 // Up/down adjust volume whenever the widget or the dropdown has focus.
 document.addEventListener('keydown', (event) => {
+  if (searching) return;
   if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
   if (state.status !== 'connected') return;
 

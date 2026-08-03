@@ -37,7 +37,13 @@ const STATUS_LABEL = {
   denied: 'Authorisation denied',
 };
 
-const createTray = ({ window, realtime, getState, setAppearance, togglePanel }) => {
+const SKINS = [
+  { key: 'classic', label: 'Classic' },
+  { key: 'cinema', label: 'Cinema' },
+  { key: 'stack', label: 'Stack' },
+];
+
+const createTray = ({ window, realtime, getState, setSkin, setAppearance, togglePanel }) => {
   const tray = new Tray(ICONS.hollow);
   let iconVariant = 'hollow';
 
@@ -66,7 +72,18 @@ const createTray = ({ window, realtime, getState, setAppearance, togglePanel }) 
         },
       },
       {
+        label: 'Skin',
+        submenu: SKINS.map(({ key, label }) => ({
+          label,
+          type: 'radio',
+          checked: store.get('skin') === key,
+          click: () => setSkin(key),
+        })),
+      },
+      {
         label: 'Widget size',
+        // Only the classic skin has a second variant.
+        enabled: store.get('skin') === 'classic',
         submenu: [
           { key: 'normal', label: 'Normal' },
           { key: 'compact', label: 'Compact' },

@@ -13,20 +13,40 @@ const store = require('./store');
 // crossing the breakpoint never makes the window jump shape. What changes at the
 // breakpoint is the layout (and therefore the zoom factor the content is drawn
 // at): compact shows fewer controls, so it can render them larger in less space.
+// Each skin is its own layout with its own natural size and aspect ratio. Only
+// classic has two variants; the breakpoint below switches between them as the
+// window is dragged. Dropping the elapsed/duration readouts is what let the
+// classic sizes come down from 420x142.
 const BASE = {
-  normal: { width: 420, height: 142 },
-  compact: { width: 340, height: 115 },
+  classic: {
+    normal: { width: 360, height: 132 },
+    compact: { width: 280, height: 103 },
+  },
+  cinema: { normal: { width: 390, height: 168 } },
+  stack: { normal: { width: 330, height: 284 } },
 };
 
-const ASPECT = BASE.normal.width / BASE.normal.height;
-const heightFor = (width) => Math.round(width / ASPECT);
+const skinOf = () => (BASE[store.get('skin')] ? store.get('skin') : 'classic');
+const baseFor = (skin = skinOf(), appearance = store.get('appearance')) =>
+  BASE[skin]?.[appearance] || BASE[skin]?.normal || BASE.classic.normal;
+
+const aspectOf = (skin = skinOf()) => {
+  const base = BASE[skin]?.normal || BASE.classic.normal;
+  return base.width / base.height;
+};
+
+const heightFor = (width, skin = skinOf()) => Math.round(width / aspectOf(skin));
 
 // Hysteresis, so a slow drag across the threshold does not flap.
-const TO_COMPACT_BELOW = 392;
-const TO_NORMAL_ABOVE = 412;
+const TO_COMPACT_BELOW = 330;
+const TO_NORMAL_ABOVE = 348;
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 760;
+
+// Height the search panel adds, in CSS pixels. Must match `.search` in
+// styles.css — the window grows by exactly what the panel occupies.
+const SEARCH_PANEL_CSS = 216;
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
@@ -56,7 +76,7 @@ const isOnScreen = (bounds, size) =>
  */
 const applyZoom = (win) => {
   const { width, height } = win.getBounds();
-  const base = BASE[store.get('appearance')] || BASE.normal;
+  const base = baseFor();
   // Take the tighter of the two axes. Rounding the window height to whole pixels
   // can leave it a fraction short of the ratio, and scaling on width alone would
   // then clip the last row by a pixel.
@@ -70,7 +90,7 @@ const applyZoom = (win) => {
 const savedSize = () => {
   const saved = store.get('bounds');
   const width = saved?.width ? clamp(saved.width, MIN_WIDTH, MAX_WIDTH) : null;
-  if (!width) return BASE[store.get('appearance')] || BASE.normal;
+  if (!width) return baseFor();
   return { width, height: heightFor(width) };
 };
 
@@ -105,7 +125,7 @@ const createWindow = ({ onAppearance } = {}) => {
     },
   });
 
-  win.setAspectRatio(ASPECT);
+  win.setAspectRatio(aspectOf());
   win.setMinimumSize(MIN_WIDTH, heightFor(MIN_WIDTH));
   win.setMaximumSize(MAX_WIDTH, heightFor(MAX_WIDTH));
   win.setAlwaysOnTop(store.get('alwaysOnTop'), 'floating');
@@ -133,11 +153,17 @@ const createWindow = ({ onAppearance } = {}) => {
   win.on('moved', persist);
 
   win.on('resize', () => {
+    // Growing for the search panel is our own doing: it must not be persisted
+    // as the user's preferred size, nor re-evaluated against the breakpoint.
+    if (win.searchExpanded) return;
+
     const { width } = win.getBounds();
     const current = store.get('appearance');
 
+    // Only classic has a second variant to switch to.
     let next = current;
-    if (current === 'normal' && width < TO_COMPACT_BELOW) next = 'compact';
+    if (skinOf() !== 'classic') next = 'normal';
+    else if (current === 'normal' && width < TO_COMPACT_BELOW) next = 'compact';
     else if (current === 'compact' && width > TO_NORMAL_ABOVE) next = 'normal';
 
     if (next !== current) {
@@ -152,11 +178,50 @@ const createWindow = ({ onAppearance } = {}) => {
 };
 
 /**
+ * Grow the widget downwards to make room for the search panel, and put it back
+ * afterwards. The aspect ratio has to be released while expanded or a drag would
+ * snap the panel away, and the collapsed bounds are remembered rather than
+ * recomputed so an odd size the user chose survives the round trip.
+ */
+const setSearchExpanded = (win, open) => {
+  if (!win || win.isDestroyed() || !!win.searchExpanded === open) return;
+
+  if (open) {
+    const collapsed = win.getBounds();
+    win.collapsedBounds = collapsed;
+    win.searchExpanded = true;
+
+    const extra = Math.round(SEARCH_PANEL_CSS * win.webContents.getZoomFactor());
+    const height = collapsed.height + extra;
+
+    // Slide up if the taller window would hang off the bottom of the screen.
+    const { workArea } = screen.getDisplayMatching(collapsed);
+    const maxY = workArea.y + workArea.height - height;
+    const y = Math.round(Math.min(collapsed.y, Math.max(workArea.y, maxY)));
+
+    win.setAspectRatio(0);
+    win.setMinimumSize(MIN_WIDTH, 80);
+    win.setMaximumSize(MAX_WIDTH, 4000);
+    win.setBounds({ x: collapsed.x, y, width: collapsed.width, height }, false);
+    return;
+  }
+
+  const collapsed = win.collapsedBounds;
+  win.setMinimumSize(MIN_WIDTH, heightFor(MIN_WIDTH));
+  win.setMaximumSize(MAX_WIDTH, heightFor(MAX_WIDTH));
+  if (collapsed) win.setBounds(collapsed, false);
+  win.setAspectRatio(aspectOf());
+
+  win.searchExpanded = false;
+  win.collapsedBounds = null;
+};
+
+/**
  * Jump to a layout's natural size from the menu, pinning whichever corner of the
  * window is nearest a screen corner so a widget parked bottom-right stays there.
  */
-const applyAppearance = (win, appearance) => {
-  const next = BASE[appearance] || BASE.normal;
+/** Resize to `next`, pinning whichever corner of the window is nearest a screen corner. */
+const resizeKeepingCorner = (win, next) => {
   const current = win.getBounds();
   const { workArea } = screen.getDisplayMatching(current);
 
@@ -168,16 +233,52 @@ const applyAppearance = (win, appearance) => {
   const x = Math.round(distRight < distLeft ? current.x + current.width - next.width : current.x);
   const y = Math.round(distBottom < distTop ? current.y + current.height - next.height : current.y);
 
-  store.set({ appearance, bounds: { x, y, ...next } });
   win.setBounds({ x, y, ...next }, false);
+  return { x, y, ...next };
+};
+
+const applyAppearance = (win, appearance) => {
+  store.set({ appearance });
+  const bounds = resizeKeepingCorner(win, baseFor(skinOf(), appearance));
+  store.set({ bounds });
+  applyZoom(win);
+};
+
+/**
+ * Switch layout wholesale. Each skin has its own aspect ratio, so the lock has
+ * to be re-set or the next drag would snap the window back to the old shape.
+ */
+const applySkin = (win, skin) => {
+  if (!BASE[skin]) return;
+  const appearance = BASE[skin].compact ? store.get('appearance') : 'normal';
+  store.set({ skin, appearance });
+
+  win.setAspectRatio(0);
+  win.setMinimumSize(MIN_WIDTH, 40);
+  win.setMaximumSize(MAX_WIDTH, 4000);
+
+  const bounds = resizeKeepingCorner(win, baseFor(skin, appearance));
+  store.set({ bounds });
+
+  win.setMinimumSize(MIN_WIDTH, heightFor(MIN_WIDTH, skin));
+  win.setMaximumSize(MAX_WIDTH, heightFor(MAX_WIDTH, skin));
+  win.setAspectRatio(aspectOf(skin));
   applyZoom(win);
 };
 
 const resetPosition = (win) => {
-  const size = { width: win.getBounds().width, height: win.getBounds().height };
-  const { x, y } = defaultPosition(size);
+  const { width, height } = win.getBounds();
+  const { x, y } = defaultPosition({ width, height });
   win.setPosition(x, y, true);
-  store.set({ bounds: { x, y, ...size } });
+  store.set({ bounds: { x, y, width, height } });
 };
 
-module.exports = { createWindow, resetPosition, applyAppearance, BASE, ASPECT };
+module.exports = {
+  createWindow,
+  resetPosition,
+  applyAppearance,
+  applySkin,
+  setSearchExpanded,
+  BASE,
+  SEARCH_PANEL_CSS,
+};

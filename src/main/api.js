@@ -62,7 +62,7 @@ const clearToken = () => store.set({ token: null });
  * Authenticated request against /api/v1. Retries once with a fresh token on 401/403,
  * which covers the case where the API server's secret was regenerated.
  */
-const request = async (method, path, body, { retry = true } = {}) => {
+const request = async (method, path, body, { retry = true, timeout = 4000 } = {}) => {
   const token = await ensureToken();
 
   let res;
@@ -74,7 +74,7 @@ const request = async (method, path, body, { retry = true } = {}) => {
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeout),
     });
   } catch (err) {
     throw classify(err);
@@ -82,7 +82,7 @@ const request = async (method, path, body, { retry = true } = {}) => {
 
   if ((res.status === 401 || res.status === 403) && retry) {
     clearToken();
-    return request(method, path, body, { retry: false });
+    return request(method, path, body, { retry: false, timeout });
   }
   if (res.status === 401 || res.status === 403) {
     clearToken();
@@ -101,7 +101,8 @@ const request = async (method, path, body, { retry = true } = {}) => {
 };
 
 const get = (path) => request('GET', path);
-const post = (path, body) => request('POST', path, body);
+const post = (path, body, options) => request('POST', path, body, options);
+const patch = (path, body) => request('PATCH', path, body);
 
 // ---------------------------------------------------------------- cover art
 
@@ -149,6 +150,11 @@ const actions = {
   like: () => post('/like'),
   dislike: () => post('/dislike'),
   shuffle: () => post('/shuffle'),
+  // The search payload is ~270KB and takes a second or two; 4s is not enough.
+  search: (query) => post('/search', { query }, { timeout: 15000 }),
+  addToQueue: (videoId, insertPosition = 'INSERT_AFTER_CURRENT_VIDEO') =>
+    post('/queue', { videoId, insertPosition }),
+  setQueueIndex: (index) => patch('/queue', { index }),
 };
 
 // /repeat-mode is intentionally not used: it answers null unconditionally on the
@@ -158,6 +164,7 @@ const queries = {
   likeState: () => get('/like-state'),
   shuffleState: () => get('/shuffle'),
   volumeState: () => get('/volume'),
+  queue: () => get('/queue'),
 };
 
 module.exports = {
