@@ -94,6 +94,18 @@ one, so the button was dropped rather than shipped lying. If a later build
 starts reporting the mode, re-adding it is `queries.repeatMode` in
 `src/main/api.js` plus a button in the controls row.
 
+## Download
+
+Grab the DMG from [the latest release](https://github.com/TianCal/pear-music-widget/releases/latest),
+open it, and drag the app onto Applications.
+
+It is ad-hoc signed but not notarised, so a downloaded copy arrives quarantined —
+right-click → Open the first time, or:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Pear Music Widget.app"
+```
+
 ## Requirements
 
 - macOS
