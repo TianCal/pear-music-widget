@@ -465,6 +465,7 @@ const setPanel = (which) => {
   el.search.hidden = which !== 'search';
   el.lyrics.hidden = which !== 'lyrics';
   el.cornerLyrics.classList.toggle('on', which === 'lyrics');
+  el.cornerSearch.classList.toggle('on', which === 'search');
   return window.widget.setPanel(which);
 };
 
@@ -582,6 +583,7 @@ const resetSearch = (pushed) => {
     el.search.hidden = true;
     el.lyrics.hidden = true;
     el.cornerLyrics.classList.remove('on');
+    el.cornerSearch.classList.remove('on');
   } else {
     setPanel(null);
   }
@@ -626,6 +628,7 @@ window.widget.onPanelCollapsed(() => {
     document.body.classList.remove('panel-open');
     el.lyrics.hidden = true;
     el.cornerLyrics.classList.remove('on');
+    el.cornerSearch.classList.remove('on');
   }
 });
 
@@ -856,6 +859,11 @@ const VOLUME_STEP_FINE = 1;
 // While the search panel is open the arrows belong to the result list, and
 // Escape closes it. Volume only gets the keys once search is out of the way.
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !searching && openPanel) {
+    event.preventDefault();
+    setPanel(null);
+    return;
+  }
   if (!searching) return;
 
   if (event.key === 'Escape') {
