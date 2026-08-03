@@ -192,6 +192,18 @@ and hides instead, releasing only once `before-quit` has fired. The menus are
 independently hardened: `alive(win)` guards every window access, so a dead
 window greys those items out rather than throwing.
 
+## Double click opens the music app
+
+The listener is on `.art`, which sets `-webkit-app-region: no-drag`. A
+document-level `dblclick` listener is there too, but do not rely on it alone:
+mouse events inside a drag region are consumed by the window-move machinery and
+never reach the page — the same reason every button needs `no-drag`. Anything
+that must respond to a click has to opt out of the drag region first.
+
+Note when testing from the console: `window.widget` is frozen by contextBridge,
+so monkey-patching `openApp` to count calls silently reverts and reads as zero.
+Test through the side effect (quit the app, fire the event, see if it launches).
+
 ## Quitting the music app
 
 `quitMusicApp` addresses YouTube Music by **bundle id**, not by name.

@@ -168,12 +168,17 @@ body.panel .resize-edges {
   display: none;
 }
 
+/* The artwork opts out of the drag region so it can receive a double click:
+   macOS hands mouse events in a drag region to the window-move machinery and
+   they never reach the page, which is the same reason buttons need no-drag. */
 .art {
   position: relative;
   flex: 0 0 auto;
   width: 104px;
   height: 104px;
   align-self: center;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
   border-radius: 14px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.08);

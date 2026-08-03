@@ -234,7 +234,12 @@ realtime.on('message', (msg) => {
       break;
     case 'VIDEO_CHANGED':
       applySong(msg.song).catch(() => {});
-      update({ position: msg.position ?? 0 });
+      // The payload carries the new track's paused flag; the player does not
+      // always follow a track change with a PLAYER_STATE_CHANGED.
+      update({
+        position: msg.position ?? 0,
+        isPlaying: msg.song ? !msg.song.isPaused : undefined,
+      });
       break;
     case 'PLAYER_STATE_CHANGED':
       update({ isPlaying: !!msg.isPlaying, position: msg.position ?? state.position });
@@ -276,10 +281,31 @@ setInterval(() => {
     .catch(() => {});
 }, 20000);
 
+// PLAYER_STATE_CHANGED only fires on the player's own play/pause events, so a
+// missed one would leave the wrong glyph up indefinitely. Reconcile against the
+// player often enough that it is never wrong for long.
+setInterval(() => {
+  if (state.status !== 'connected') return;
+  api.queries
+    .song()
+    .then((song) => {
+      if (!song || typeof song.isPaused !== 'boolean') return;
+      update({ isPlaying: !song.isPaused });
+    })
+    .catch(() => {});
+}, 5000);
+
 // -------------------------------------------------------------------- input
 
 const commands = {
-  togglePlay: () => api.actions.togglePlay(),
+  togglePlay: async () => {
+    // Flip our own copy first. The renderer updates optimistically for instant
+    // feedback, and POSITION_CHANGED arrives about once a second — without this
+    // the very next tick pushes the stale value straight back and the icon
+    // snaps to the wrong glyph. The server corrects us either way.
+    update({ isPlaying: !state.isPlaying });
+    await api.actions.togglePlay();
+  },
   next: () => api.actions.next(),
   previous: () => api.actions.previous(),
   seek: ({ seconds }) => api.actions.seekTo(Math.max(0, Math.round(seconds))),

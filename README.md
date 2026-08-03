@@ -34,7 +34,10 @@ widget still quits on its own.
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
-If YouTube Music is not running, pressing play launches it.
+If YouTube Music is not running, pressing play launches it. **Double-clicking the
+artwork** brings it to the front. The artwork rather than the whole card because
+macOS hands mouse events in a window's drag region to the window-move machinery
+— they never reach the page, which is the same reason buttons need `no-drag`.
 
 ## Skins
 

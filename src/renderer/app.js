@@ -483,6 +483,19 @@ window.widget.onSearchCollapsed(() => {
 
 window.widget.onOpenSearch(() => openSearch());
 
+// Double-clicking brings YouTube Music forward. The artwork is the guaranteed
+// target because it opts out of the drag region; the document-level listener
+// covers the rest of the card for the case where the events do get through.
+// Controls are excluded — a double click on one would fire it twice as well.
+const INTERACTIVE = 'button, input, .seek, .vol-hit, .result, .upnext-item';
+
+const openMusicApp = () => window.widget.openApp();
+
+document.addEventListener('dblclick', (event) => {
+  if (IS_PANEL || event.target.closest(INTERACTIVE)) return;
+  openMusicApp();
+});
+
 // Right-click anywhere on the widget for a subset of the menu-bar menu. Inputs
 // keep their own menu, and the heart already uses right-click for dislike.
 document.addEventListener('contextmenu', (event) => {
