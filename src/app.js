@@ -669,8 +669,6 @@ window.widget.onPanelCollapsed(() => {
   }
 });
 
-window.widget.onOpenSearch(() => openSearch());
-
 // Double-clicking brings YouTube Music forward. The artwork is the guaranteed
 // target because it opts out of the drag region; the document-level listener
 // covers the rest of the card for the case where the events do get through.

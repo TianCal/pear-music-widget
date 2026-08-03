@@ -46,7 +46,6 @@ window.widget = {
   playResult: (videoId) => invoke('play_result', { videoId }),
   setPanel: (which) => invoke('set_panel', { which }),
   contextMenu: () => invoke('context_menu'),
-  onOpenSearch: (handler) => on('open-search', handler),
   onPanelCollapsed: (handler) => on('panel-collapsed', handler),
   onZoom: (handler) => on('zoom', handler),
   retry: () => invoke('retry'),

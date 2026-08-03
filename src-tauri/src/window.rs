@@ -233,11 +233,13 @@ pub fn work_area_near(app: &AppHandle, x: f64, y: f64) -> Rect {
     )
 }
 
+/// Top right, inset from the work area — which already starts below the menu
+/// bar, so the widget clears it without knowing how tall it is.
 fn default_position(app: &AppHandle, size: (f64, f64)) -> Position {
     let area = primary_work_area(app);
     Position {
         x: (area.x + area.width - size.0 - 16.0).round(),
-        y: (area.y + area.height - size.1 - 16.0).round(),
+        y: (area.y + 16.0).round(),
     }
 }
 

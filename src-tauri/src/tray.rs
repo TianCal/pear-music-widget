@@ -12,7 +12,7 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::state::Core;
@@ -197,8 +197,6 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         app,
         &[
-            &MenuItem::with_id(app, "search", "Search…", alive, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
             &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
@@ -253,9 +251,6 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
     let widget = app.get_webview_window(WIDGET);
 
     match id {
-        "search" => {
-            let _ = app.emit_to(WIDGET, "open-search", ());
-        }
         "showWidget" => {
             if let Some(widget) = &widget {
                 if widget.is_visible().unwrap_or(false) {
