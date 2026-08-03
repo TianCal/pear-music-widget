@@ -327,6 +327,13 @@ widget follows you between Spaces and stays visible over a fullscreen app.
 
 ## Tray menu
 
+**Register the menu handler exactly once.** `Builder::on_menu_event` already
+receives the tray's menu *and* the widget's popup menu, so also passing one to
+`TrayIconBuilder::on_menu_event` runs every item twice. That is invisible for
+the idempotent items — setting a skin or an opacity twice is the same as once —
+and silently cancels every toggle, which is how "Show floating widget", "Always
+on top" and "Open at login" all came to do nothing at all.
+
 macOS renders whatever menu was last handed to the status item, so a checkbox
 built at the wrong moment stays wrong. The menu is rebuilt on every state change
 *and* on `TrayIconEvent::Enter` — the last moment before a click can open it.

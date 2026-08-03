@@ -366,7 +366,10 @@ pub fn create(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .menu(&build_tray_menu(app)?)
         // Left click drops down the player; right click opens settings.
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| handle_menu(app, event))
+        // No `on_menu_event` here on purpose. The builder's global handler
+        // already receives this menu's events *and* the widget's popup menu,
+        // so registering here too would run every item twice — which is
+        // invisible for the idempotent items and silently cancels the toggles.
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
             match event {
