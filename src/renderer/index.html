@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+    />
+    <title>Pear Music Widget</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5Z"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 4.5h2.2a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H8.5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Zm4.8 0h2.2a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-2.2a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Z"/></symbol>
+        <symbol id="i-prev" viewBox="0 0 24 24"><path d="M7 5.5a1 1 0 0 1 2 0v4.9l8.4-5.3A1 1 0 0 1 19 6v12a1 1 0 0 1-1.6.8L9 13.6v4.9a1 1 0 0 1-2 0Z"/></symbol>
+        <symbol id="i-next" viewBox="0 0 24 24"><path d="M17 5.5a1 1 0 0 0-2 0v4.9L6.6 5.1A1 1 0 0 0 5 6v12a1 1 0 0 0 1.6.8L15 13.6v4.9a1 1 0 0 0 2 0Z"/></symbol>
+        <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M17.3 3.8a1 1 0 0 1 1.4 0l2.5 2.5a1 1 0 0 1 0 1.4l-2.5 2.5a1 1 0 1 1-1.4-1.4l.8-.8h-1.5c-.9 0-1.4.3-2 1L14 10.2l-1.3-1.6.5-.6c1-1.2 2.1-1.8 3.6-1.8h1.4l-.9-.9a1 1 0 0 1 0-1.4ZM3 7.2a1 1 0 0 1 1-1h1.9c1.7 0 3 .8 4.1 2.1l4.3 5.3c.6.7 1.1 1 2 1h1.4l-.8-.8a1 1 0 1 1 1.4-1.4l2.5 2.5a1 1 0 0 1 0 1.4l-2.5 2.5a1 1 0 0 1-1.4-1.4l.8-.8h-1.5c-1.6 0-2.8-.7-3.9-2L8.5 9.5c-.7-.9-1.4-1.3-2.6-1.3H4a1 1 0 0 1-1-1Zm0 9.6a1 1 0 0 1 1-1h1.9c1.2 0 1.9-.4 2.6-1.3l.5-.6L10.4 15l-.4.5c-1.1 1.3-2.4 2.1-4.1 2.1H4a1 1 0 0 1-1-1Z"/></symbol>
+        <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3s-7.9-4.6-7.9-9.9A4.6 4.6 0 0 1 12 7.4a4.6 4.6 0 0 1 7.9 3c0 5.3-7.9 9.9-7.9 9.9Z"/></symbol>
+        <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11.4 4.2a1 1 0 0 1 1.6.8v14a1 1 0 0 1-1.6.8L6.8 16H4.5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4.5 8h2.3ZM16 8.8a1 1 0 0 1 1.4.2 5 5 0 0 1 0 6 1 1 0 1 1-1.6-1.2 3 3 0 0 0 0-3.6 1 1 0 0 1 .2-1.4Z"/></symbol>
+        <symbol id="i-muted" viewBox="0 0 24 24"><path d="M11.4 4.2a1 1 0 0 1 1.6.8v14a1 1 0 0 1-1.6.8L6.8 16H4.5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4.5 8h2.3Zm4.3 5a1 1 0 0 1 1.4 0l1.3 1.3 1.3-1.3a1 1 0 1 1 1.4 1.4L19.8 12l1.3 1.3a1 1 0 0 1-1.4 1.4l-1.3-1.3-1.3 1.3a1 1 0 0 1-1.4-1.4l1.3-1.3-1.3-1.3a1 1 0 0 1 0-1.4Z"/></symbol>
+        <symbol id="i-note" viewBox="0 0 24 24"><path d="M20 3.6a1 1 0 0 0-1.2-1L9.5 4.7a1 1 0 0 0-.8 1v9.2A3.6 3.6 0 1 0 10.7 18V9.5l7.3-1.6v4.6a3.6 3.6 0 1 0 2 3.2Z"/></symbol>
+      </defs>
+    </svg>
+
+    <div class="frame">
+      <div class="card" id="card">
+        <div class="ambient" id="ambient"></div>
+        <div class="scrim"></div>
+
+        <!-- A no-drag ring, otherwise the card's drag region swallows the
+             window's resize edges and the widget cannot be resized. -->
+        <div class="resize-edges" aria-hidden="true">
+          <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
+        </div>
+
+        <main class="player" id="player">
+          <div class="art">
+            <img id="cover" alt="" />
+            <div class="art-empty"><svg class="glyph"><use href="#i-note" /></svg></div>
+          </div>
+
+          <div class="meta">
+            <div class="titles">
+              <div class="marquee"><span class="title" id="title">Nothing playing</span></div>
+              <div class="marquee"><span class="subtitle" id="subtitle"></span></div>
+            </div>
+
+            <div class="seek" id="seek" role="slider" aria-label="Seek" tabindex="-1">
+              <div class="rail"><div class="fill" id="fill"></div></div>
+              <div class="knob" id="knob"></div>
+            </div>
+
+            <div class="row">
+              <span class="time" id="elapsed">0:00</span>
+
+              <div class="controls">
+                <button class="btn sm" id="btn-shuffle" data-cmd="shuffle" title="Shuffle">
+                  <svg><use href="#i-shuffle" /></svg>
+                </button>
+                <button class="btn" data-cmd="previous" title="Previous">
+                  <svg><use href="#i-prev" /></svg>
+                </button>
+                <button class="btn play" id="btn-play" data-cmd="togglePlay" title="Play/Pause">
+                  <svg id="play-icon"><use href="#i-play" /></svg>
+                </button>
+                <button class="btn" data-cmd="next" title="Next">
+                  <svg><use href="#i-next" /></svg>
+                </button>
+                <button class="btn sm" id="btn-like" data-cmd="like" title="Like">
+                  <svg><use href="#i-heart" /></svg>
+                </button>
+                <div class="volume" id="volume">
+                  <button class="btn sm" id="btn-mute" data-cmd="toggleMute" title="Volume">
+                    <svg id="volume-icon"><use href="#i-volume" /></svg>
+                  </button>
+                  <div class="vol-pop">
+                    <div class="vol-panel">
+                      <div class="vol-hit" id="vol-hit">
+                        <div class="vol-rail" id="vol-rail"><div class="vol-fill" id="vol-fill"></div></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <span class="time" id="duration">0:00</span>
+            </div>
+          </div>
+        </main>
+
+        <section class="setup" id="setup" hidden>
+          <div class="setup-icon"><span class="pulse"></span></div>
+          <h1 id="setup-title">Connecting…</h1>
+          <p id="setup-body">Looking for the YouTube Music API server.</p>
+          <div class="setup-actions">
+            <button class="pill" id="setup-open">Open YouTube Music</button>
+            <button class="pill ghost" id="setup-retry">Retry</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="palette.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,717 @@
+/* --------------------------------------------------------------- tokens */
+
+:root {
+  /* Matches the corner radius macOS applies to a frameless roundedCorners window. */
+  --radius: 12px;
+  --accent: #ff5a6e;
+  --accent-soft: rgba(255, 90, 110, 0.28);
+
+  --fg: rgba(255, 255, 255, 0.97);
+  --fg-dim: rgba(255, 255, 255, 0.62);
+  --fg-faint: rgba(255, 255, 255, 0.34);
+  --surface: rgba(22, 22, 26, 0.52);
+  --hairline: rgba(255, 255, 255, 0.14);
+  --rail: rgba(255, 255, 255, 0.2);
+  --hover: rgba(255, 255, 255, 0.12);
+  --shadow: 0 18px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --fg: rgba(16, 16, 20, 0.95);
+    --fg-dim: rgba(16, 16, 20, 0.58);
+    --fg-faint: rgba(16, 16, 20, 0.3);
+    --surface: rgba(255, 255, 255, 0.5);
+    --hairline: rgba(0, 0, 0, 0.1);
+    --rail: rgba(0, 0, 0, 0.16);
+    --hover: rgba(0, 0, 0, 0.08);
+    --shadow: 0 16px 36px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.12);
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+  user-select: none;
+}
+
+/* ---------------------------------------------------------------- shell */
+
+.frame {
+  width: 100%;
+  height: 100%;
+}
+
+/* The window itself is the card: macOS clips the corners and draws the shadow,
+   so this only paints the translucent surface on top of the vibrancy layer. */
+.card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+  -webkit-app-region: drag;
+}
+
+/* Frameless windows resize from their edges, but only where the OS can see the
+   mouse — the card's drag region would otherwise claim the whole border. */
+.resize-edges .edge {
+  position: absolute;
+  z-index: 30;
+  -webkit-app-region: no-drag;
+}
+
+.resize-edges .n,
+.resize-edges .s {
+  left: 0;
+  right: 0;
+  height: 5px;
+}
+
+.resize-edges .n {
+  top: 0;
+}
+
+.resize-edges .s {
+  bottom: 0;
+}
+
+.resize-edges .w,
+.resize-edges .e {
+  top: 0;
+  bottom: 0;
+  width: 5px;
+}
+
+.resize-edges .w {
+  left: 0;
+}
+
+.resize-edges .e {
+  right: 0;
+}
+
+/* The dropdown is a fixed size and must stay put. */
+body.panel .resize-edges {
+  display: none;
+}
+
+/* Blurred cover art bled behind the content — the "ambient" layer. */
+.ambient {
+  position: absolute;
+  inset: -40%;
+  background-size: cover;
+  background-position: center;
+  filter: blur(34px) saturate(1.7);
+  opacity: 0;
+  transform: scale(1.15);
+  transition: opacity 0.6s ease, background-image 0.6s ease;
+  will-change: opacity;
+}
+
+.card.has-art .ambient {
+  opacity: 0.55;
+}
+
+@media (prefers-color-scheme: light) {
+  .card.has-art .ambient {
+    opacity: 0.4;
+  }
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.24) 55%, rgba(0, 0, 0, 0.42) 100%);
+}
+
+@media (prefers-color-scheme: light) {
+  .scrim {
+    background: linear-gradient(105deg, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0.4) 55%, rgba(255, 255, 255, 0.6) 100%);
+  }
+}
+
+/* --------------------------------------------------------------- player */
+
+.player {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  height: 100%;
+  padding: 14px;
+}
+
+.player[hidden] {
+  display: none;
+}
+
+.art {
+  position: relative;
+  flex: 0 0 auto;
+  width: 104px;
+  height: 104px;
+  align-self: center;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4), inset 0 0 0 0.5px var(--hairline);
+}
+
+.art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+
+.card.has-art .art img {
+  opacity: 1;
+}
+
+.art-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transition: opacity 0.3s ease;
+}
+
+.card.has-art .art-empty {
+  opacity: 0;
+}
+
+.art-empty .glyph {
+  width: 34px;
+  height: 34px;
+  fill: var(--fg-faint);
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* --------------------------------------------------------------- titles */
+
+.titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.marquee {
+  position: relative;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Only feather the edges once the text is actually drifting; a static title
+   should sit flush against the left edge of its column. The negative margin
+   moves the left fade into the gutter beside the artwork, so the first
+   character stays fully opaque at rest. */
+.marquee.scroll {
+  padding-left: 14px; /* == the flex gap, so the fade never reaches the artwork */
+  margin-left: -14px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
+
+.title,
+.subtitle {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.title {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.subtitle {
+  font-size: 11.5px;
+  font-weight: 450;
+  color: var(--fg-dim);
+  line-height: 1.35;
+}
+
+.marquee.scroll .title,
+.marquee.scroll .subtitle {
+  animation: drift var(--drift-duration, 12s) ease-in-out infinite alternate;
+}
+
+@keyframes drift {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(var(--drift-distance, 0px));
+  }
+}
+
+/* ----------------------------------------------------------------- seek */
+
+.seek {
+  position: relative;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.rail {
+  width: 100%;
+  height: 3.5px;
+  border-radius: 99px;
+  background: var(--rail);
+  overflow: hidden;
+  transition: height 0.16s ease;
+}
+
+.seek:hover .rail,
+.seek.dragging .rail {
+  height: 6px;
+}
+
+.fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 99px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-soft);
+}
+
+.knob {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transform: translateY(-50%) scale(0);
+  transition: transform 0.16s ease;
+  pointer-events: none;
+}
+
+.seek:hover .knob,
+.seek.dragging .knob {
+  transform: translateY(-50%) scale(1);
+}
+
+/* ------------------------------------------------------------- controls */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.time {
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-faint);
+  flex: 0 0 auto;
+  min-width: 28px;
+}
+
+.time:last-child {
+  text-align: right;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s ease, transform 0.12s ease, color 0.15s ease;
+}
+
+.btn svg {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.btn.sm {
+  width: 24px;
+  height: 24px;
+  color: var(--fg-faint);
+}
+
+.btn.sm svg {
+  width: 15px;
+  height: 15px;
+}
+
+.btn:hover {
+  background: var(--hover);
+}
+
+.btn.sm:hover {
+  color: var(--fg-dim);
+}
+
+.btn:active {
+  transform: scale(0.9);
+}
+
+.btn.on {
+  color: var(--accent);
+}
+
+.btn.on:hover {
+  color: var(--accent);
+}
+
+.btn.play {
+  width: 34px;
+  height: 34px;
+  margin: 0 3px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 3px 12px var(--accent-soft);
+}
+
+.btn.play svg {
+  width: 17px;
+  height: 17px;
+}
+
+.btn.play:hover {
+  background: var(--accent);
+  filter: brightness(1.12);
+}
+
+/* --------------------------------------------------------------- volume */
+
+.volume {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* The wrapper is deliberately padded rather than offset: its bottom edge meets
+   the button, so moving the cursor up onto the slider never crosses a gap where
+   :hover would drop. The visible panel sits inside the padding. */
+.vol-pop {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, 4px);
+  padding: 0 14px 7px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  -webkit-app-region: no-drag;
+}
+
+.vol-panel {
+  padding: 4px 11px;
+  border-radius: 11px;
+  background: rgba(28, 28, 32, 0.94);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4), inset 0 0 0 0.5px var(--hairline);
+}
+
+@media (prefers-color-scheme: light) {
+  .vol-panel {
+    background: rgba(250, 250, 252, 0.96);
+  }
+}
+
+.volume:hover .vol-pop,
+.vol-pop.dragging {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+/* Generous invisible hit area around a deliberately thin rail. */
+.vol-hit {
+  padding: 8px 0;
+  cursor: pointer;
+}
+
+.vol-rail {
+  width: 84px;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--rail);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.vol-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+}
+
+/* ----------------------------------------------------------- menu-bar panel */
+
+/* The dropdown is anchored to the tray icon, so it must not be draggable, and
+   it sits on the 'menu' vibrancy material rather than 'under-window'. */
+
+body.panel .card {
+  -webkit-app-region: no-drag;
+}
+
+body.panel .player {
+  padding: 16px;
+}
+
+/* Wide enough for the "−6:12" countdown. */
+body.panel .time {
+  min-width: 36px;
+}
+
+/* --------------------------------------------------------------- compact */
+
+/* Same markup, tighter box: artwork, titles, a seek bar, and previous / play /
+   next / like / volume. Shuffle and the time readouts are what get dropped. */
+
+body.compact .player {
+  padding: 11px;
+  gap: 10px;
+}
+
+body.compact .art {
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
+}
+
+body.compact .art-empty .glyph {
+  width: 24px;
+  height: 24px;
+}
+
+body.compact .meta {
+  gap: 7px;
+}
+
+body.compact .titles {
+  gap: 1px;
+}
+
+body.compact .title {
+  font-size: 13px;
+}
+
+body.compact .subtitle {
+  font-size: 11px;
+}
+
+body.compact .marquee.scroll {
+  padding-left: 10px; /* == the compact flex gap */
+  margin-left: -10px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+}
+
+body.compact .seek {
+  height: 9px;
+}
+
+body.compact .time,
+body.compact #btn-shuffle {
+  display: none;
+}
+
+body.compact .controls {
+  gap: 4px;
+}
+
+body.compact .btn {
+  width: 26px;
+  height: 26px;
+}
+
+body.compact .btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+body.compact .btn.sm {
+  width: 24px;
+  height: 24px;
+}
+
+body.compact .btn.sm svg {
+  width: 14px;
+  height: 14px;
+}
+
+body.compact .btn.play {
+  width: 30px;
+  height: 30px;
+}
+
+body.compact .btn.play svg {
+  width: 15px;
+  height: 15px;
+}
+
+body.compact .setup {
+  padding: 12px 18px;
+  gap: 3px;
+}
+
+body.compact .setup h1 {
+  font-size: 12px;
+}
+
+body.compact .setup p {
+  font-size: 10px;
+}
+
+/* ---------------------------------------------------------------- setup */
+
+.setup {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 16px 26px;
+  text-align: center;
+}
+
+.setup[hidden] {
+  display: none;
+}
+
+.setup-icon {
+  display: grid;
+  place-items: center;
+  height: 14px;
+  margin-bottom: 2px;
+}
+
+.pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent-soft);
+  animation: pulse 1.9s ease-out infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  70% {
+    box-shadow: 0 0 0 11px rgba(0, 0, 0, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+  }
+}
+
+.setup h1 {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.setup p {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  max-width: 320px;
+}
+
+.setup p code {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.setup-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.pill {
+  -webkit-app-region: no-drag;
+  border: 0;
+  border-radius: 99px;
+  padding: 5px 15px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.12s ease;
+}
+
+.pill:hover {
+  filter: brightness(1.12);
+}
+
+.pill:active {
+  transform: scale(0.96);
+}
+
+.pill.ghost {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.pill[hidden] {
+  display: none;
+}
