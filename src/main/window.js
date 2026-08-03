@@ -22,7 +22,6 @@ const BASE = {
     normal: { width: 360, height: 132 },
     compact: { width: 280, height: 103 },
   },
-  cinema: { normal: { width: 390, height: 168 } },
   stack: { normal: { width: 330, height: 284 } },
 };
 
@@ -275,6 +274,7 @@ const resetPosition = (win) => {
 
 module.exports = {
   createWindow,
+  skinOf,
   resetPosition,
   applyAppearance,
   applySkin,

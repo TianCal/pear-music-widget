@@ -39,9 +39,89 @@ const STATUS_LABEL = {
 
 const SKINS = [
   { key: 'classic', label: 'Classic' },
-  { key: 'cinema', label: 'Cinema' },
   { key: 'stack', label: 'Stack' },
 ];
+
+// Shared between the menu-bar menu and the widget's own right-click menu, so
+// the two can never drift apart.
+const items = {
+  skin: (setSkin) => ({
+    label: 'Skin',
+    submenu: SKINS.map(({ key, label }) => ({
+      label,
+      type: 'radio',
+      checked: store.get('skin') === key,
+      click: () => setSkin(key),
+    })),
+  }),
+
+  size: (setAppearance) => ({
+    label: 'Widget size',
+    // Only the classic skin has a second variant.
+    enabled: store.get('skin') === 'classic',
+    submenu: [
+      { key: 'normal', label: 'Normal' },
+      { key: 'compact', label: 'Compact' },
+    ].map(({ key, label }) => ({
+      label,
+      type: 'radio',
+      checked: store.get('appearance') === key,
+      click: () => setAppearance(key),
+    })),
+  }),
+
+  opacity: (window) => ({
+    label: 'Opacity',
+    submenu: [100, 90, 80, 70, 60].map((pct) => ({
+      label: `${pct}%`,
+      type: 'radio',
+      checked: Math.round(store.get('opacity') * 100) === pct,
+      click: () => {
+        store.set({ opacity: pct / 100 });
+        window.setOpacity(pct / 100);
+      },
+    })),
+  }),
+
+  alwaysOnTop: (window) => ({
+    label: 'Always on top',
+    type: 'checkbox',
+    checked: store.get('alwaysOnTop'),
+    click: (item) => {
+      store.set({ alwaysOnTop: item.checked });
+      window.setAlwaysOnTop(item.checked, 'floating');
+    },
+  }),
+
+  resetPosition: (window) => ({
+    label: 'Reset position',
+    click: () => resetPosition(window),
+  }),
+
+  openApp: () => ({ label: 'Open YouTube Music', click: openMusicApp }),
+
+  quit: () => ({ label: 'Quit', accelerator: 'Command+Q', click: () => app.quit() }),
+};
+
+/**
+ * Right-click menu for the floating widget itself: the things you would want
+ * while looking at it, minus the app-level plumbing that belongs in the tray.
+ */
+const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
+  Menu.buildFromTemplate([
+    { label: 'Search…', click: () => window.webContents.send('open-search') },
+    { type: 'separator' },
+    items.skin(setSkin),
+    items.size(setAppearance),
+    items.opacity(window),
+    items.alwaysOnTop(window),
+    { type: 'separator' },
+    items.resetPosition(window),
+    { label: 'Hide widget', click: () => window.hide() },
+    { type: 'separator' },
+    items.openApp(),
+    items.quit(),
+  ]);
 
 const createTray = ({ window, realtime, getState, setSkin, setAppearance, togglePanel }) => {
   const tray = new Tray(ICONS.hollow);
@@ -62,51 +142,11 @@ const createTray = ({ window, realtime, getState, setSkin, setAppearance, toggle
         checked: window.isVisible(),
         click: (item) => (item.checked ? window.showInactive() : window.hide()),
       },
-      {
-        label: 'Always on top',
-        type: 'checkbox',
-        checked: store.get('alwaysOnTop'),
-        click: (item) => {
-          store.set({ alwaysOnTop: item.checked });
-          window.setAlwaysOnTop(item.checked, 'floating');
-        },
-      },
-      {
-        label: 'Skin',
-        submenu: SKINS.map(({ key, label }) => ({
-          label,
-          type: 'radio',
-          checked: store.get('skin') === key,
-          click: () => setSkin(key),
-        })),
-      },
-      {
-        label: 'Widget size',
-        // Only the classic skin has a second variant.
-        enabled: store.get('skin') === 'classic',
-        submenu: [
-          { key: 'normal', label: 'Normal' },
-          { key: 'compact', label: 'Compact' },
-        ].map(({ key, label }) => ({
-          label,
-          type: 'radio',
-          checked: store.get('appearance') === key,
-          click: () => setAppearance(key),
-        })),
-      },
-      {
-        label: 'Widget opacity',
-        submenu: [100, 90, 80, 70, 60].map((pct) => ({
-          label: `${pct}%`,
-          type: 'radio',
-          checked: Math.round(store.get('opacity') * 100) === pct,
-          click: () => {
-            store.set({ opacity: pct / 100 });
-            window.setOpacity(pct / 100);
-          },
-        })),
-      },
-      { label: 'Reset widget position', click: () => resetPosition(window) },
+      items.alwaysOnTop(window),
+      items.skin(setSkin),
+      items.size(setAppearance),
+      items.opacity(window),
+      items.resetPosition(window),
       { type: 'separator' },
       {
         label: 'Open at login',
@@ -115,9 +155,9 @@ const createTray = ({ window, realtime, getState, setSkin, setAppearance, toggle
         click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
       },
       { label: 'Reconnect', click: () => realtime.retry() },
-      { label: 'Open YouTube Music', click: openMusicApp },
+      items.openApp(),
       { type: 'separator' },
-      { label: 'Quit', accelerator: 'Command+Q', click: () => app.quit() },
+      items.quit(),
     ]);
   };
 
@@ -146,4 +186,4 @@ const createTray = ({ window, realtime, getState, setSkin, setAppearance, toggle
   return { tray, refresh };
 };
 
-module.exports = { createTray, openMusicApp };
+module.exports = { createTray, buildWidgetMenu, openMusicApp };

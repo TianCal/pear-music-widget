@@ -290,10 +290,8 @@ const applyState = (next) => {
   }
 
   if (skinChanged && !IS_PANEL) {
-    document.body.classList.remove('skin-cinema', 'skin-stack');
-    if (next.skin === 'cinema' || next.skin === 'stack') {
-      document.body.classList.add(`skin-${next.skin}`);
-    }
+    document.body.classList.remove('skin-stack');
+    if (next.skin === 'stack') document.body.classList.add('skin-stack');
   }
 
   // The dropdown has its own fixed size; only the floating widget follows the
@@ -479,6 +477,16 @@ el.results.addEventListener('click', (event) => {
 // The dropdown collapses itself when it loses focus; mirror that here.
 window.widget.onSearchCollapsed(() => {
   if (searching) resetSearch(true);
+});
+
+window.widget.onOpenSearch(() => openSearch());
+
+// Right-click anywhere on the widget for a subset of the menu-bar menu. Inputs
+// keep their own menu, and the heart already uses right-click for dislike.
+document.addEventListener('contextmenu', (event) => {
+  if (IS_PANEL || event.target.closest('input')) return;
+  event.preventDefault();
+  window.widget.contextMenu();
 });
 
 // ---------------------------------------------------------------- commands

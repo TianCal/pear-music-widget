@@ -35,7 +35,7 @@ handed to the renderer as a `data:` URL, which keeps the renderer's CSP closed t
 the network *and* lets `<canvas>` read the pixels for colour extraction without
 cross-origin tainting. Do not fetch from the renderer.
 
-**One renderer, three presentations.** `index.html` is loaded twice — plain for
+**One renderer, several presentations.** `index.html` is loaded twice — plain for
 the widget, with `?mode=panel` for the dropdown. `app.js` branches on
 `IS_PANEL` for the two things that are not pure CSS: the dropdown ignores the
 Normal/Compact setting, and its right-hand readout counts down. Normal vs Compact
@@ -71,13 +71,14 @@ re-apply it — otherwise the next drag snaps the window back to the old shape.
 Only `classic` has a Compact variant, so the breakpoint in the `resize` handler
 is skipped for the others.
 
-The renderer expresses all three from **one DOM** via `body.skin-*` classes. The
+The renderer expresses both from **one DOM** via `body.skin-*` classes. The
 trick that makes that possible: the seek bar is a flex child of `.controls`
 rather than a sibling, so each skin places it with `order` alone — above the
-buttons (classic, via `flex-basis: 100%` and wrapping), inline between previous
-and next (cinema), or below them (stack). Cinema takes the play button out of
-flow to float it over the artwork, which is why `.controls` there needs a
-`padding-right` to stop the other buttons sliding underneath it.
+buttons (classic, via `flex-basis: 100%` and wrapping) or below them (stack).
+
+`.upnext` is `position: relative` for a reason: `.ambient` and `.scrim` are
+absolutely positioned siblings, and an unpositioned block paints *underneath*
+them, so the scrim washed the queue out until it was given a position.
 
 Stack's "Next tracks" comes from `GET /queue`, parsed by `parseQueueUpcoming`.
 It has its own `--well` backdrop because the ambient artwork layer bleeds
@@ -91,11 +92,15 @@ results, so `parseSearchResults` collects every `musicResponsiveListItemRenderer
 in the tree and keeps the ones carrying a videoId. Songs, albums and videos all
 use that renderer.
 
-Playing a result inserts it with `INSERT_AFTER_CURRENT_VIDEO` and then jumps to
-its **queue index** rather than pressing next: if the current song ends between
-the insert and the skip, next lands one past it. YouTube Music sometimes
-re-resolves the id when queueing, so when the index lookup misses it falls back
-to `next()`.
+Playing a result inserts it with `INSERT_AFTER_CURRENT_VIDEO`, then **polls the
+queue** until the slot after the playing track holds it, and jumps to that index.
+
+Do not shortcut this to `next()`. The insert returns `204` *before* YouTube Music
+has actually mutated its queue, so a `next()` fired straight after skips onto
+whatever was already queued — you click A, an unrelated track plays, and A only
+starts when you click something else. The poll accepts the slot either when it
+carries our videoId or when the queue has simply grown, since the id is
+occasionally re-resolved on insert.
 
 Opening the panel grows the window by `SEARCH_PANEL_CSS` (216, matching `.search`
 in the stylesheet). That growth must not be persisted as the user's preferred

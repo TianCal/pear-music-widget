@@ -93,6 +93,15 @@ const findQueueIndex = (queue, videoId) => {
   return items.findIndex((item) => contains(item));
 };
 
+/** Flat view of the queue: one entry per slot, with the playing one marked. */
+const queueEntries = (queue) => {
+  const items = Array.isArray(queue?.items) ? queue.items : [];
+  return items.map((item) => {
+    const renderer = videoRenderer(item);
+    return { videoId: renderer?.videoId || null, selected: renderer?.selected === true };
+  });
+};
+
 /** Queue items come either bare or wrapped; unwrap to the video renderer. */
 const videoRenderer = (item) =>
   item?.playlistPanelVideoRenderer ||
@@ -127,4 +136,10 @@ const parseQueueUpcoming = (queue, limit = 4) => {
   return out;
 };
 
-module.exports = { parseSearchResults, findQueueIndex, parseQueueUpcoming, MAX_RESULTS };
+module.exports = {
+  parseSearchResults,
+  findQueueIndex,
+  parseQueueUpcoming,
+  queueEntries,
+  MAX_RESULTS,
+};

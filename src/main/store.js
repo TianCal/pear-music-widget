@@ -10,7 +10,7 @@ const DEFAULTS = {
   clientId: 'PearMusicWidget',
   token: null,
   bounds: null,
-  skin: 'classic', // 'classic' | 'cinema' | 'stack'
+  skin: 'classic', // 'classic' | 'stack'
   appearance: 'normal', // 'normal' | 'compact' (classic only)
   alwaysOnTop: true,
   opacity: 1,

@@ -4,11 +4,17 @@ const { app, ipcMain, BrowserWindow } = require('electron');
 
 const api = require('./api');
 const store = require('./store');
-const { parseSearchResults, findQueueIndex, parseQueueUpcoming } = require('./search');
+const { parseSearchResults, parseQueueUpcoming, queueEntries } = require('./search');
 const { RealtimeClient } = require('./ws');
-const { createWindow, applyAppearance, applySkin, setSearchExpanded } = require('./window');
+const {
+  createWindow,
+  applyAppearance,
+  applySkin,
+  setSearchExpanded,
+  skinOf,
+} = require('./window');
 const { createPanel } = require('./panel');
-const { createTray, openMusicApp } = require('./tray');
+const { createTray, buildWidgetMenu, openMusicApp } = require('./tray');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -32,7 +38,7 @@ const realtime = new RealtimeClient();
 const state = {
   status: 'connecting',
   statusMessage: '',
-  skin: store.get('skin'),
+  skin: skinOf(),
   appearance: store.get('appearance'),
   song: null,
   cover: null,
@@ -334,6 +340,11 @@ ipcMain.handle('widget:command', async (_event, name, payload) => {
 
 // -------------------------------------------------------------------- search
 
+// Polling budget for a queued track to show up (see widget:play-result).
+const PLAY_POLL_ATTEMPTS = 20;
+const PLAY_POLL_MS = 150;
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 let panelView = null;
 
 ipcMain.handle('widget:search-open', (event, open) => {
@@ -369,24 +380,47 @@ ipcMain.handle('widget:search', async (_event, query) => {
 ipcMain.handle('widget:play-result', async (_event, videoId) => {
   if (typeof videoId !== 'string' || !videoId) return { ok: false };
   try {
+    const before = queueEntries(await api.queries.queue().catch(() => null));
+
     await api.actions.addToQueue(videoId, 'INSERT_AFTER_CURRENT_VIDEO');
 
-    // Jump to the track's actual queue index rather than pressing next: if the
-    // current song happens to end between the insert and the skip, next would
-    // land one past it and play the wrong thing.
-    const queue = await api.queries.queue().catch(() => null);
-    const index = findQueueIndex(queue, videoId);
-    if (index >= 0) await api.actions.setQueueIndex(index);
-    else await api.actions.next();
+    // The 204 comes back before YouTube Music has actually mutated its queue, so
+    // poll for the new slot instead of pressing next — next would skip onto
+    // whatever was already queued and play the wrong track.
+    for (let attempt = 0; attempt < PLAY_POLL_ATTEMPTS; attempt += 1) {
+      await delay(PLAY_POLL_MS);
 
-    return { ok: true, index };
+      const entries = queueEntries(await api.queries.queue().catch(() => null));
+      const current = entries.findIndex((entry) => entry.selected);
+      if (current < 0 || current + 1 >= entries.length) continue;
+
+      // INSERT_AFTER_CURRENT_VIDEO always lands in the slot after the playing
+      // track. Accept it once that slot holds our id, or — since the id is
+      // occasionally re-resolved on insert — once the queue has simply grown.
+      const landed =
+        entries[current + 1].videoId === videoId || entries.length > before.length;
+      if (!landed) continue;
+
+      await api.actions.setQueueIndex(current + 1);
+      return { ok: true, index: current + 1 };
+    }
+
+    return { ok: false, error: 'Queued, but it did not appear in time' };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
 
+// Right-clicking the floating widget gets a focused subset of the tray menu.
+// The dropdown is left alone: popping a menu over it would blur it shut.
+ipcMain.on('widget:context-menu', (event) => {
+  const sender = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !sender || sender.id !== win.id) return;
+  buildWidgetMenu({ window: win, setSkin, setAppearance }).popup({ window: win });
+});
+
 ipcMain.handle('widget:skin', (_event, skin) => {
-  if (!['classic', 'cinema', 'stack'].includes(skin)) return { ok: false };
+  if (!['classic', 'stack'].includes(skin)) return { ok: false };
   setSkin(skin);
   return { ok: true };
 });

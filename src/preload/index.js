@@ -16,6 +16,12 @@ contextBridge.exposeInMainWorld('widget', {
   search: (query) => ipcRenderer.invoke('widget:search', query),
   playResult: (videoId) => ipcRenderer.invoke('widget:play-result', videoId),
   setSearchOpen: (open) => ipcRenderer.invoke('widget:search-open', open),
+  contextMenu: () => ipcRenderer.send('widget:context-menu'),
+  onOpenSearch: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('open-search', listener);
+    return () => ipcRenderer.off('open-search', listener);
+  },
   onSearchCollapsed: (handler) => {
     const listener = () => handler();
     ipcRenderer.on('search-collapsed', listener);

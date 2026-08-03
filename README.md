@@ -33,12 +33,11 @@ If YouTube Music is not running, pressing play launches it.
 
 ## Skins
 
-Three layouts, switchable from the menu bar under **Skin**.
+Two layouts, switchable from the menu bar under **Skin**.
 
 | Skin | Natural size | Layout |
 | --- | --- | --- |
 | **Classic** | 360×132 | Artwork left, titles and transport right. Has a Compact variant (280×103) the widget switches to automatically as you drag it smaller. |
-| **Cinema** | 390×168 | Artwork centred as a full-height band faded into the card, title left, large play button on the right, transport along the bottom. |
 | **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the next four queued tracks below — click any to play it. |
 
 ## Search
