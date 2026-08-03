@@ -3,12 +3,12 @@
 const path = require('node:path');
 const { BrowserWindow, screen } = require('electron');
 
-const { hideInsteadOfClose } = require('./window');
+const store = require('./store');
+const { hideInsteadOfClose, panelSkinOf, baseFor } = require('./window');
 
-// Roughly the proportions of the system Now Playing popover. The width is set
-// by the control row, which needs ~188px for six buttons plus the artwork and
-// padding either side.
-const SIZE = { width: 370, height: 140 };
+// The dropdown renders whichever skin is configured for it, independently of the
+// floating widget, so its size follows that skin rather than being fixed.
+const sizeOf = () => baseFor(panelSkinOf());
 const EDGE_MARGIN = 8;
 const GAP_BELOW_MENU_BAR = 6;
 
@@ -22,7 +22,7 @@ const SEARCH_PANEL_CSS = 216;
 
 const createPanel = () => {
   const panel = new BrowserWindow({
-    ...SIZE,
+    ...sizeOf(),
     show: false,
     frame: false,
     transparent: false,
@@ -57,17 +57,27 @@ const createPanel = () => {
   let searchExpanded = false;
 
   /** Grow downwards for the search panel, clamped to the screen. */
-  const setSearchExpanded = (open) => {
-    if (open === searchExpanded) return;
-    searchExpanded = open;
-
+  const resize = (expanded) => {
+    const size = sizeOf();
     const bounds = panel.getBounds();
-    const height = open ? SIZE.height + SEARCH_PANEL_CSS : SIZE.height;
+    const height = size.height + (expanded ? SEARCH_PANEL_CSS : 0);
     const { workArea } = screen.getDisplayMatching(bounds);
     const maxY = workArea.y + workArea.height - height;
     const y = Math.round(Math.min(bounds.y, Math.max(workArea.y, maxY)));
 
-    panel.setBounds({ x: bounds.x, y, width: SIZE.width, height }, false);
+    panel.setBounds({ x: bounds.x, y, width: size.width, height }, false);
+  };
+
+  const setSearchExpanded = (open) => {
+    if (open === searchExpanded) return;
+    searchExpanded = open;
+    resize(open);
+  };
+
+  /** Switching the dropdown's skin changes its natural size. */
+  const applyPanelSkin = (skin) => {
+    store.set({ panelSkin: skin });
+    resize(searchExpanded);
   };
 
   const collapse = () => {
@@ -91,6 +101,7 @@ const createPanel = () => {
 
   /** Park the panel under the tray icon, clamped to the screen it sits on. */
   const position = (tray) => {
+    const size = sizeOf();
     const icon = tray.getBounds();
     const anchorX = icon.x + icon.width / 2;
     const { workArea } = screen.getDisplayNearestPoint({
@@ -99,11 +110,11 @@ const createPanel = () => {
     });
 
     const minX = workArea.x + EDGE_MARGIN;
-    const maxX = workArea.x + workArea.width - SIZE.width - EDGE_MARGIN;
-    const x = Math.round(Math.min(Math.max(anchorX - SIZE.width / 2, minX), maxX));
+    const maxX = workArea.x + workArea.width - size.width - EDGE_MARGIN;
+    const x = Math.round(Math.min(Math.max(anchorX - size.width / 2, minX), maxX));
     const y = Math.round(icon.y + icon.height + GAP_BELOW_MENU_BAR);
 
-    panel.setPosition(x, y, false);
+    panel.setBounds({ x, y, ...size }, false);
   };
 
   const toggle = (tray) => {
@@ -119,7 +130,7 @@ const createPanel = () => {
     panel.focus();
   };
 
-  return { panel, toggle, setSearchExpanded };
+  return { panel, toggle, setSearchExpanded, applyPanelSkin };
 };
 
-module.exports = { createPanel, PANEL_SIZE: SIZE };
+module.exports = { createPanel };

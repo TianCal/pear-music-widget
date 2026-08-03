@@ -36,10 +36,8 @@ the network *and* lets `<canvas>` read the pixels for colour extraction without
 cross-origin tainting. Do not fetch from the renderer.
 
 **One renderer, several presentations.** `index.html` is loaded twice — plain for
-the widget, with `?mode=panel` for the dropdown. `app.js` branches on
-`IS_PANEL` for the two things that are not pure CSS: the dropdown ignores the
-Normal/Compact setting, and its right-hand readout counts down. Normal vs Compact
-is a `body.compact` class.
+the widget, with `?mode=panel` for the dropdown. `app.js` branches on `IS_PANEL`
+only to pick which skin applies. Everything else is a `body.skin-*` class.
 
 ## The API surface we depend on
 
@@ -65,11 +63,16 @@ path in `src/main/ws.js`. Verified against YouTube Music 3.12.0.
 
 ## Skins
 
-`src/main/window.js` holds a `BASE` table of natural sizes per skin. Each skin
-has its own aspect ratio, so `applySkin` must release the lock, resize, then
-re-apply it — otherwise the next drag snaps the window back to the old shape.
-Only `classic` has a Compact variant, so the breakpoint in the `resize` handler
-is skipped for the others.
+`src/main/window.js` holds a flat `BASE` table of natural sizes per skin — there
+are no variants and no automatic switching, so dragging an edge only ever scales
+the skin that is showing. Each skin has its own aspect ratio, so `applySkin` must
+release the lock, resize, then re-apply it, or the next drag snaps the window
+back to the old shape.
+
+The two surfaces choose independently: `skin` drives the floating widget,
+`panelSkin` the dropdown. The renderer picks with `skinOf(snapshot)`, which keys
+off `IS_PANEL`. `refreshUpNext` therefore has to fetch the queue when *either* is
+`stack`, and the panel's natural size follows `panelSkin` rather than a constant.
 
 The renderer expresses both from **one DOM** via `body.skin-*` classes. The
 trick that makes that possible: the seek bar is a flex child of `.controls`

@@ -7,6 +7,9 @@ const $ = (id) => document.getElementById(id);
 const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 if (IS_PANEL) document.body.classList.add('panel');
 
+/** Each surface picks its own skin: the dropdown's is configured separately. */
+const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'classic';
+
 const el = {
   card: $('card'),
   ambient: $('ambient'),
@@ -46,7 +49,7 @@ const el = {
 let state = {
   status: 'connecting',
   skin: 'classic',
-  appearance: 'normal',
+  panelSkin: 'classic',
   upnext: [],
   song: null,
   cover: null,
@@ -66,6 +69,7 @@ let seeking = false;
 let seekPreview = 0;
 let ignorePositionUntil = 0;
 
+let skinApplied = null;
 let lastCoverSrc = null;
 let lastTitle = null;
 let lastSubtitle = null;
@@ -197,7 +201,7 @@ const renderSong = () => {
 };
 
 const renderUpNext = () => {
-  el.upnext.hidden = state.skin !== 'stack';
+  el.upnext.hidden = skinOf(state) !== 'stack';
   if (el.upnext.hidden) return;
 
   el.upnextGrid.replaceChildren();
@@ -276,8 +280,7 @@ const applyState = (next) => {
   const positionChanged = next.position !== state.position;
   const playingChanged = next.isPlaying !== state.isPlaying;
   const songChanged = next.song?.videoId !== state.song?.videoId;
-  const appearanceChanged = next.appearance !== state.appearance;
-  const skinChanged = next.skin !== state.skin;
+  const skin = skinOf(next);
 
   // Keep the level the user is actually setting while our own echoes drain.
   const heldVolume = holdingVolume() ? { volume: state.volume, muted: state.muted } : null;
@@ -289,15 +292,11 @@ const applyState = (next) => {
     state.muted = heldVolume.muted;
   }
 
-  if (skinChanged && !IS_PANEL) {
-    document.body.classList.remove('skin-stack');
-    if (next.skin === 'stack') document.body.classList.add('skin-stack');
-  }
-
-  // The dropdown has its own fixed size; only the floating widget follows the
-  // Normal/Compact setting.
-  if ((appearanceChanged || skinChanged) && !IS_PANEL) {
-    document.body.classList.toggle('compact', next.appearance === 'compact' && next.skin === 'classic');
+  // Tracked separately from `state` so the very first push applies the class too.
+  if (skin !== skinApplied) {
+    skinApplied = skin;
+    document.body.classList.remove('skin-classic', 'skin-compact', 'skin-stack');
+    document.body.classList.add(`skin-${skin}`);
     // Column widths and font sizes both changed, so the drift maths is stale.
     requestAnimationFrame(() => {
       setupMarquee(el.title);

@@ -8,10 +8,11 @@ const { parseSearchResults, parseQueueUpcoming, queueEntries } = require('./sear
 const { RealtimeClient } = require('./ws');
 const {
   createWindow,
-  applyAppearance,
   applySkin,
   setSearchExpanded,
   skinOf,
+  panelSkinOf,
+  SKINS,
 } = require('./window');
 const { createPanel } = require('./panel');
 const { createTray, buildWidgetMenu, openMusicApp } = require('./tray');
@@ -26,8 +27,8 @@ app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
 let win = null;
 let panel = null;
 let tray = null;
-let setAppearance = () => {};
 let setSkin = () => {};
+let setPanelSkin = () => {};
 const realtime = new RealtimeClient();
 
 // ------------------------------------------------------------- player state
@@ -39,7 +40,7 @@ const state = {
   status: 'connecting',
   statusMessage: '',
   skin: skinOf(),
-  appearance: store.get('appearance'),
+  panelSkin: panelSkinOf(),
   song: null,
   cover: null,
   upnext: [],
@@ -166,7 +167,7 @@ const applySong = async (raw) => {
 let upnextToken = 0;
 
 const refreshUpNext = async () => {
-  if (store.get('skin') !== 'stack') {
+  if (skinOf() !== 'stack' && panelSkinOf() !== 'stack') {
     if (state.upnext.length) update({ upnext: [] });
     return;
   }
@@ -416,18 +417,18 @@ ipcMain.handle('widget:play-result', async (_event, videoId) => {
 ipcMain.on('widget:context-menu', (event) => {
   const sender = BrowserWindow.fromWebContents(event.sender);
   if (!win || !sender || sender.id !== win.id) return;
-  buildWidgetMenu({ window: win, setSkin, setAppearance }).popup({ window: win });
+  buildWidgetMenu({ window: win, setSkin, setPanelSkin }).popup({ window: win });
 });
 
 ipcMain.handle('widget:skin', (_event, skin) => {
-  if (!['classic', 'stack'].includes(skin)) return { ok: false };
+  if (!SKINS.includes(skin)) return { ok: false };
   setSkin(skin);
   return { ok: true };
 });
 
-ipcMain.handle('widget:appearance', (_event, appearance) => {
-  if (appearance !== 'normal' && appearance !== 'compact') return { ok: false };
-  setAppearance(appearance);
+ipcMain.handle('widget:panel-skin', (_event, skin) => {
+  if (!SKINS.includes(skin)) return { ok: false };
+  setPanelSkin(skin);
   return { ok: true };
 });
 
@@ -442,22 +443,21 @@ ipcMain.handle('widget:quit', () => app.quit());
 
 app.whenReady().then(() => {
   app.dock?.hide();
-  // Dragging the widget across the breakpoint switches layout; the window is
-  // already the right size by then, so only the renderer needs telling.
-  win = createWindow({ onAppearance: (appearance) => update({ appearance }) });
+  win = createWindow();
 
   panelView = createPanel();
   panel = panelView.panel;
 
-  setAppearance = (appearance) => {
-    applyAppearance(win, appearance);
-    update({ appearance });
+  setSkin = (skin) => {
+    applySkin(win, skin);
+    update({ skin });
+    refreshUpNext().catch(() => {});
     tray?.refresh();
   };
 
-  setSkin = (skin) => {
-    applySkin(win, skin);
-    update({ skin, appearance: store.get('appearance') });
+  setPanelSkin = (skin) => {
+    panelView.applyPanelSkin(skin);
+    update({ panelSkin: skin });
     refreshUpNext().catch(() => {});
     tray?.refresh();
   };
@@ -466,8 +466,8 @@ app.whenReady().then(() => {
     window: win,
     realtime,
     getState: () => state,
-    setSkin,
-    setAppearance: (appearance) => setAppearance(appearance),
+    setSkin: (skin) => setSkin(skin),
+    setPanelSkin: (skin) => setPanelSkin(skin),
     togglePanel: (trayInstance) => panelView.toggle(trayInstance),
   });
   realtime.start();

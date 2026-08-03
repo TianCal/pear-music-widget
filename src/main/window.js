@@ -27,36 +27,28 @@ const hideInsteadOfClose = (win) => {
 // drop shadow, which is the only way to get the vibrancy layer clipped to the
 // same radius as the content — a transparent window leaves square blur corners.
 //
-// Both layouts share one aspect ratio, so dragging any edge is a pure scale and
-// crossing the breakpoint never makes the window jump shape. What changes at the
-// breakpoint is the layout (and therefore the zoom factor the content is drawn
-// at): compact shows fewer controls, so it can render them larger in less space.
-// Each skin is its own layout with its own natural size and aspect ratio. Only
-// classic has two variants; the breakpoint below switches between them as the
-// window is dragged. Dropping the elapsed/duration readouts is what let the
-// classic sizes come down from 420x142.
+// Every skin is a self-contained layout with its own natural size and aspect
+// ratio. Dragging an edge scales whichever skin is showing; it never switches
+// between them.
 const BASE = {
-  classic: {
-    normal: { width: 360, height: 132 },
-    compact: { width: 280, height: 103 },
-  },
-  stack: { normal: { width: 330, height: 284 } },
+  classic: { width: 360, height: 132 },
+  compact: { width: 280, height: 103 },
+  stack: { width: 330, height: 284 },
 };
 
-const skinOf = () => (BASE[store.get('skin')] ? store.get('skin') : 'classic');
-const baseFor = (skin = skinOf(), appearance = store.get('appearance')) =>
-  BASE[skin]?.[appearance] || BASE[skin]?.normal || BASE.classic.normal;
+const SKINS = Object.keys(BASE);
 
+const validSkin = (skin) => (BASE[skin] ? skin : 'classic');
+const skinOf = () => validSkin(store.get('skin'));
+const panelSkinOf = () => validSkin(store.get('panelSkin'));
+
+const baseFor = (skin = skinOf()) => BASE[validSkin(skin)];
 const aspectOf = (skin = skinOf()) => {
-  const base = BASE[skin]?.normal || BASE.classic.normal;
+  const base = baseFor(skin);
   return base.width / base.height;
 };
 
 const heightFor = (width, skin = skinOf()) => Math.round(width / aspectOf(skin));
-
-// Hysteresis, so a slow drag across the threshold does not flap.
-const TO_COMPACT_BELOW = 330;
-const TO_NORMAL_ABOVE = 348;
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 760;
@@ -111,7 +103,7 @@ const savedSize = () => {
   return { width, height: heightFor(width) };
 };
 
-const createWindow = ({ onAppearance } = {}) => {
+const createWindow = () => {
   const size = savedSize();
   const saved = store.get('bounds');
   const position = saved && isOnScreen(saved, size) ? { x: saved.x, y: saved.y } : defaultPosition(size);
@@ -175,19 +167,6 @@ const createWindow = ({ onAppearance } = {}) => {
     // as the user's preferred size, nor re-evaluated against the breakpoint.
     if (win.searchExpanded) return;
 
-    const { width } = win.getBounds();
-    const current = store.get('appearance');
-
-    // Only classic has a second variant to switch to.
-    let next = current;
-    if (skinOf() !== 'classic') next = 'normal';
-    else if (current === 'normal' && width < TO_COMPACT_BELOW) next = 'compact';
-    else if (current === 'compact' && width > TO_NORMAL_ABOVE) next = 'normal';
-
-    if (next !== current) {
-      store.set({ appearance: next });
-      onAppearance?.(next);
-    }
     applyZoom(win);
     persist();
   });
@@ -255,27 +234,19 @@ const resizeKeepingCorner = (win, next) => {
   return { x, y, ...next };
 };
 
-const applyAppearance = (win, appearance) => {
-  store.set({ appearance });
-  const bounds = resizeKeepingCorner(win, baseFor(skinOf(), appearance));
-  store.set({ bounds });
-  applyZoom(win);
-};
-
 /**
  * Switch layout wholesale. Each skin has its own aspect ratio, so the lock has
  * to be re-set or the next drag would snap the window back to the old shape.
  */
 const applySkin = (win, skin) => {
   if (!BASE[skin]) return;
-  const appearance = BASE[skin].compact ? store.get('appearance') : 'normal';
-  store.set({ skin, appearance });
+  store.set({ skin });
 
   win.setAspectRatio(0);
   win.setMinimumSize(MIN_WIDTH, 40);
   win.setMaximumSize(MAX_WIDTH, 4000);
 
-  const bounds = resizeKeepingCorner(win, baseFor(skin, appearance));
+  const bounds = resizeKeepingCorner(win, baseFor(skin));
   store.set({ bounds });
 
   win.setMinimumSize(MIN_WIDTH, heightFor(MIN_WIDTH, skin));
@@ -295,10 +266,12 @@ module.exports = {
   createWindow,
   hideInsteadOfClose,
   skinOf,
+  panelSkinOf,
+  baseFor,
   resetPosition,
-  applyAppearance,
   applySkin,
   setSearchExpanded,
   BASE,
+  SKINS,
   SEARCH_PANEL_CSS,
 };

@@ -10,8 +10,8 @@ contextBridge.exposeInMainWorld('widget', {
     return () => ipcRenderer.off('state', listener);
   },
   command: (name, payload) => ipcRenderer.invoke('widget:command', name, payload),
-  setAppearance: (appearance) => ipcRenderer.invoke('widget:appearance', appearance),
   setSkin: (skin) => ipcRenderer.invoke('widget:skin', skin),
+  setPanelSkin: (skin) => ipcRenderer.invoke('widget:panel-skin', skin),
   openApp: () => ipcRenderer.invoke('widget:open-app'),
   search: (query) => ipcRenderer.invoke('widget:search', query),
   playResult: (videoId) => ipcRenderer.invoke('widget:play-result', videoId),

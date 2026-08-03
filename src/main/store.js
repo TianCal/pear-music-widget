@@ -10,8 +10,8 @@ const DEFAULTS = {
   clientId: 'PearMusicWidget',
   token: null,
   bounds: null,
-  skin: 'classic', // 'classic' | 'stack'
-  appearance: 'normal', // 'normal' | 'compact' (classic only)
+  skin: 'classic', // floating widget layout: 'classic' | 'compact' | 'stack'
+  panelSkin: 'classic', // menu-bar dropdown layout, chosen independently
   alwaysOnTop: true,
   opacity: 1,
 };

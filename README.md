@@ -25,7 +25,7 @@ Both are the same renderer on the same state, so they never disagree.
 | Tray icon | |
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
-| **Right click** | Settings — widget visibility, size, opacity, always on top, open at login, reconnect, quit |
+| **Right click** | Settings — widget visibility, skin, dropdown skin, opacity, always on top, open at login, reconnect, quit |
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
@@ -33,12 +33,18 @@ If YouTube Music is not running, pressing play launches it.
 
 ## Skins
 
-Two layouts, switchable from the menu bar under **Skin**.
+Three layouts, switchable from the menu bar.
 
 | Skin | Natural size | Layout |
 | --- | --- | --- |
-| **Classic** | 360×132 | Artwork left, titles and transport right. Has a Compact variant (280×103) the widget switches to automatically as you drag it smaller. |
-| **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the next four queued tracks below — click any to play it. |
+| **Classic** | 360×132 | Artwork left, titles and transport right |
+| **Compact** | 280×103 | The same, tightened — no shuffle |
+| **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the next four queued tracks below — click any to play it |
+
+**Skin** sets the floating widget; **Dropdown skin** sets the menu-bar popover.
+They are independent, so you can run a compact widget on the desktop and the
+stack layout in the dropdown. Dragging an edge scales whichever skin is showing
+— it never switches between them.
 
 ## Search
 
@@ -59,7 +65,7 @@ index, so a song ending mid-click cannot make it play the wrong thing.
   card, or **↑ / ↓** while focused (**Shift** for 1% steps)
 - Drag any edge to resize — aspect locked, and the layout scales rather than
   reflowing
-- Light and dark appearance; position, size and skin remembered across launches
+- Light and dark appearance; position, size and skins remembered across launches
 - No Dock icon
 
 There is no repeat button: `GET /api/v1/repeat-mode` returns `null`
@@ -117,7 +123,7 @@ are in [AGENTS.md](AGENTS.md).
 ## Configuration
 
 `~/Library/Application Support/pear-music-widget/settings.json` — `host`, `port`,
-`clientId`, cached `token`, window `bounds`, `appearance`, `alwaysOnTop`,
+`clientId`, cached `token`, window `bounds`, `skin`, `panelSkin`, `alwaysOnTop`,
 `opacity`. Quit the app before editing.
 
 ## Assets

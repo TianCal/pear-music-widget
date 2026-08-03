@@ -5,7 +5,7 @@ const { Menu, Tray, app, nativeImage } = require('electron');
 
 const store = require('./store');
 const TRAY_ICONS = require('./tray-icons');
-const { resetPosition, applyAppearance } = require('./window');
+const { resetPosition } = require('./window');
 
 /** Build a template image from the generated base64 pair. */
 const buildIcon = (variant) => {
@@ -39,6 +39,7 @@ const STATUS_LABEL = {
 
 const SKINS = [
   { key: 'classic', label: 'Classic' },
+  { key: 'compact', label: 'Compact' },
   { key: 'stack', label: 'Stack' },
 ];
 
@@ -62,18 +63,13 @@ const items = {
     })),
   }),
 
-  size: (setAppearance) => ({
-    label: 'Widget size',
-    // Only the classic skin has a second variant.
-    enabled: store.get('skin') === 'classic',
-    submenu: [
-      { key: 'normal', label: 'Normal' },
-      { key: 'compact', label: 'Compact' },
-    ].map(({ key, label }) => ({
+  panelSkin: (setPanelSkin) => ({
+    label: 'Dropdown skin',
+    submenu: SKINS.map(({ key, label }) => ({
       label,
       type: 'radio',
-      checked: store.get('appearance') === key,
-      click: () => setAppearance(key),
+      checked: store.get('panelSkin') === key,
+      click: () => setPanelSkin(key),
     })),
   }),
 
@@ -115,7 +111,7 @@ const items = {
  * Right-click menu for the floating widget itself: the things you would want
  * while looking at it, minus the app-level plumbing that belongs in the tray.
  */
-const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
+const buildWidgetMenu = ({ window, setSkin, setPanelSkin }) =>
   Menu.buildFromTemplate([
     {
       label: 'Search…',
@@ -124,7 +120,7 @@ const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
     },
     { type: 'separator' },
     items.skin(setSkin),
-    items.size(setAppearance),
+    items.panelSkin(setPanelSkin),
     items.opacity(window),
     items.alwaysOnTop(window),
     { type: 'separator' },
@@ -135,7 +131,7 @@ const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
     items.quit(),
   ]);
 
-const createTray = ({ window, realtime, getState, setSkin, setAppearance, togglePanel }) => {
+const createTray = ({ window, realtime, getState, setSkin, setPanelSkin, togglePanel }) => {
   const tray = new Tray(ICONS.hollow);
   let iconVariant = 'hollow';
 
@@ -157,7 +153,7 @@ const createTray = ({ window, realtime, getState, setSkin, setAppearance, toggle
       },
       items.alwaysOnTop(window),
       items.skin(setSkin),
-      items.size(setAppearance),
+      items.panelSkin(setPanelSkin),
       items.opacity(window),
       items.resetPosition(window),
       { type: 'separator' },
