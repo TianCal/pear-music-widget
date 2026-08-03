@@ -192,6 +192,18 @@ and hides instead, releasing only once `before-quit` has fired. The menus are
 independently hardened: `alive(win)` guards every window access, so a dead
 window greys those items out rather than throwing.
 
+## Quitting the music app
+
+`quitMusicApp` addresses YouTube Music by **bundle id**, not by name.
+`application "YouTube Music" is running` answers `false` even while it is
+running, which silently turns the guard into a no-op — by id it is accurate.
+pear-desktop and th-ch's build ship the same appId, so one id covers both.
+
+The guard is still worth keeping: an unguarded `quit` is harmless for a closed
+app, but the check keeps us from raising the Apple-event permission prompt for
+no reason. `quit` is an Apple event, so the first use prompts; if it is denied
+the script fails and the 4s timeout makes sure we quit ourselves anyway.
+
 ## Tray menu
 
 macOS renders whatever menu was last handed to `Tray.setContextMenu`, so a

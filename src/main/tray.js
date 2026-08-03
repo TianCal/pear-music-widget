@@ -24,9 +24,42 @@ const ICONS = {
   hollow: buildIcon('hollow'),
 };
 
-/** Bring the music app forward; the bundle differs between th-ch and pear builds. */
+// The bundle differs between th-ch and pear builds, so both helpers try each
+// name in turn.
+const MUSIC_APPS = ['YouTube Music', 'Pear', 'Pear Desktop'];
+
 const openMusicApp = () => {
-  exec('open -a "YouTube Music" || open -a "Pear" || open -a "Pear Desktop"');
+  exec(MUSIC_APPS.map((name) => `open -a "${name}"`).join(' || '));
+};
+
+// pear-desktop and th-ch's build ship the same appId, so one id covers both.
+const MUSIC_APP_ID = 'com.github.th-ch.youtube-music';
+
+/**
+ * Ask the music app to quit, then run `done` — whether or not it worked.
+ *
+ * Addressed by bundle id, not by name: `application "YouTube Music" is running`
+ * answers false even while it is running, which silently turns the guard into a
+ * no-op. By id it is accurate, and a guarded quit on a closed app does nothing
+ * rather than launching it.
+ *
+ * `quit` is an Apple event, so the first use raises the one-time "wants to
+ * control" prompt. If that is denied the script just fails and we still quit
+ * ourselves.
+ */
+const quitMusicApp = (done) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    done();
+  };
+
+  const target = `application id "${MUSIC_APP_ID}"`;
+  exec(`osascript -e 'if ${target} is running then quit ${target}'`, finish);
+
+  // Never hang the quit on a blocked or slow Apple event.
+  setTimeout(finish, 4000);
 };
 
 const STATUS_LABEL = {
@@ -104,6 +137,11 @@ const items = {
   openApp: () => ({ label: 'Open YouTube Music', click: openMusicApp }),
 
   quit: () => ({ label: 'Quit', accelerator: 'Command+Q', click: () => app.quit() }),
+
+  quitWithMusicApp: () => ({
+    label: 'Quit with YouTube Music',
+    click: () => quitMusicApp(() => app.quit()),
+  }),
 };
 
 /**
@@ -128,6 +166,7 @@ const buildWidgetMenu = ({ window, setSkin, setPanelSkin }) =>
     { type: 'separator' },
     items.openApp(),
     items.quit(),
+    items.quitWithMusicApp(),
   ]);
 
 const createTray = ({ window, realtime, getState, setSkin, setPanelSkin, togglePanel }) => {
@@ -166,6 +205,7 @@ const createTray = ({ window, realtime, getState, setSkin, setPanelSkin, toggleP
       items.openApp(),
       { type: 'separator' },
       items.quit(),
+      items.quitWithMusicApp(),
     ]);
   };
 

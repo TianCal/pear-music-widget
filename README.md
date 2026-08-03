@@ -26,6 +26,11 @@ Both are the same renderer on the same state, so they never disagree.
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
 | **Right click** | Settings — widget visibility, skin, dropdown skin, opacity, always on top, open at login, reconnect, quit |
+
+Both the menu-bar menu and the widget's own right-click menu carry **Quit with
+YouTube Music**, which closes the player before quitting the widget. The first
+use raises the one-time macOS "wants to control" prompt; if it is declined, the
+widget still quits on its own.
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
