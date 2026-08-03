@@ -143,8 +143,7 @@ perceptually exponential. Do not add a second curve in the widget.
 
 ## Resizing
 
-Both layouts share one aspect ratio, so dragging any edge is a pure scale and
-crossing the breakpoint never changes the window's shape.
+Dragging an edge scales the active skin; it never switches skins.
 
 The renderer is authored once at each layout's natural size and **does not
 reflow**. `applyZoom` sets `webContents.setZoomFactor(width / baseWidth)`. The
