@@ -2,10 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
-    />
+    <!-- The CSP lives in src-tauri/tauri.conf.json, which Tauri serves as a
+         header. A second policy here would only ever be the stricter of the
+         two, and silently break the IPC channel. -->
     <title>Pear Music Widget</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -32,8 +31,8 @@
         <div class="ambient" id="ambient"></div>
         <div class="scrim"></div>
 
-        <!-- A no-drag ring, otherwise the card's drag region swallows the
-             window's resize edges and the widget cannot be resized. -->
+        <!-- A ring the page's drag handler ignores, so the window's own resize
+             edges stay reachable rather than starting a window move. -->
         <div class="resize-edges" aria-hidden="true">
           <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
         </div>
@@ -140,6 +139,8 @@
       </div>
     </div>
 
+    <!-- bridge.js defines window.widget, which app.js is written against. -->
+    <script src="bridge.js"></script>
     <script src="palette.js"></script>
     <script src="app.js"></script>
   </body>

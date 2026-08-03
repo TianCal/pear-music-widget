@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- An accessory app: no Dock icon, no menu bar. The activation policy is
+	     also set at runtime, but declaring it here avoids a Dock icon flashing
+	     during launch. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string></string>
+	<!-- Quitting YouTube Music is an Apple event, so macOS asks once. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Pear Music Widget asks YouTube Music to quit when you choose “Quit with YouTube Music”.</string>
+</dict>
+</plist>

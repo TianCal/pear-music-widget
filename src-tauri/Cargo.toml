@@ -1,0 +1,39 @@
+[package]
+name = "pear-music-widget"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A floating now-playing widget and menu-bar player for macOS"
+authors = ["litian"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+regex = "1.13.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-tungstenite = "0.29"
+window-vibrancy = "0.8"
+
+# Only the handful of AppKit calls Tauri does not wrap: aspect ratio, window
+# alpha, window level and collection behaviour. Raw `msg_send!` rather than the
+# typed objc2-app-kit bindings keeps the dependency surface to two crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+
+[build-dependencies]
+png = "0.18"
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

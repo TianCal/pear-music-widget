@@ -6,9 +6,12 @@ A floating now-playing widget and menu-bar player for macOS, driven by the
 
 Inspired by [YoutubeMusicCoverWidget](https://github.com/rafailpapastamou/YoutubeMusicCoverWidget),
 which polls the same API server from an Übersicht widget. This one is a
-standalone Electron app that holds the API server's **WebSocket** open instead,
-so track, position, volume and shuffle changes arrive as push events rather than
-on a timer.
+standalone [Tauri](https://tauri.app) app that holds the API server's
+**WebSocket** open instead, so track, position, volume and shuffle changes
+arrive as push events rather than on a timer.
+
+The interface is the system WebView and the rest is Rust, so it installs at
+**8.4 MB** rather than the 233 MB the earlier Electron build needed.
 
 ![The floating widget on the desktop](docs/widget.png)
 
@@ -113,17 +116,21 @@ Requires macOS on Apple Silicon. Built and tested on macOS 26.
 
 ## Running from source
 
+Needs a [Rust toolchain](https://rustup.rs) and the Xcode command line tools.
+There is no npm step — the interface is plain HTML and JavaScript, served
+straight out of `src/`.
+
 ```bash
-cd ~/projs/pear-music-widget && npm install && npm start
+cd ~/projs/pear-music-widget/src-tauri && cargo run
 ```
 
 If the widget sits on a setup screen, run the connectivity check:
 
 ```bash
-npm run doctor
+cargo run -- --doctor
 ```
 
-To build the DMG yourself: `npm run build`.
+To build the DMG yourself: `cargo tauri build` (`cargo install tauri-cli` first).
 
 ## Compatibility
 
@@ -136,9 +143,9 @@ its protocol. This release targets:
 | Verified against | YouTube Music **3.12.0**, bundle `com.github.th-ch.youtube-music` |
 | Default endpoint | `http://127.0.0.1:26538` |
 
-`npm run doctor` checks the server's OpenAPI document and fails loudly if the
-plugin moves off `/api/v1`, rather than leaving the widget silently blank. The
-full endpoint list, the protocol quirks worked around, and where to change things
+`--doctor` checks the server's OpenAPI document and fails loudly if the plugin
+moves off `/api/v1`, rather than leaving the widget silently blank. The full
+endpoint list, the protocol quirks worked around, and where to change things
 are in [AGENTS.md](AGENTS.md).
 
 ## Configuration
@@ -151,9 +158,9 @@ skin), `skin`, `panelSkin`, `alwaysOnTop`, `opacity`. Quit the app before editin
 
 No third-party assets, nothing to attribute. The transport glyphs are
 hand-authored SVG paths in the `<symbol>` sprite in
-[src/renderer/index.html](src/renderer/index.html); the menu-bar icons and the
-app icon are computed procedurally at build time by
-[scripts/make-icon.js](scripts/make-icon.js). The only binary in the repo is the
+[src/index.html](src/index.html); the menu-bar icons and the app icon are
+computed procedurally at build time by
+[src-tauri/build.rs](src-tauri/build.rs). The only binary in the repo is the
 screenshot.
 
 ## Contributing

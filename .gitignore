@@ -1,6 +1,7 @@
-node_modules/
-dist/
-build/icon.icns
-build/icon.png
+src-tauri/target/
+src-tauri/gen/
+# Generated from scratch by src-tauri/build.rs, so the only binary in the repo
+# stays the screenshot in docs/.
+src-tauri/icons/
 .DS_Store
 *.log
