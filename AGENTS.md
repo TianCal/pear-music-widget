@@ -170,6 +170,20 @@ the widget stuck on "Connecting…" forever.
 `connecting` is shown only on the first attempt or after a manual retry, so
 background reconnects do not flicker the UI.
 
+## Windows are hidden, never closed
+
+Electron installs a **default application menu** even though an accessory app
+never shows one, and its File menu binds Cmd+W to "Close Window". Closing
+destroys the window; because the dropdown still existed, `window-all-closed`
+never fired and the app kept running with a destroyed widget — so the next tray
+right-click threw `Object has been destroyed` from `window.isVisible()` and put
+up a crash dialog.
+
+`hideInsteadOfClose` in `src/main/window.js` intercepts `close` on both windows
+and hides instead, releasing only once `before-quit` has fired. The menus are
+independently hardened: `alive(win)` guards every window access, so a dead
+window greys those items out rather than throwing.
+
 ## Tray menu
 
 macOS renders whatever menu was last handed to `Tray.setContextMenu`, so a

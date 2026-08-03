@@ -3,6 +3,8 @@
 const path = require('node:path');
 const { BrowserWindow, screen } = require('electron');
 
+const { hideInsteadOfClose } = require('./window');
+
 // Roughly the proportions of the system Now Playing popover. The width is set
 // by the control row, which needs ~188px for six buttons plus the artwork and
 // padding either side.
@@ -43,6 +45,7 @@ const createPanel = () => {
     },
   });
 
+  hideInsteadOfClose(panel);
   panel.setAlwaysOnTop(true, 'pop-up-menu');
   panel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 

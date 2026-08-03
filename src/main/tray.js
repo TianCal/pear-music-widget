@@ -42,6 +42,13 @@ const SKINS = [
   { key: 'stack', label: 'Stack' },
 ];
 
+/** A window can be gone by the time a menu is built; never let that throw. */
+const alive = (win) => !!win && !win.isDestroyed();
+
+const onWindow = (win, fn) => {
+  if (alive(win)) fn(win);
+};
+
 // Shared between the menu-bar menu and the widget's own right-click menu, so
 // the two can never drift apart.
 const items = {
@@ -78,7 +85,7 @@ const items = {
       checked: Math.round(store.get('opacity') * 100) === pct,
       click: () => {
         store.set({ opacity: pct / 100 });
-        window.setOpacity(pct / 100);
+        onWindow(window, (w) => w.setOpacity(pct / 100));
       },
     })),
   }),
@@ -89,13 +96,14 @@ const items = {
     checked: store.get('alwaysOnTop'),
     click: (item) => {
       store.set({ alwaysOnTop: item.checked });
-      window.setAlwaysOnTop(item.checked, 'floating');
+      onWindow(window, (w) => w.setAlwaysOnTop(item.checked, 'floating'));
     },
   }),
 
   resetPosition: (window) => ({
     label: 'Reset position',
-    click: () => resetPosition(window),
+    enabled: alive(window),
+    click: () => onWindow(window, resetPosition),
   }),
 
   openApp: () => ({ label: 'Open YouTube Music', click: openMusicApp }),
@@ -109,7 +117,11 @@ const items = {
  */
 const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
   Menu.buildFromTemplate([
-    { label: 'Search…', click: () => window.webContents.send('open-search') },
+    {
+      label: 'Search…',
+      enabled: alive(window),
+      click: () => onWindow(window, (w) => w.webContents.send('open-search')),
+    },
     { type: 'separator' },
     items.skin(setSkin),
     items.size(setAppearance),
@@ -117,7 +129,7 @@ const buildWidgetMenu = ({ window, setSkin, setAppearance }) =>
     items.alwaysOnTop(window),
     { type: 'separator' },
     items.resetPosition(window),
-    { label: 'Hide widget', click: () => window.hide() },
+    { label: 'Hide widget', enabled: alive(window), click: () => onWindow(window, (w) => w.hide()) },
     { type: 'separator' },
     items.openApp(),
     items.quit(),
@@ -139,8 +151,9 @@ const createTray = ({ window, realtime, getState, setSkin, setAppearance, toggle
         // Act on the checkbox's own new state rather than re-reading the window.
         label: 'Show floating widget',
         type: 'checkbox',
-        checked: window.isVisible(),
-        click: (item) => (item.checked ? window.showInactive() : window.hide()),
+        enabled: alive(window),
+        checked: alive(window) && window.isVisible(),
+        click: (item) => onWindow(window, (w) => (item.checked ? w.showInactive() : w.hide())),
       },
       items.alwaysOnTop(window),
       items.skin(setSkin),

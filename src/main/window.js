@@ -1,9 +1,27 @@
 'use strict';
 
 const path = require('node:path');
-const { BrowserWindow, screen } = require('electron');
+const { BrowserWindow, app, screen } = require('electron');
 
 const store = require('./store');
+
+// Electron installs a default application menu, which binds Cmd+W to "close
+// window" even though the menu itself is hidden for an accessory app. Closing
+// destroys the window, and because the dropdown is still around the app does not
+// quit — leaving the tray menu holding a destroyed object. A widget should hide,
+// so intercept close everywhere and only really close when we are quitting.
+let quitting = false;
+app.on('before-quit', () => {
+  quitting = true;
+});
+
+const hideInsteadOfClose = (win) => {
+  win.on('close', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    win.hide();
+  });
+};
 
 // The window is exactly the card. macOS then owns the corner rounding and the
 // drop shadow, which is the only way to get the vibrancy layer clipped to the
@@ -131,6 +149,7 @@ const createWindow = ({ onAppearance } = {}) => {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setOpacity(store.get('opacity'));
 
+  hideInsteadOfClose(win);
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.once('ready-to-show', () => {
     applyZoom(win);
@@ -274,6 +293,7 @@ const resetPosition = (win) => {
 
 module.exports = {
   createWindow,
+  hideInsteadOfClose,
   skinOf,
   resetPosition,
   applyAppearance,
