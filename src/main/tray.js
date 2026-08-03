@@ -39,7 +39,6 @@ const STATUS_LABEL = {
 
 const SKINS = [
   { key: 'classic', label: 'Classic' },
-  { key: 'compact', label: 'Compact' },
   { key: 'stack', label: 'Stack' },
 ];
 

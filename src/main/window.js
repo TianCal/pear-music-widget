@@ -31,13 +31,13 @@ const hideInsteadOfClose = (win) => {
 // ratio. Dragging an edge scales whichever skin is showing; it never switches
 // between them.
 const BASE = {
-  classic: { width: 360, height: 132 },
-  compact: { width: 280, height: 103 },
+  classic: { width: 300, height: 110 },
   stack: { width: 330, height: 284 },
 };
 
 const SKINS = Object.keys(BASE);
 
+// 'compact' was folded into 'classic'; map old settings files onto it.
 const validSkin = (skin) => (BASE[skin] ? skin : 'classic');
 const skinOf = () => validSkin(store.get('skin'));
 const panelSkinOf = () => validSkin(store.get('panelSkin'));

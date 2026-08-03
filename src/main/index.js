@@ -214,7 +214,8 @@ realtime.on('status', ({ state: status, message }) => {
   if (status === 'connected') {
     refreshAll().catch(() => {});
   } else if (status !== 'connecting') {
-    update({ isPlaying: false });
+    // Drop the queue too: it belongs to a player we can no longer see.
+    update({ isPlaying: false, upnext: [] });
   }
   tray?.refresh();
 });

@@ -201,7 +201,10 @@ const renderSong = () => {
 };
 
 const renderUpNext = () => {
-  el.upnext.hidden = skinOf(state) !== 'stack';
+  // Hidden whenever the setup screen is up: a queue from a previous session is
+  // stale the moment YouTube Music goes away.
+  const playerShowing = state.status === 'connected' && !!state.song;
+  el.upnext.hidden = !playerShowing || skinOf(state) !== 'stack';
   if (el.upnext.hidden) return;
 
   el.upnextGrid.replaceChildren();
@@ -295,7 +298,7 @@ const applyState = (next) => {
   // Tracked separately from `state` so the very first push applies the class too.
   if (skin !== skinApplied) {
     skinApplied = skin;
-    document.body.classList.remove('skin-classic', 'skin-compact', 'skin-stack');
+    document.body.classList.remove('skin-classic', 'skin-stack');
     document.body.classList.add(`skin-${skin}`);
     // Column widths and font sizes both changed, so the drift maths is stale.
     requestAnimationFrame(() => {

@@ -74,6 +74,12 @@ The two surfaces choose independently: `skin` drives the floating widget,
 off `IS_PANEL`. `refreshUpNext` therefore has to fetch the queue when *either* is
 `stack`, and the panel's natural size follows `panelSkin` rather than a constant.
 
+`.upnext` is hidden whenever the setup screen is up — a queue from a previous
+session is stale the moment YouTube Music goes away. The skin rule is written
+`body.skin-stack .upnext:not([hidden])` on purpose: as a plain
+`body.skin-stack .upnext` it out-specifies `.upnext[hidden]` and the hidden
+attribute silently does nothing.
+
 The renderer expresses both from **one DOM** via `body.skin-*` classes. The
 trick that makes that possible: the seek bar is a flex child of `.controls`
 rather than a sibling, so each skin places it with `order` alone — above the

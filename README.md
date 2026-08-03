@@ -33,18 +33,17 @@ If YouTube Music is not running, pressing play launches it.
 
 ## Skins
 
-Three layouts, switchable from the menu bar.
+Two layouts, switchable from the menu bar.
 
 | Skin | Natural size | Layout |
 | --- | --- | --- |
-| **Classic** | 360×132 | Artwork left, titles and transport right |
-| **Compact** | 280×103 | The same, tightened — no shuffle |
+| **Classic** | 300×110 | Artwork left, titles and the full transport right |
 | **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the next four queued tracks below — click any to play it |
 
 **Skin** sets the floating widget; **Dropdown skin** sets the menu-bar popover.
-They are independent, so you can run a compact widget on the desktop and the
-stack layout in the dropdown. Dragging an edge scales whichever skin is showing
-— it never switches between them.
+They are independent, so you can run one layout on the desktop and the other in
+the dropdown. Dragging an edge scales whichever skin is showing — it never
+switches between them.
 
 ## Search
 
