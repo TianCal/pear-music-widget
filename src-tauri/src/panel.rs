@@ -78,7 +78,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 /// Grow downwards for whichever panel is open, clamped to the screen.
-fn resize(app: &AppHandle, panel: &WebviewWindow) {
+/// Returns the rect it asked for — the caller cannot read it back yet.
+fn resize(app: &AppHandle, panel: &WebviewWindow) -> Rect {
     let size = size_of(app);
     let bounds = window::bounds_of(panel);
     let extra = state(app)
@@ -94,15 +95,14 @@ fn resize(app: &AppHandle, panel: &WebviewWindow) {
     let max_y = area.y + area.height - height;
     let y = bounds.y.min(max_y.max(area.y)).round();
 
-    window::set_bounds(
-        panel,
-        Rect {
-            x: bounds.x,
-            y,
-            width: size.0,
-            height,
-        },
-    );
+    let rect = Rect {
+        x: bounds.x,
+        y,
+        width: size.0,
+        height,
+    };
+    window::set_bounds(panel, rect);
+    rect
 }
 
 pub fn set_expanded(app: &AppHandle, panel: &WebviewWindow, which: Option<&str>) {
@@ -126,8 +126,11 @@ pub fn apply_panel_skin(app: &AppHandle, skin: &str) {
     store.update(|s| s.panel_skin = skin.to_string());
 
     if let Some(panel) = app.get_webview_window(PANEL) {
-        resize(app, &panel);
-        window::apply_zoom(app, &panel);
+        // The natural size changed, so the collapsed rect is what the zoom
+        // follows — never the geometry the window still reports.
+        let rect = resize(app, &panel);
+        let size = size_of(app);
+        window::apply_zoom_to(app, &panel, Rect { width: size.0, height: size.1, ..rect });
     }
 }
 
@@ -164,7 +167,8 @@ pub fn on_blur(app: &AppHandle, panel: &WebviewWindow) {
 }
 
 /// Park the panel under the tray icon, clamped to the screen it sits on.
-fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) {
+/// Returns the rect it asked for.
+fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) -> Rect {
     let size = size_of(app);
     let anchor_x = icon.x + icon.width / 2.0;
     let area = window::work_area_near(app, anchor_x, icon.y);
@@ -174,15 +178,14 @@ fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) {
     let x = (anchor_x - size.0 / 2.0).clamp(min_x.min(max_x), max_x.max(min_x)).round();
     let y = (icon.y + icon.height + GAP_BELOW_MENU_BAR).round();
 
-    window::set_bounds(
-        panel,
-        Rect {
-            x,
-            y,
-            width: size.0,
-            height: size.1,
-        },
-    );
+    let rect = Rect {
+        x,
+        y,
+        width: size.0,
+        height: size.1,
+    };
+    window::set_bounds(panel, rect);
+    rect
 }
 
 pub fn toggle(app: &AppHandle, icon: Rect) {
@@ -206,8 +209,8 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
         return;
     }
 
-    position(app, &panel, icon);
-    window::apply_zoom(app, &panel);
+    let rect = position(app, &panel, icon);
+    window::apply_zoom_to(app, &panel, rect);
     state.visible.store(true, Ordering::SeqCst);
     let _ = panel.show();
     let _ = panel.set_focus();

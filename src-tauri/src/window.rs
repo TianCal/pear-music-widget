@@ -278,7 +278,20 @@ pub fn set_bounds(window: &WebviewWindow, rect: Rect) {
 
 /// Scale the page so the layout always fills the window. The renderer is
 /// authored once at the base size; everything else is zoom.
+///
+/// Measures the window, so this is only correct when nothing has just resized
+/// it — use `apply_zoom_to` after a programmatic resize.
 pub fn apply_zoom(app: &AppHandle, window: &WebviewWindow) {
+    apply_zoom_to(app, window, bounds_of(window));
+}
+
+/// Zoom for a size we have just asked for rather than one we can read back.
+///
+/// Tauri's `set_size`/`set_position` are messages on the event loop, so
+/// `bounds_of` immediately afterwards still reports the *old* geometry. Zooming
+/// off that measurement is what left a resized window rendering its layout at
+/// the previous skin's scale, stranded in a corner of the new one.
+pub fn apply_zoom_to(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
     let store = app.state::<Arc<Store>>();
     let skin = if window.label() == PANEL {
         panel_skin_of(&store)
@@ -286,7 +299,6 @@ pub fn apply_zoom(app: &AppHandle, window: &WebviewWindow) {
         skin_of(&store)
     };
     let (base_width, base_height) = base_for(&skin);
-    let rect = bounds_of(window);
 
     // Take the tighter of the two axes. Rounding the window height to whole
     // pixels can leave it a fraction short of the ratio, and scaling on width
@@ -555,12 +567,22 @@ pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
     release_size_limits(window);
 
     // Come back to whatever size the user last left this skin at.
-    let position = resize_keeping_corner(app, window, size_for_skin(&store, skin));
+    let size = size_for_skin(&store, skin);
+    let position = resize_keeping_corner(app, window, size);
     store.update(|s| s.bounds = Some(position));
 
     apply_size_limits(window, skin);
     macos::set_aspect_ratio(window, Some(base_for(skin)));
-    apply_zoom(app, window);
+    apply_zoom_to(
+        app,
+        window,
+        Rect {
+            x: position.x,
+            y: position.y,
+            width: size.0,
+            height: size.1,
+        },
+    );
 }
 
 /// Back to the skin's natural size, in the default corner, forgetting the size
@@ -576,15 +598,12 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
         s.bounds = Some(position);
     });
 
-    apply_collapsed_size(
-        app,
-        window,
-        Rect {
-            x: position.x,
-            y: position.y,
-            width: size.0,
-            height: size.1,
-        },
-    );
-    apply_zoom(app, window);
+    let rect = Rect {
+        x: position.x,
+        y: position.y,
+        width: size.0,
+        height: size.1,
+    };
+    apply_collapsed_size(app, window, rect);
+    apply_zoom_to(app, window, rect);
 }

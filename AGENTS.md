@@ -94,6 +94,25 @@ Tauri's own getters (`outer_position`, `inner_size`, `scale_factor`) are safe
 from either thread — they run inline when already on the main thread and post a
 message otherwise.
 
+### …and it has to be *queued*, not just on the main thread
+
+Being on the main thread is not enough. Tauri's window **setters** (`set_size`,
+`set_position`, `set_min_size`) are messages posted to the event loop, while a
+raw `msg_send!` executes immediately — so a direct AppKit call always jumps
+ahead of a resize requested before it. Re-applying the aspect ratio at the end
+of `apply_skin` therefore landed *before* the resize it was meant to follow, and
+the window settled at a size matching neither skin.
+
+Everything in `macos.rs` is posted through `run_on_main_thread` for that reason:
+same proxy, same queue, FIFO with the setters.
+
+The mirror image of the same trap is on the reading side. `bounds_of` runs
+inline, so measuring a window straight after resizing it returns the **old**
+geometry. `apply_zoom` did exactly that and scaled the page for the previous
+skin — a 330×284 dropdown rendering its layout at 0.4 zoom in the top corner.
+Anything that has just resized a window calls `apply_zoom_to` with the rect it
+asked for; only a real `Resized` event may measure.
+
 ## The renderer's globals are shared
 
 `bridge.js` replaces the Electron preload, but a preload ran in its own context
