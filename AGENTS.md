@@ -118,6 +118,10 @@ exact on a cleaned title, then free-text search picking the hit whose duration
 is closest. Empty LRC lines are kept — they are the instrumental gaps and the
 roll needs them.
 
+A wheel over the panel scrolls the lyrics, not the volume, and parks the roll
+for `LYRIC_MANUAL_MS` so auto-centring does not fight the user's hand. The eased
+transition is dropped while scrolling or the roll lags behind the wheel.
+
 The roll is a `transform` on `.lyrics-lines`, not `scrollTop`: it animates on the
 compositor and lands on sub-pixel offsets, which is what makes it glide. The
 active index comes from the same interpolated playhead the progress bar uses, so

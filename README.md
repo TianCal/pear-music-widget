@@ -57,7 +57,8 @@ switches between them.
 
 The list icon in the corner opens a rolling lyrics panel, on either skin. The
 active line is highlighted and centred as the track plays, and clicking a line
-seeks to it. Classic gets tighter type to suit the small card; Stack gets a
+seeks to it. Scrolling over the panel scrolls the lyrics rather than the volume,
+and holds them still for a few seconds before playback takes the roll back. Classic gets tighter type to suit the small card; Stack gets a
 larger, airier roll to match its scale.
 
 Lyrics come from [LRCLib](https://lrclib.net) — the same source YouTube Music's

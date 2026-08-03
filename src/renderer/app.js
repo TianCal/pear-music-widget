@@ -346,6 +346,37 @@ el.upnextGrid.addEventListener('click', (event) => {
 let lyricLines = [];       // [{ time, text }]
 let lyricSynced = false;
 let lyricActive = -1;
+let lyricOffset = 0;
+let lyricManualUntil = 0;
+let lyricManualTimer = null;
+
+// How long a hand scroll holds the roll still before playback takes it back.
+const LYRIC_MANUAL_MS = 5000;
+
+/** Furthest we let a hand scroll go: content height, less half a viewport so
+ *  the final lines can still sit centred. */
+const lyricMaxOffset = () =>
+  Math.max(0, el.lyricsLines.offsetHeight - el.lyricsScroll.clientHeight / 2);
+
+const applyLyricOffset = (offset) => {
+  lyricOffset = clamp(offset, 0, lyricMaxOffset());
+  el.lyricsLines.style.transform = `translateY(${-lyricOffset}px)`;
+};
+
+/** Scrolling over the lyrics moves the lyrics, not the volume. */
+const scrollLyrics = (deltaY) => {
+  if (!lyricSynced) return; // unsynced is a plain block that scrolls natively
+
+  lyricManualUntil = performance.now() + LYRIC_MANUAL_MS;
+  el.lyrics.classList.add('manual');
+  applyLyricOffset(lyricOffset + deltaY);
+
+  clearTimeout(lyricManualTimer);
+  lyricManualTimer = setTimeout(() => {
+    el.lyrics.classList.remove('manual');
+    lyricActive = -1; // force the next tick to re-centre on the playing line
+  }, LYRIC_MANUAL_MS);
+};
 let lyricRendered = null;  // identity of what is currently in the DOM
 
 const LYRIC_NOTE = {
@@ -363,6 +394,10 @@ const renderLyrics = () => {
   lyricLines = data?.lines || [];
   lyricSynced = !!data?.synced;
   lyricActive = -1;
+  lyricOffset = 0;
+  lyricManualUntil = 0;
+  clearTimeout(lyricManualTimer);
+  el.lyrics.classList.remove('manual');
 
   el.lyrics.classList.toggle('plain', !!data && !lyricSynced);
   el.lyricsLines.replaceChildren();
@@ -420,12 +455,14 @@ const rollLyrics = (position) => {
     rows[i].classList.toggle('past', i < index);
   }
 
+  // Leave the roll where the user parked it until their scroll times out.
+  if (performance.now() < lyricManualUntil) return;
+
   // Centre the active line in the viewport.
   const row = rows[index];
-  const offset = row
-    ? row.offsetTop + row.offsetHeight / 2 - el.lyricsScroll.clientHeight / 2
-    : 0;
-  el.lyricsLines.style.transform = `translateY(${-Math.max(0, offset)}px)`;
+  applyLyricOffset(
+    row ? row.offsetTop + row.offsetHeight / 2 - el.lyricsScroll.clientHeight / 2 : 0,
+  );
 };
 
 const toggleLyrics = () => {
@@ -835,8 +872,12 @@ const WHEEL_SENSITIVITY = 0.12;
 el.card.addEventListener(
   'wheel',
   (event) => {
-    if (state.status !== 'connected') return;
     if (searching) return; // the wheel belongs to the result list
+    if (openPanel === 'lyrics' && event.target.closest('#lyrics')) {
+      scrollLyrics(event.deltaY);
+      return;
+    }
+    if (state.status !== 'connected') return;
     // With macOS natural scrolling, swiping up reports a positive deltaY, so
     // adding it is what makes "scroll up" raise the volume.
     const from = wheelVolume ?? (state.muted ? 0 : state.volume);

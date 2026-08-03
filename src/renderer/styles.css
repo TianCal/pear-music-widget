@@ -545,6 +545,12 @@ body.panel .resize-edges {
   mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 82%, transparent 100%);
 }
 
+/* While the user is scrolling by hand the eased transition would lag behind the
+   wheel, so it is dropped for the duration. */
+.lyrics.manual .lyrics-lines {
+  transition: none;
+}
+
 .lyrics-lines {
   position: absolute;
   left: 0;
