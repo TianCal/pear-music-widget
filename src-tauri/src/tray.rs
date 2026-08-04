@@ -34,7 +34,9 @@ const MUSIC_APPS: [&str; 3] = ["YouTube Music", "Pear", "Pear Desktop"];
 /// pear-desktop and th-ch's build ship the same appId, so one id covers both.
 const MUSIC_APP_ID: &str = "com.github.th-ch.youtube-music";
 
-const OPACITIES: [u32; 5] = [100, 90, 80, 70, 60];
+// Finer steps near the top, because that is the range worth having: below
+// about 80% the text starts fighting whatever is behind the glass.
+const OPACITIES: [u32; 5] = [100, 95, 90, 85, 80];
 
 /// How strongly the cover's colours wash the card. Stored as a fraction, shown
 /// by name — "40%" means nothing to look at, whereas "Subtle" does.
