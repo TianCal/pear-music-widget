@@ -27,6 +27,24 @@
   const SECOND_SHARE = 0.12;
   const THIRD_SHARE = 0.08;
 
+  /**
+   * Vivid weight per sampled pixel, below which the artwork is treated as
+   * having no colour to give.
+   *
+   * This has to be a *rate*, not a total. A black-and-white photograph is never
+   * perfectly desaturated — JPEG chroma noise leaves a scattering of coloured
+   * pixels, and chroma artefacts skew warm — so a total is passed by noise
+   * alone. Measured across a queue of real covers: a monochrome sleeve scored
+   * 0.0024 (41 coloured pixels out of 1,764), while the least colourful cover
+   * that genuinely had a hue scored 0.0193. An eightfold gap, so the line sits
+   * between them rather than at either end.
+   *
+   * A rate also handles the case a share of coloured pixels would get wrong: a
+   * small but vivid logo on black is a few percent of the image, but its weight
+   * per pixel is high, so it still counts as colour.
+   */
+  const MIN_COLOUR_RATE = 0.008;
+
   const canvas = document.createElement('canvas');
   canvas.width = SAMPLE;
   canvas.height = SAMPLE;
@@ -114,7 +132,14 @@
       vivid += w;
     }
 
-    return { buckets, sat, vivid, lightness: opaque ? lightnessSum / opaque : 0.5 };
+    return {
+      buckets,
+      sat,
+      vivid,
+      // How much colour there is per pixel looked at, rather than in total.
+      rate: opaque ? vivid / opaque : 0,
+      lightness: opaque ? lightnessSum / opaque : 0.5,
+    };
   };
 
   /**
@@ -170,9 +195,9 @@
    * something unrelated.
    */
   const spread = (data) => {
-    const { buckets, sat, vivid, lightness } = histogram(data);
+    const { buckets, sat, rate, lightness } = histogram(data);
 
-    if (vivid < 2) {
+    if (rate < MIN_COLOUR_RATE) {
       // Genuinely greyscale artwork. Keep the app's accent so the transport
       // still reads, but let the card stay as colourless as the cover.
       return {
@@ -236,11 +261,14 @@
       ? { s: [82, 72, 64], l: [43 + lean, 36 + lean, 30 + lean], a: [0.86, 0.74, 0.64], base: [48, 19, 0.74] }
       : { s: [94, 86, 76], l: [70 + lean, 76 + lean, 80 + lean], a: [0.84, 0.72, 0.62], base: [66, 87, 0.66] };
 
-    // Pushed well past the artwork's own saturation, with a high floor: the
-    // card is small and sits on translucent glass, so a wash that merely
-    // matches the cover's chroma reads as grey by the time it is composited.
+    // Pushed past the artwork's own saturation, because a small card on
+    // translucent glass composites much of it away. The floor is low, though:
+    // at 0.8 of the ceiling a nearly grey cover was forced to a loud wash
+    // whatever its actual chroma, which is the other half of why a monochrome
+    // sleeve came out red. A vivid cover still saturates the clamp and is
+    // unchanged.
     const sat = (i, source) =>
-      palette.greyscale ? band.s[i] * 0.14 : clamp(source * 100 * 1.5, band.s[i] * 0.8, band.s[i]);
+      palette.greyscale ? band.s[i] * 0.14 : clamp(source * 100 * 1.5, band.s[i] * 0.35, band.s[i]);
 
     // Strength only scales how much of the wash lands. At 0 the card is plain
     // glass again; the accent is left alone, since that is the transport's

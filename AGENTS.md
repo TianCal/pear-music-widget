@@ -411,6 +411,20 @@ mix — a bright sleeve came out brown, and the scrim over it made that worse.
 Sampling the hues and painting gradients from them keeps only what the eye reads
 as the colour.
 
+**"Is this greyscale?" has to be a rate, not a total.** A black-and-white
+photograph is never perfectly desaturated: JPEG chroma noise leaves a scattering
+of coloured pixels, and those artefacts skew warm. The old test — total vivid
+weight under 2 — was passed by noise alone, so a monochrome sleeve picked an
+orange hue out of 41 pixels in 1,764 and washed the card red. Measured over real
+covers, a monochrome one scores 0.0024 of vivid weight per pixel and the least
+colourful cover that genuinely has a hue scores 0.0193; `MIN_COLOUR_RATE` sits
+between them. A rate also keeps a small vivid logo on black counting as colour,
+which a share of coloured pixels would not.
+
+The wash's saturation floor is the other half of the same fault: at 0.8 of the
+ceiling, an almost grey cover was forced to a loud wash whatever its real
+chroma. It follows the artwork now, and only vivid covers reach the ceiling.
+
 Three hues rather than one: after the winner is picked, its bucket and both
 neighbours are zeroed and the next strongest is taken, twice. A runner-up
 scoring under 12% (then 8%) of the winner is not really present, so a cover that
