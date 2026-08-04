@@ -367,6 +367,17 @@ the script fails and the 4s timeout makes sure we quit ourselves anyway.
 
 ## Accent colour
 
+**Draw with `decode()`, not `onload`.** The two mean different things: `onload`
+fires once the bytes are in, `decode()` only once there is a bitmap ready to
+draw. A webview that is hidden — the dropdown, most of the time — can have an
+image loaded but not yet rasterised, and `drawImage` then paints nothing at all.
+That is indistinguishable from greyscale artwork, so the extractor fell back to
+its default pink: a track whose cover was resolved while the dropdown was shut
+came up pink there and its real colour in the widget, from the same bytes.
+
+`applyAccent` also re-runs on `visibilitychange`, which is the only thing that
+can correct a surface that had nothing to sample while it was off screen.
+
 `palette.js` draws the cover into a 42×42 canvas, discards pixels with no hue
 (`l < 0.14`, `l > 0.93`, `s < 0.16`), weights the rest by `s² · (1 − |l−0.5|·1.2)`
 — squaring saturation is what stops the muddy background from winning on sheer

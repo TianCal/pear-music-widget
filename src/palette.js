@@ -67,8 +67,8 @@
       if (!dataUrl) return done(FALLBACK);
 
       const img = new Image();
-      img.onerror = () => done(FALLBACK);
-      img.onload = () => {
+
+      const measure = () => {
         let data;
         try {
           ctx.clearRect(0, 0, SAMPLE, SAMPLE);
@@ -121,7 +121,23 @@
           l: 66,
         });
       };
+
       img.src = dataUrl;
+
+      // `decode()` rather than `onload`, because the two mean different things:
+      // onload fires once the bytes are in, decode() only once there is a
+      // bitmap ready to draw. In a webview that is hidden — the dropdown, most
+      // of the time — an image can be loaded but not yet rasterised, and
+      // `drawImage` then paints nothing at all. That read as greyscale artwork
+      // and fell back to the default accent, so a track whose cover was
+      // resolved while the dropdown was closed came up pink in the dropdown and
+      // its real colour in the widget.
+      if (typeof img.decode === 'function') {
+        img.decode().then(measure, () => done(FALLBACK));
+      } else {
+        img.onload = measure;
+        img.onerror = () => done(FALLBACK);
+      }
     });
 
   window.palette = { extract, FALLBACK_HEX: toHex(FALLBACK.h, FALLBACK.s, FALLBACK.l) };

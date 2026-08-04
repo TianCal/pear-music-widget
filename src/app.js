@@ -95,11 +95,22 @@ const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 // ----------------------------------------------------------------- accent
 
+let accentToken = 0;
+
 const applyAccent = async (coverDataUrl) => {
+  const token = ++accentToken;
   const { hex, soft } = await window.palette.extract(coverDataUrl);
+  if (token !== accentToken) return; // a newer cover won the race
   document.documentElement.style.setProperty('--accent', hex);
   document.documentElement.style.setProperty('--accent-soft', soft);
 };
+
+// A surface that was hidden when the track changed may have had nothing to
+// sample, so take the colour again once it is back on screen. Cheap, and it is
+// the only thing that can correct a cover resolved while the dropdown was shut.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.cover) applyAccent(state.cover);
+});
 
 // --------------------------------------------------------------- marquee
 
