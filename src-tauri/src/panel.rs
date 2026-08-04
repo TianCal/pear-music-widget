@@ -111,7 +111,7 @@ fn resize(app: &AppHandle, panel: &WebviewWindow) -> Rect {
         width: size.0,
         height,
     };
-    window::set_bounds(panel, rect);
+    window::set_bounds(app, panel, rect);
     rect
 }
 
@@ -209,7 +209,7 @@ fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) -> Rect {
         width: size.0,
         height: size.1,
     };
-    window::set_bounds(panel, rect);
+    window::set_bounds(app, panel, rect);
     rect
 }
 

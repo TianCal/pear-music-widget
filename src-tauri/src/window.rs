@@ -58,6 +58,13 @@ pub struct Rect {
     pub height: f64,
 }
 
+/// Which corner of the window stays put when its size changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Anchor {
+    pub right: bool,
+    pub bottom: bool,
+}
+
 /// Per-window runtime state. Electron hung these off the BrowserWindow; here
 /// they are keyed by window label.
 #[derive(Default)]
@@ -67,6 +74,17 @@ pub struct WindowExtras {
     /// The size to come back to. Remembered rather than recomputed so an odd
     /// size the user chose survives the round trip.
     pub collapsed: Option<Rect>,
+    /// The corner to hold when the size changes, decided from a position the
+    /// *user* put the window in and then held onto. Re-deriving it after every
+    /// resize is what walked the widget up the screen: the skins differ by 174
+    /// points of height, so growing one pushes the window into the other half of
+    /// the display and flips which corner looks nearest. `None` until the window
+    /// has been seen somewhere the user left it, which is also why it need not
+    /// be persisted — the saved position answers the question on first use.
+    pub anchor: Option<Anchor>,
+    /// The last geometry we asked for ourselves, so a move or resize event can
+    /// be told apart from one the user caused.
+    pub last_set: Option<Rect>,
 }
 
 pub struct WindowState {
@@ -271,9 +289,58 @@ pub fn bounds_of(window: &WebviewWindow) -> Rect {
     }
 }
 
-pub fn set_bounds(window: &WebviewWindow, rect: Rect) {
+pub fn set_bounds(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
+    state(app).with_extras(window.label(), |extras| extras.last_set = Some(rect));
     let _ = window.set_position(LogicalPosition::new(rect.x, rect.y));
     let _ = window.set_size(LogicalSize::new(rect.width, rect.height));
+}
+
+/// Whether two rects are the same window position to within the rounding that
+/// survives a logical → physical → logical round trip on a scaled display.
+fn same_rect(a: Rect, b: Rect) -> bool {
+    (a.x - b.x).abs() <= 1.0
+        && (a.y - b.y).abs() <= 1.0
+        && (a.width - b.width).abs() <= 1.0
+        && (a.height - b.height).abs() <= 1.0
+}
+
+/// The corner of `rect` nearest a corner of `area`.
+fn anchor_in(area: Rect, rect: Rect) -> Anchor {
+    Anchor {
+        right: (area.x + area.width - (rect.x + rect.width)).abs() < (rect.x - area.x).abs(),
+        bottom: (area.y + area.height - (rect.y + rect.height)).abs() < (rect.y - area.y).abs(),
+    }
+}
+
+/// The corner of `rect` nearest a corner of the display it sits on.
+fn anchor_for(app: &AppHandle, rect: Rect) -> Anchor {
+    anchor_in(work_area_matching(app, rect), rect)
+}
+
+/// Where a window of size `next` lands when `current` is resized about `anchor`.
+///
+/// A skin that is 174 points taller can still push a window anchored near the
+/// bottom of a short display up under the menu bar, so the result is clamped to
+/// the work area. Clamping breaks the round trip, but only in the corner case
+/// where the alternative is off-screen.
+fn place(area: Rect, current: Rect, anchor: Anchor, next: (f64, f64)) -> Position {
+    let x = if anchor.right {
+        current.x + current.width - next.0
+    } else {
+        current.x
+    }
+    .round();
+    let y = if anchor.bottom {
+        current.y + current.height - next.1
+    } else {
+        current.y
+    }
+    .round();
+
+    Position {
+        x: x.clamp(area.x, (area.x + area.width - next.0).max(area.x)),
+        y: y.clamp(area.y, (area.y + area.height - next.1).max(area.y)),
+    }
 }
 
 // --------------------------------------------------------------------- zoom
@@ -397,8 +464,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         store.get(|s| s.always_on_top),
     );
     macos::set_alpha(&window, store.get(|s| s.opacity));
-    apply_size_limits(&window, &skin);
-    macos::set_aspect_ratio(&window, Some(base_for(&skin)));
+    let shape = shape_of(&skin, None);
+    apply_size_limits(&window, shape);
+    macos::set_aspect_ratio(&window, Some(shape));
 
     apply_zoom(app, &window);
     #[cfg(debug_assertions)]
@@ -410,22 +478,61 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(window)
 }
 
-fn apply_size_limits(window: &WebviewWindow, skin: &str) {
-    let _ = window.set_min_size(Some(LogicalSize::new(
-        MIN_WIDTH,
-        height_for(MIN_WIDTH, skin),
-    )));
-    let _ = window.set_max_size(Some(LogicalSize::new(
-        MAX_WIDTH,
-        height_for(MAX_WIDTH, skin),
-    )));
+/// The shape the window should hold: the skin's, plus the height of whichever
+/// panel is open.
+///
+/// A panel scales with the page, so its height is a fixed multiple of the width
+/// and **an expanded window has a constant aspect ratio too** — the skin's, with
+/// the panel added to the height. Expanding therefore does not have to abandon
+/// the aspect lock, only widen it, which is what makes dragging an edge with the
+/// lyrics open scale the card instead of stretching a window whose contents
+/// ignore it.
+fn shape_of(skin: &str, open: Option<&str>) -> (f64, f64) {
+    let (width, height) = base_for(skin);
+    (width, height + open.and_then(panel_height).unwrap_or(0.0))
 }
 
-/// While a panel is open the aspect lock is off and the window is taller than
-/// any skin, so the limits have to open up with it.
-fn release_size_limits(window: &WebviewWindow) {
-    let _ = window.set_min_size(Some(LogicalSize::new(MIN_WIDTH, 80.0)));
-    let _ = window.set_max_size(Some(LogicalSize::new(MAX_WIDTH, 4000.0)));
+/// The width range the window may be dragged through, as heights for `shape`.
+///
+/// Always applied *before* the resize it is meant to allow: `setFrame:` clamps
+/// to the min and max, so limits still describing the old shape would swallow
+/// the new size.
+fn apply_size_limits(window: &WebviewWindow, shape: (f64, f64)) {
+    let height = |width: f64| (width * shape.1 / shape.0).round();
+    let _ = window.set_min_size(Some(LogicalSize::new(MIN_WIDTH, height(MIN_WIDTH))));
+    let _ = window.set_max_size(Some(LogicalSize::new(MAX_WIDTH, height(MAX_WIDTH))));
+}
+
+/// Whether a move or resize event is the settling of something we asked for
+/// rather than something the user did.
+fn is_ours(state: &WindowState, label: &str, rect: Rect) -> bool {
+    state
+        .with_extras(label, |extras| extras.last_set)
+        .is_some_and(|last| same_rect(last, rect))
+}
+
+/// A move or resize the user performed. While a panel is open the window
+/// carries the panel's height, so the collapsed shape it must return to is
+/// re-derived from the width rather than read off the window.
+pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow) {
+    let state = state(app).inner().clone();
+    let label = window.label().to_string();
+    let rect = bounds_of(window);
+
+    if !is_ours(&state, &label, rect) {
+        let skin = skin_of(&app.state::<Arc<Store>>());
+        state.with_extras(&label, |extras| {
+            if extras.expanded_by.is_some() {
+                extras.collapsed = Some(Rect {
+                    height: height_for(rect.width, &skin),
+                    ..rect
+                });
+            }
+        });
+    }
+
+    apply_zoom(app, window);
+    schedule_persist(app);
 }
 
 // ------------------------------------------------------------- persistence
@@ -449,6 +556,19 @@ pub fn schedule_persist(app: &AppHandle) {
         let store = app.state::<Arc<Store>>().inner().clone();
         let rect = bounds_of(&window);
 
+        // Only geometry the user produced re-decides the anchor. Our own
+        // resizes land here too — Tauri emits the same events for them — and
+        // reading the nearest corner back off one of those is the drift.
+        // Measured collapsed, or an open panel's height would drag the window's
+        // bottom edge nearer the screen's and flip the answer on its own.
+        if !is_ours(&state, WIDGET, rect) {
+            let collapsed = state
+                .with_extras(WIDGET, |extras| extras.collapsed)
+                .unwrap_or(rect);
+            let anchor = anchor_for(&app, collapsed);
+            state.with_extras(WIDGET, |extras| extras.anchor = Some(anchor));
+        }
+
         store.update(|s| {
             s.bounds = Some(Position {
                 x: rect.x.round(),
@@ -462,9 +582,10 @@ pub fn schedule_persist(app: &AppHandle) {
 // -------------------------------------------------------------- expansion
 
 /// Grow the widget downwards to make room for a panel, and put it back
-/// afterwards. The aspect ratio has to be released while expanded or a drag
-/// would snap the panel away, and the collapsed bounds are remembered rather
-/// than recomputed so an odd size the user chose survives the round trip.
+/// afterwards. The aspect ratio moves to the taller shape rather than being
+/// released — a released lock let a drag stretch the window without the page
+/// following — and the collapsed bounds are remembered rather than recomputed so
+/// an odd size the user chose survives the round trip.
 pub fn set_expanded(app: &AppHandle, window: &WebviewWindow, panel: Option<&str>) {
     let state = state(app).inner().clone();
     let label = window.label().to_string();
@@ -496,9 +617,10 @@ pub fn set_expanded(app: &AppHandle, window: &WebviewWindow, panel: Option<&str>
         let max_y = area.y + area.height - height;
         let y = collapsed.y.min(max_y.max(area.y)).round();
 
-        macos::set_aspect_ratio(window, None);
-        release_size_limits(window);
+        let shape = shape_of(&skin_of(&app.state::<Arc<Store>>()), Some(which));
+        apply_size_limits(window, shape);
         set_bounds(
+            app,
             window,
             Rect {
                 x: collapsed.x,
@@ -507,6 +629,7 @@ pub fn set_expanded(app: &AppHandle, window: &WebviewWindow, panel: Option<&str>
                 height,
             },
         );
+        macos::set_aspect_ratio(window, Some(shape));
         return;
     }
 
@@ -515,12 +638,12 @@ pub fn set_expanded(app: &AppHandle, window: &WebviewWindow, panel: Option<&str>
         extras.collapsed.take()
     });
 
-    let skin = skin_of(&app.state::<Arc<Store>>());
-    apply_size_limits(window, &skin);
+    let shape = shape_of(&skin_of(&app.state::<Arc<Store>>()), None);
+    apply_size_limits(window, shape);
     if let Some(collapsed) = collapsed {
-        set_bounds(window, collapsed);
+        set_bounds(app, window, collapsed);
     }
-    macos::set_aspect_ratio(window, Some(base_for(&skin)));
+    macos::set_aspect_ratio(window, Some(shape));
 }
 
 /// Set the window to a collapsed size, re-adding the open panel's height if one
@@ -532,13 +655,14 @@ fn apply_collapsed_size(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
     let open = state.with_extras(&label, |extras| extras.expanded_by.clone());
 
     let Some(extra) = open.as_deref().and_then(panel_height) else {
-        set_bounds(window, rect);
+        set_bounds(app, window, rect);
         return;
     };
 
     state.with_extras(&label, |extras| extras.collapsed = Some(rect));
     let zoom = rect.width / base_for(&skin_of(&app.state::<Arc<Store>>())).0;
     set_bounds(
+        app,
         window,
         Rect {
             height: rect.height + (extra * zoom).round(),
@@ -547,52 +671,49 @@ fn apply_collapsed_size(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
     );
 }
 
-/// Resize to `next`, pinning whichever corner of the window is nearest a screen
-/// corner so a widget parked bottom-right stays there. Measures against the
-/// collapsed bounds when a panel is open, so the panel's extra height does not
-/// skew which corner looks nearest.
+/// Resize to `next`, pinning the corner the window is anchored to so a widget
+/// parked bottom-right stays there. Measures against the collapsed bounds when a
+/// panel is open, so the panel's extra height does not skew the result.
+///
+/// The anchor is whichever corner was nearest a screen corner *when the user
+/// last placed the window*, not when this runs. Deciding it here made the swap
+/// asymmetric: classic at y=450 pins its bottom and lands at y=276, from where
+/// the top is now nearer, so switching back leaves it at 276 — 174 points lost
+/// every round trip, which is what walked the widget off the top of the screen.
 fn resize_keeping_corner(app: &AppHandle, window: &WebviewWindow, next: (f64, f64)) -> Position {
     let state = state(app).inner().clone();
     let current = state
         .with_extras(window.label(), |extras| extras.collapsed)
         .unwrap_or_else(|| bounds_of(window));
+
     let area = work_area_matching(app, current);
-
-    let dist_left = (current.x - area.x).abs();
-    let dist_right = (area.x + area.width - (current.x + current.width)).abs();
-    let dist_top = (current.y - area.y).abs();
-    let dist_bottom = (area.y + area.height - (current.y + current.height)).abs();
-
-    let x = if dist_right < dist_left {
-        current.x + current.width - next.0
-    } else {
-        current.x
-    }
-    .round();
-    let y = if dist_bottom < dist_top {
-        current.y + current.height - next.1
-    } else {
-        current.y
-    }
-    .round();
+    let fallback = anchor_in(area, current);
+    let anchor = state.with_extras(window.label(), |extras| *extras.anchor.get_or_insert(fallback));
+    let at = place(area, current, anchor, next);
 
     apply_collapsed_size(
         app,
         window,
         Rect {
-            x,
-            y,
+            x: at.x,
+            y: at.y,
             width: next.0,
             height: next.1,
         },
     );
-    Position { x, y }
+    at
 }
 
 // --------------------------------------------------------------- skin swap
 
 /// Switch layout wholesale. Each skin has its own aspect ratio, so the lock has
 /// to be re-set or the next drag would snap the window back to the old shape.
+///
+/// The shape is the one the window is actually in, panel included. Re-imposing
+/// the *collapsed* limits and aspect on a window standing open at a panel's
+/// height is what made this look unfixed: macOS clamped the too-tall window on
+/// the next drag, and the resize it did behind our backs was read as the user
+/// moving the widget, which handed the anchor a position nobody had chosen.
 pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
     if !SKINS.contains(&skin) {
         return;
@@ -600,16 +721,18 @@ pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
     let store = app.state::<Arc<Store>>().inner().clone();
     store.update(|s| s.skin = skin.to_string());
 
+    let open = state(app).with_extras(window.label(), |extras| extras.expanded_by.clone());
+    let shape = shape_of(skin, open.as_deref());
+
     macos::set_aspect_ratio(window, None);
-    release_size_limits(window);
+    apply_size_limits(window, shape);
 
     // Come back to whatever size the user last left this skin at.
     let size = size_for_skin(&store, skin);
     let position = resize_keeping_corner(app, window, size);
     store.update(|s| s.bounds = Some(position));
 
-    apply_size_limits(window, skin);
-    macos::set_aspect_ratio(window, Some(base_for(skin)));
+    macos::set_aspect_ratio(window, Some(shape));
     apply_zoom_to(
         app,
         window,
@@ -635,6 +758,16 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
         s.bounds = Some(position);
     });
 
+    // Reset parks the widget top right, so that is where it is anchored from
+    // now on. Nothing else moves the window without the user's hand on it, so
+    // this is the one place the anchor is set rather than observed.
+    state(app).with_extras(window.label(), |extras| {
+        extras.anchor = Some(Anchor {
+            right: true,
+            bottom: false,
+        })
+    });
+
     let rect = Rect {
         x: position.x,
         y: position.y,
@@ -643,4 +776,97 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
     };
     apply_collapsed_size(app, window, rect);
     apply_zoom_to(app, window, rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1440×900 display with the menu bar taken off the top.
+    const AREA: Rect = Rect {
+        x: 0.0,
+        y: 25.0,
+        width: 1440.0,
+        height: 875.0,
+    };
+
+    fn rect(x: f64, y: f64, skin: &str) -> Rect {
+        let (width, height) = base_for(skin);
+        Rect { x, y, width, height }
+    }
+
+    /// The bug: the corner was re-read from geometry the resize had just moved,
+    /// so classic → stack → classic never came back. Held anchor, it does.
+    #[test]
+    fn switching_skin_and_back_returns_to_where_it_started() {
+        let start = rect(500.0, 450.0, "classic");
+        let anchor = anchor_in(AREA, start);
+        assert!(anchor.bottom, "a short window at y=450 sits nearer the bottom");
+
+        let stack = place(AREA, start, anchor, base_for("stack"));
+        assert_ne!(stack.y, start.y, "the taller skin has to grow somewhere");
+
+        let back = place(AREA, rect(stack.x, stack.y, "stack"), anchor, base_for("classic"));
+        assert_eq!((back.x, back.y), (start.x, start.y));
+
+        // Re-deciding the corner from the resized window is what lost the 174
+        // points: from up there the top edge is the nearer one.
+        assert!(!anchor_in(AREA, rect(stack.x, stack.y, "stack")).bottom);
+    }
+
+    #[test]
+    fn a_widget_parked_in_a_corner_stays_in_it() {
+        let (width, height) = base_for("classic");
+        let parked = Rect {
+            x: AREA.x + AREA.width - width - 16.0,
+            y: AREA.y + AREA.height - height - 16.0,
+            width,
+            height,
+        };
+        let anchor = anchor_in(AREA, parked);
+        assert_eq!(anchor, Anchor { right: true, bottom: true });
+
+        let stack = place(AREA, parked, anchor, base_for("stack"));
+        let (stack_width, stack_height) = base_for("stack");
+        assert_eq!(stack.x + stack_width, parked.x + parked.width);
+        assert_eq!(stack.y + stack_height, parked.y + parked.height);
+    }
+
+    /// The claim that lets an expanded window keep an aspect lock at all: the
+    /// height `apply_collapsed_size` computes for a given width is the height
+    /// the lock would hold it to. If these disagree, dragging an edge with the
+    /// lyrics open fights the layout.
+    #[test]
+    fn an_open_panel_scales_with_the_card() {
+        for skin in SKINS {
+            let (base_width, base_height) = base_for(skin);
+            for panel in ["search", "lyrics"] {
+                let extra = panel_height(panel).expect("a known panel");
+                let shape = shape_of(skin, Some(panel));
+                assert_eq!(shape, (base_width, base_height + extra));
+
+                for width in [MIN_WIDTH, base_width, 500.0, MAX_WIDTH] {
+                    let zoom = width / base_width;
+                    let grown = height_for(width, skin) + (extra * zoom).round();
+                    let locked = (width * shape.1 / shape.0).round();
+                    assert!(
+                        (grown - locked).abs() <= 1.0,
+                        "{skin}/{panel} at {width}: grows to {grown}, locked to {locked}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_skin_never_lands_under_the_menu_bar() {
+        // Anchored to the bottom of a display too short to grow into.
+        let short = Rect { x: 0.0, y: 25.0, width: 1440.0, height: 300.0 };
+        let low = rect(40.0, 215.0, "classic");
+        let anchor = anchor_in(short, low);
+        assert!(anchor.bottom);
+
+        let stack = place(short, low, anchor, base_for("stack"));
+        assert!(stack.y >= short.y, "grew to y={} above {}", stack.y, short.y);
+    }
 }

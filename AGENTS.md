@@ -325,6 +325,35 @@ The corner radius must *not* scale: the vibrancy layer is rounded in fixed
 points, so `apply_zoom` sends the zoom to the renderer and the CSS radius is
 divided by it to stay flush.
 
+**An open panel is a shape, not an exception.** A panel's height scales with the
+page, so `collapsed_height + panel * zoom` is linear in the width — an expanded
+window has a *constant* aspect ratio, the skin's with the panel added to its
+height. `shape_of` returns it and everything that constrains the window takes it,
+so expanding widens the aspect lock instead of dropping it. Dropping it is what
+made dragging an edge with the lyrics open stretch a window whose contents did
+not follow. **The limits must be applied before the resize they are meant to
+allow** — `setFrame:` clamps to min and max, so limits still describing the old
+shape swallow the new size — and the aspect ratio after it.
+
+Every path that resizes has to ask what is open: `apply_skin` re-imposing the
+*collapsed* limits on a window standing open at a panel's height is the bug that
+looked like the anchor fix not working. macOS clamped the too-tall window on the
+next drag, and that resize — ours in cause, nobody's in intent — was read as the
+user placing the widget.
+
+**The anchor is observed, never re-derived.** The skins differ by 174 points of
+height, so a resize has to move one edge, and `resize_keeping_corner` holds
+whichever corner is nearest a screen corner. That corner is decided from a
+position the *user* left the window in and then remembered in `WindowExtras`.
+Deciding it at resize time is a bug that looks like the widget wandering: the
+resize itself carries the window into the other half of the display, so the
+answer flips and the swap stops being reversible — classic at y=450 pins its
+bottom and lands at y=276, from where the top is nearer, so switching back leaves
+it there, 174 points up, every round trip. `set_bounds` records the geometry it
+asked for so the persist task can tell our own move events from the user's and
+leave the anchor alone for ours. `reset_window` is the one place that *sets* an
+anchor, because it parks the widget top right itself.
+
 The breakpoint has hysteresis (compact below 392px, normal above 412px) so a slow
 drag does not flap.
 

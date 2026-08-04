@@ -125,23 +125,12 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
             }
         }
 
-        WindowEvent::Moved(_) if label == WIDGET => window::schedule_persist(app),
-
-        WindowEvent::Resized(_) if label == WIDGET => {
-            // Growing for a panel is our own doing: it must not be persisted as
-            // the user's preferred size, and the zoom is derived from the
-            // collapsed shape.
-            let expanded = app
-                .try_state::<Arc<WindowState>>()
-                .map(|state| state.with_extras(WIDGET, |extras| extras.expanded_by.is_some()))
-                .unwrap_or(false);
-            if expanded {
-                return;
-            }
+        // Both carry the same question — did the user do this, or did we? —
+        // so both go through one place that can tell.
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) if label == WIDGET => {
             if let Some(window) = app.get_webview_window(WIDGET) {
-                window::apply_zoom(app, &window);
+                window::on_geometry_changed(app, &window);
             }
-            window::schedule_persist(app);
         }
 
         _ => {}
