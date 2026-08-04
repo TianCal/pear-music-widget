@@ -319,7 +319,12 @@ pub fn apply_zoom_to(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
 
 /// Everything both windows share: glass, no shadow surprises, no Space that
 /// hides them.
-pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: isize) {
+///
+/// `level` is `None` for the widget: `always_on_top` already governs it, and a
+/// second writer for the same property is how it ended up floating regardless
+/// of the setting. The dropdown needs one, because Tauri cannot express the
+/// pop-up-menu level a menu-bar dropdown has to sit at.
+pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: Option<isize>) {
     if let Err(err) = apply_vibrancy(
         window,
         material,
@@ -329,7 +334,9 @@ pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: is
         eprintln!("[vibrancy] {}: {err}", window.label());
     }
     macos::set_has_shadow(window, true);
-    macos::set_level(window, level);
+    if let Some(level) = level {
+        macos::set_level(window, level);
+    }
     macos::join_all_spaces(window);
 }
 
@@ -371,7 +378,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .theme(forced_theme())
         .build()?;
 
-    dress(&window, NSVisualEffectMaterial::UnderWindowBackground, macos::LEVEL_FLOATING);
+    dress(&window, NSVisualEffectMaterial::UnderWindowBackground, None);
     macos::set_alpha(&window, store.get(|s| s.opacity));
     apply_size_limits(&window, &skin);
     macos::set_aspect_ratio(&window, Some(base_for(&skin)));

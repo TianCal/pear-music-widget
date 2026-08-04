@@ -28,14 +28,13 @@ Both are the same renderer on the same state, so they never disagree.
 | Tray icon | |
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
-| **Right click** | Settings — widget visibility, skin, dropdown skin, opacity, always on top, reset size and position, open at login, reconnect, quit |
+| **Right click** | Settings — widget visibility, skin, dropdown skin, cover tint, opacity, always on top, reset size and position, open at login, reconnect, quit |
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
-Both the menu-bar menu and the widget's own right-click menu carry **Quit with
-YouTube Music**, which closes the player before quitting the widget. The first
-use raises the one-time macOS "wants to control" prompt; if it is declined, the
-widget still quits on its own.
+Every menu carries **Quit with App**, which closes YouTube Music before quitting
+the widget. The first use raises the one-time macOS "wants to control" prompt;
+if it is declined, the widget still quits on its own.
 
 If YouTube Music is not running, pressing play launches it. **Double-clicking the
 card** brings it to the front — anywhere that is not a control, since dragging
@@ -83,7 +82,8 @@ index, so a song ending mid-click cannot make it play the wrong thing.
 
 - Real macOS vibrancy, native rounded corners and shadow
 - The whole card tinted from the cover art — three hues pulled off the artwork
-  and diffused across the glass, with a matching accent on the transport
+  and diffused across the glass, with a matching accent on the transport.
+  **Cover tint** sets how far it goes, from Off to Vivid
 - Play/pause, next, previous, shuffle, like (right-click the heart to dislike)
 - Scrubable progress bar
 - Volume three ways: drag the popover on the speaker, scroll anywhere on the

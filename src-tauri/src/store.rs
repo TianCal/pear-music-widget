@@ -41,6 +41,9 @@ fn default_always_on_top() -> bool {
 fn default_opacity() -> f64 {
     1.0
 }
+fn default_tint() -> f64 {
+    1.0
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -68,6 +71,9 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(default = "default_opacity")]
     pub opacity: f64,
+    /// How strongly the cover's colours wash the card, 0..=1.
+    #[serde(default = "default_tint")]
+    pub tint: f64,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -87,6 +93,7 @@ impl Default for Settings {
             panel_skin: default_skin(),
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
+            tint: default_tint(),
             extra: BTreeMap::new(),
         }
     }

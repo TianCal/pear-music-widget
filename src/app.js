@@ -54,6 +54,7 @@ let state = {
   status: 'connecting',
   skin: 'classic',
   panelSkin: 'classic',
+  tint: 1,
   upnext: [],
   lyrics: null,
   lyricsState: 'idle',
@@ -99,7 +100,7 @@ let paletteToken = 0;
 /** The whole card is tinted from the cover, not just the transport. */
 const applyPalette = async (coverDataUrl) => {
   const token = ++paletteToken;
-  const palette = await window.palette.extract(coverDataUrl);
+  const palette = await window.palette.extract(coverDataUrl, state.tint ?? 1);
   if (token !== paletteToken) return; // a newer cover won the race
 
   const root = document.documentElement.style;
@@ -316,6 +317,7 @@ const applyState = (next) => {
   const positionChanged = next.position !== state.position;
   const playingChanged = next.isPlaying !== state.isPlaying;
   const songChanged = next.song?.videoId !== state.song?.videoId;
+  const tintChanged = next.tint !== state.tint;
   const skin = skinOf(next);
 
   // Keep the level the user is actually setting while our own echoes drain.
@@ -348,6 +350,9 @@ const applyState = (next) => {
     clock.at = performance.now();
   }
   clock.playing = !!next.isPlaying;
+
+  // The cover has not changed, so renderSong will not re-mix the wash.
+  if (tintChanged) applyPalette(next.cover);
 
   renderStatus();
   renderSong();

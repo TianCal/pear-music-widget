@@ -19,8 +19,6 @@ use objc2::runtime::AnyObject;
 use objc2_foundation::NSSize;
 use tauri::WebviewWindow;
 
-/// Above normal windows but below menus — a floating widget.
-pub const LEVEL_FLOATING: isize = 3;
 /// Above everything, including other apps' floating windows: a dropdown from
 /// the menu bar has to sit over whatever it drops onto.
 pub const LEVEL_POPUP_MENU: isize = 101;

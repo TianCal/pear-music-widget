@@ -78,7 +78,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
     // `Menu` rather than `UnderWindowBackground`: a dropdown should read as part
     // of the menu bar it hangs from.
-    window::dress(&panel, NSVisualEffectMaterial::Menu, macos::LEVEL_POPUP_MENU);
+    window::dress(&panel, NSVisualEffectMaterial::Menu, Some(macos::LEVEL_POPUP_MENU));
     window::apply_zoom(app, &panel);
 
     Ok(panel)

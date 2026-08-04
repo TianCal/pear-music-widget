@@ -36,6 +36,10 @@ const MUSIC_APP_ID: &str = "com.github.th-ch.youtube-music";
 
 const OPACITIES: [u32; 5] = [100, 90, 80, 70, 60];
 
+/// How strongly the cover's colours wash the card. Stored as a fraction, shown
+/// by name — "40%" means nothing to look at, whereas "Subtle" does.
+const TINTS: [(u32, &str); 5] = [(0, "Off"), (35, "Subtle"), (60, "Medium"), (80, "Strong"), (100, "Vivid")];
+
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
 /// A menu is as wide as its widest item, and the now-playing line is the only
@@ -177,6 +181,20 @@ fn opacity_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri
     Submenu::with_items(app, "Opacity", true, &refs)
 }
 
+fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
+    let selected = (current * 100.0).round() as u32;
+    let items: Vec<CheckMenuItem<tauri::Wry>> = TINTS
+        .iter()
+        .map(|(pct, label)| {
+            CheckMenuItem::with_id(app, format!("tint:{pct}"), label, true, *pct == selected, None::<&str>)
+        })
+        .collect::<tauri::Result<_>>()?;
+
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    Submenu::with_items(app, "Cover tint", true, &refs)
+}
+
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
@@ -205,6 +223,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .unwrap_or(false);
 
     let opacity = store.get(|s| s.opacity);
+    let tint = store.get(|s| s.tint);
     let always_on_top = store.get(|s| s.always_on_top);
     let open_at_login = app.autolaunch().is_enabled().unwrap_or(false);
 
@@ -225,15 +244,15 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &always_on_top_item(app, always_on_top)?,
             &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
+            &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
             &MenuItem::with_id(app, "reconnect", "Reconnect", true, None::<&str>)?,
-            &MenuItem::with_id(app, "openApp", "Open YouTube Music", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
-            &MenuItem::with_id(app, "quitWithMusic", "Quit with YouTube Music", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
         ],
     )
 }
@@ -251,15 +270,15 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         &[
             &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
+            &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
             &MenuItem::with_id(app, "hideWidget", "Hide widget", alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "openApp", "Open YouTube Music", true, None::<&str>)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
-            &MenuItem::with_id(app, "quitWithMusic", "Quit with YouTube Music", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
         ],
     )
 }
@@ -273,10 +292,10 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         &[
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
+            &tint_submenu(app, store.get(|s| s.tint))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "openApp", "Open YouTube Music", true, None::<&str>)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
-            &MenuItem::with_id(app, "quitWithMusic", "Quit with YouTube Music", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
         ],
     )
 }
@@ -340,10 +359,6 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             store.update(|s| s.always_on_top = next);
             if let Some(widget) = &widget {
                 let _ = widget.set_always_on_top(next);
-                crate::macos::set_level(
-                    widget,
-                    if next { crate::macos::LEVEL_FLOATING } else { 0 },
-                );
             }
         }
         "reset" => {
@@ -360,7 +375,6 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             };
         }
         "reconnect" => crate::ws::retry(app),
-        "openApp" => crate::launch_music_app(app),
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
@@ -371,6 +385,14 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else if let Some(skin) = other.strip_prefix("panelSkin:") {
                 if SKINS.contains(&skin) {
                     set_panel_skin(app, skin);
+                }
+            } else if let Some(pct) = other.strip_prefix("tint:") {
+                if let Ok(pct) = pct.parse::<f64>() {
+                    let tint = pct / 100.0;
+                    store.update(|s| s.tint = tint);
+                    // The wash is mixed in the renderer, so the strength has to
+                    // reach it like any other piece of state.
+                    app.state::<Arc<Core>>().update(|state| state.tint = tint);
                 }
             } else if let Some(pct) = other.strip_prefix("opacity:") {
                 if let Ok(pct) = pct.parse::<f64>() {

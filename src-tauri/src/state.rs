@@ -81,6 +81,9 @@ pub struct PlayerState {
     pub status_message: String,
     pub skin: String,
     pub panel_skin: String,
+    /// How strongly the cover's colours wash the card, 0..=1. Mixed in the
+    /// renderer, so it travels with the rest of the state.
+    pub tint: f64,
     pub song: Option<Song>,
     /// Artwork as a `data:` URL — see `api::fetch_cover`.
     pub cover: Option<String>,
@@ -97,12 +100,13 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(skin: String, panel_skin: String) -> Self {
+    fn new(skin: String, panel_skin: String, tint: f64) -> Self {
         Self {
             status: "connecting".into(),
             status_message: String::new(),
             skin,
             panel_skin,
+            tint,
             song: None,
             cover: None,
             upnext: Vec::new(),
@@ -219,11 +223,12 @@ pub struct Core {
 impl Core {
     pub fn new(app: AppHandle, store: Arc<Store>, api: Arc<Api>) -> Self {
         let (skin, panel_skin) = (crate::window::skin_of(&store), crate::window::panel_skin_of(&store));
+        let tint = store.get(|s| s.tint.clamp(0.0, 1.0));
         Self {
             app,
             store,
             api,
-            player: Mutex::new(PlayerState::new(skin, panel_skin)),
+            player: Mutex::new(PlayerState::new(skin, panel_skin, tint)),
             volume: Mutex::new(VolumeCalibration::default()),
             lyrics_wanted_by: Mutex::new(HashSet::new()),
             cover_token: AtomicU64::new(0),

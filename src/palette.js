@@ -225,7 +225,7 @@
    * colours at a different opacity: on dark glass the wash has to carry its own
    * light, and on light glass it has to stay out of the text's way.
    */
-  const washes = (palette, dark) => {
+  const washes = (palette, dark, strength) => {
     const [one, two, three] = palette.hues;
 
     // A dark cover gets a slightly deeper wash and a light one a slightly
@@ -242,23 +242,33 @@
     const sat = (i, source) =>
       palette.greyscale ? band.s[i] * 0.14 : clamp(source * 100 * 1.5, band.s[i] * 0.8, band.s[i]);
 
+    // Strength only scales how much of the wash lands. At 0 the card is plain
+    // glass again; the accent is left alone, since that is the transport's
+    // colour rather than part of the tint.
+    const a = (i) => Math.round(band.a[i] * strength * 1000) / 1000;
+
     return {
-      wash1: toRgba(one.hue, sat(0, one.sat), band.l[0], band.a[0]),
-      wash2: toRgba(two.hue, sat(1, two.sat), band.l[1], band.a[1]),
-      wash3: toRgba(three.hue, sat(2, three.sat), band.l[2], band.a[2]),
-      washBase: toRgba(one.hue, palette.greyscale ? 4 : band.base[0], band.base[1], band.base[2]),
+      wash1: toRgba(one.hue, sat(0, one.sat), band.l[0], a(0)),
+      wash2: toRgba(two.hue, sat(1, two.sat), band.l[1], a(1)),
+      wash3: toRgba(three.hue, sat(2, three.sat), band.l[2], a(2)),
+      washBase: toRgba(
+        one.hue,
+        palette.greyscale ? 4 : band.base[0],
+        band.base[1],
+        Math.round(band.base[2] * strength * 1000) / 1000,
+      ),
     };
   };
 
   const prefersDark = () =>
     typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)').matches : true;
 
-  const build = (palette) => {
+  const build = (palette, strength) => {
     const { h, s, l } = palette.accent;
     return {
       accent: toHex(h, s, l),
       accentSoft: toRgba(h, s, l, 0.34),
-      ...washes(palette, prefersDark()),
+      ...washes(palette, prefersDark(), clamp(strength, 0, 1)),
     };
   };
 
@@ -277,9 +287,9 @@
    * @returns {Promise<{accent: string, accentSoft: string, wash1: string,
    *                    wash2: string, wash3: string, washBase: string}>}
    */
-  const extract = (dataUrl) =>
+  const extract = (dataUrl, strength = 1) =>
     new Promise((resolve) => {
-      const done = (palette) => resolve(build(palette));
+      const done = (palette) => resolve(build(palette, strength));
       if (!dataUrl) return done(FALLBACK_PALETTE);
 
       const img = new Image();

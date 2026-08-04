@@ -327,6 +327,17 @@ A manual retry (`Realtime::request_retry`) is a `Notify` pulse that both cancels
 the backoff sleep and tears down an established socket, so Reconnect is immediate
 whatever state the link is in.
 
+## Window level
+
+**One writer per window level.** `dress()` used to force `LEVEL_FLOATING` on the
+widget, which silently overrode the `always_on_top(false)` passed to the builder
+two lines above — so the widget came back floating after every launch however it
+had been left, and the menu toggle fought it afterwards. Tauri's `always_on_top`
+now owns the widget's level outright and `dress()` takes `None` for it.
+
+The dropdown still gets an explicit level, because Tauri cannot express the
+pop-up-menu level a menu-bar dropdown has to sit at.
+
 ## Windows are hidden, never closed
 
 `CloseRequested` is intercepted on both windows and turned into a hide, released
@@ -405,6 +416,12 @@ neighbours are zeroed and the next strongest is taken, twice. A runner-up
 scoring under 12% (then 8%) of the winner is not really present, so a cover that
 is genuinely one colour gets an analogous spread off the winner instead — that
 is what stops a monochrome sleeve sprouting a stripe of something unrelated.
+
+**Cover tint** scales how much of the wash lands, from Off to Vivid. It is a
+store setting like `opacity`, but the wash is mixed in the renderer, so unlike
+`opacity` it has to travel in the state snapshot rather than being applied to
+the window — hence `PlayerState::tint`. It scales the wash alphas only: the
+accent is the transport's colour, not part of the tint, so it survives at Off.
 
 Dark and light get different washes from the same artwork, not the same colours
 at a different opacity, so the palette is rebuilt on `prefers-color-scheme`
