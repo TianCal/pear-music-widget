@@ -38,6 +38,57 @@ const OPACITIES: [u32; 5] = [100, 90, 80, 70, 60];
 
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
+/// A menu is as wide as its widest item, and the now-playing line is the only
+/// one whose length we do not control. Budget it in display columns rather than
+/// characters: a CJK title counted by `char` is twice as wide as it looks, which
+/// is how a track name ended up stretching the menu halfway across the screen.
+/// The rest of the menu tops out around 23 columns ("Quit with YouTube Music").
+const NOW_PLAYING_COLUMNS: usize = 36;
+
+/// Display columns a character occupies. An approximation of Unicode's East
+/// Asian Width — full-width forms and emoji take two, everything else one —
+/// which is all a menu needs.
+fn columns(c: char) -> usize {
+    let code = c as u32;
+    let wide = matches!(code,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
+}
+
+/// Trim to a column budget, leaving room for the ellipsis that says so.
+fn ellipsize(text: &str, budget: usize) -> String {
+    if text.chars().map(columns).sum::<usize>() <= budget {
+        return text.to_string();
+    }
+
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let width = columns(c);
+        if used + width > budget.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += width;
+    }
+    out.push('…');
+    out
+}
+
 fn status_label(status: &str) -> &str {
     match status {
         "connected" => "Connected",
@@ -144,7 +195,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .as_ref()
         .map(|song| format!("{} — {}", song.title, song.artist))
         .unwrap_or_else(|| "Nothing playing".into());
-    let now_playing: String = now_playing.chars().take(60).collect();
+    let now_playing = ellipsize(&now_playing, NOW_PLAYING_COLUMNS);
 
     let widget = app.get_webview_window(WIDGET);
     let widget_alive = widget.is_some();
@@ -427,5 +478,37 @@ fn refresh_now(app: &AppHandle) {
 
     if let Ok(menu) = build_tray_menu(app) {
         let _ = tray.set_menu(Some(menu));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budgets_by_width_not_character_count() {
+        // 20 CJK characters are 40 columns, so they do not fit in 36.
+        let cjk = "海棠果孔雀最好的我動態歌詞很長的標題名字";
+        let trimmed = ellipsize(cjk, NOW_PLAYING_COLUMNS);
+        assert!(trimmed.ends_with('…'));
+        assert!(trimmed.chars().map(columns).sum::<usize>() <= NOW_PLAYING_COLUMNS);
+        // Counted by `char` this would have passed straight through untouched.
+        assert!(trimmed.chars().count() < cjk.chars().count());
+    }
+
+    #[test]
+    fn leaves_anything_that_already_fits() {
+        assert_eq!(ellipsize("Nothing playing", NOW_PLAYING_COLUMNS), "Nothing playing");
+        let exact = "a".repeat(NOW_PLAYING_COLUMNS);
+        assert_eq!(ellipsize(&exact, NOW_PLAYING_COLUMNS), exact);
+    }
+
+    #[test]
+    fn a_mixed_title_is_measured_in_columns() {
+        assert_eq!(columns('a'), 1);
+        assert_eq!(columns('海'), 2);
+        assert_eq!(columns('「'), 2);
+        let mixed = ellipsize("最好的我 (50 Feet) 「想愛不能愛的哀愁」【動態歌詞】", NOW_PLAYING_COLUMNS);
+        assert!(mixed.chars().map(columns).sum::<usize>() <= NOW_PLAYING_COLUMNS);
     }
 }
