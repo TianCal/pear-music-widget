@@ -357,6 +357,7 @@ body.panel .resize-edges {
 }
 
 .rail {
+  position: relative;
   width: 100%;
   height: 3.5px;
   border-radius: 99px;
@@ -370,12 +371,20 @@ body.panel .resize-edges {
   height: 6px;
 }
 
+/* The playhead is one inherited custom property, `--seek-x`, set on `.seek` in
+   pixels; the fill and the knob both read it. Nothing here animates a property
+   that costs layout or paint: the fill is full width and *slid in* from the
+   left rather than grown with `width`, so advancing the playhead is a
+   compositor-only translate and the glow below is never re-blurred. The
+   overhang off the left is clipped by the rail. */
 .fill {
-  height: 100%;
-  width: 0%;
+  position: absolute;
+  inset: 0;
   border-radius: 99px;
   background: var(--accent);
   box-shadow: 0 0 10px var(--accent-soft);
+  translate: calc(var(--seek-x, 0px) - 100%);
+  will-change: translate;
 }
 
 .knob {
@@ -388,14 +397,19 @@ body.panel .resize-edges {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-  transform: translateY(-50%) scale(0);
-  transition: transform 0.16s ease;
+  /* `translate` and `scale` are set as separate properties rather than one
+     `transform` so the hover pop can transition on its own: a shared transform
+     would make every playhead step ease over 0.16s and lag the drag. */
+  translate: var(--seek-x, 0px) -50%;
+  scale: 0;
+  transition: scale 0.16s ease;
+  will-change: translate;
   pointer-events: none;
 }
 
 .seek:hover .knob,
 .seek.dragging .knob {
-  transform: translateY(-50%) scale(1);
+  scale: 1;
 }
 
 /* ------------------------------------------------------------- controls */

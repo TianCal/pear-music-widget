@@ -17,6 +17,7 @@ const el = {
   title: $('title'),
   subtitle: $('subtitle'),
   seek: $('seek'),
+  rail: document.querySelector('.rail'),
   fill: $('fill'),
   knob: $('knob'),
   upnext: $('upnext'),
@@ -116,7 +117,11 @@ const applyPalette = async (coverDataUrl) => {
 // sample, so take the colours again once it is back on screen. Cheap, and it is
 // the only thing that can correct a cover resolved while the dropdown was shut.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.cover) applyPalette(state.cover);
+  if (document.visibilityState !== 'visible') return;
+  if (state.cover) applyPalette(state.cover);
+  // The progress loop stops while the surface is off screen, so the playhead is
+  // stale by however long it was away. Catch it up and start ticking again.
+  bumpProgress();
 });
 
 // Dark and light get different washes from the same artwork, so they have to be
@@ -285,6 +290,12 @@ const renderControls = () => {
   el.mute.title = `Volume ${Math.round(state.muted ? 0 : state.volume)}%`;
 };
 
+/* The rail's pixel width, cached. Measuring it inside the tick would force a
+   layout flush every frame, which is most of what this whole path is trying to
+   avoid. A skin switch and a window resize both change it. */
+let railWidth = 0;
+let seekX = -1; // last `--seek-x` written, in whole pixels
+
 const renderProgress = () => {
   const duration = state.song?.songDuration || 0;
   let position;
@@ -300,15 +311,51 @@ const renderProgress = () => {
   position = clamp(position, 0, duration || position);
   const ratio = duration > 0 ? clamp(position / duration, 0, 1) : 0;
 
-  el.fill.style.width = `${ratio * 100}%`;
-  el.knob.style.left = `${ratio * 100}%`;
+  // A four-minute track moves the playhead about two pixels a second, so at
+  // display refresh all but a couple of frames a second land on the pixel that
+  // is already on screen. Writing the same position back anyway is what made
+  // this loop cost a full layout, paint and shadow re-blur 120 times a second.
+  const x = Math.round(ratio * railWidth);
+  if (x !== seekX) {
+    seekX = x;
+    el.seek.style.setProperty('--seek-x', `${x}px`);
+  }
 
+  // Not behind the pixel guard: lyric lines turn over on their own timetable,
+  // and this is a binary search that touches the DOM only when the line
+  // actually changes.
   rollLyrics(position);
 };
 
+new ResizeObserver((entries) => {
+  railWidth = entries[entries.length - 1].contentRect.width;
+  seekX = -1; // the cached pixel is against the old width, so force a rewrite
+  renderProgress();
+}).observe(el.rail);
+
+// The playhead only moves under its own steam while the track is playing, and
+// only matters while the window is on screen. Outside of that the loop is not
+// smoothing anything — it is redrawing a still frame — so it stops, and the
+// events that can move the playhead restart it.
+let ticking = false;
+
+const shouldTick = () => !document.hidden && (clock.playing || seeking);
+
 const tick = () => {
   renderProgress();
-  requestAnimationFrame(tick);
+  ticking = shouldTick();
+  if (ticking) requestAnimationFrame(tick);
+};
+
+/** Render now, and resume the loop if there is anything left to animate. */
+const bumpProgress = () => {
+  if (ticking) return; // the running loop will pick the change up next frame
+  if (shouldTick()) {
+    ticking = true;
+    requestAnimationFrame(tick);
+  } else {
+    renderProgress();
+  }
 };
 
 // ------------------------------------------------------------------ state
@@ -359,7 +406,7 @@ const applyState = (next) => {
   renderControls();
   renderUpNext();
   renderLyrics();
-  renderProgress();
+  bumpProgress();
 };
 
 el.upnextGrid.addEventListener('click', (event) => {
@@ -516,6 +563,7 @@ el.lyricsLines.addEventListener('click', (event) => {
   clock.position = line.time;
   clock.at = performance.now();
   ignorePositionUntil = performance.now() + 1200;
+  bumpProgress();
   send('seek', { seconds: line.time });
 });
 
@@ -734,6 +782,7 @@ document.querySelectorAll('[data-cmd]').forEach((button) => {
       clock.playing = !clock.playing;
       state.isPlaying = clock.playing;
       renderControls();
+      bumpProgress();
     }
     if (cmd === 'shuffle') {
       state.shuffle = !state.shuffle;
@@ -779,7 +828,7 @@ el.seek.addEventListener('pointerdown', (event) => {
   el.seek.classList.add('dragging');
   capturePointer(el.seek, event.pointerId);
   seekPreview = ratioFromEvent(event, el.seek) * duration;
-  renderProgress();
+  bumpProgress();
 });
 
 el.seek.addEventListener('pointermove', (event) => {
@@ -801,6 +850,7 @@ const endSeek = (event) => {
   clock.position = seekPreview;
   clock.at = performance.now();
   ignorePositionUntil = performance.now() + 1200;
+  bumpProgress();
   send('seek', { seconds: seekPreview });
 };
 
@@ -1007,4 +1057,4 @@ window.addEventListener('resize', () => {
   setupMarquee(el.subtitle);
 });
 
-requestAnimationFrame(tick);
+bumpProgress();
