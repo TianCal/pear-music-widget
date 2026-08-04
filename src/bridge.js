@@ -44,6 +44,7 @@ window.widget = {
   openApp: () => invoke('open_app'),
   search: (query) => invoke('search_tracks', { query }),
   playResult: (videoId) => invoke('play_result', { videoId }),
+  playQueued: (videoId) => invoke('play_queued', { videoId }),
   setPanel: (which) => invoke('set_panel', { which }),
   contextMenu: () => invoke('context_menu'),
   onPanelCollapsed: (handler) => on('panel-collapsed', handler),

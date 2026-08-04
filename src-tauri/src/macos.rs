@@ -69,11 +69,22 @@ pub fn set_level(window: &WebviewWindow, level: isize) {
     });
 }
 
-/// Follow the user onto every Space, and stay visible over a fullscreen app
-/// rather than being hidden with the desktop.
-pub fn join_all_spaces(window: &WebviewWindow) {
-    with_ns_window(window, |handle| unsafe {
-        let behavior: usize = CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY;
+/// Whether the window follows the user onto every Space and shows over a
+/// fullscreen app, or behaves like an ordinary window that belongs to one Space.
+///
+/// `FULL_SCREEN_AUXILIARY` is exactly the flag that lets a window sit over
+/// another app's fullscreen window, and `CAN_JOIN_ALL_SPACES` puts it on the
+/// fullscreen Space in the first place — so both have to go when the widget is
+/// meant to be ordinary. Setting the level alone was not enough: with these
+/// still set, a widget with "always on top" off stayed out of the way on the
+/// desktop but appeared over a fullscreen app on another display.
+pub fn follow_everywhere(window: &WebviewWindow, follow: bool) {
+    with_ns_window(window, move |handle| unsafe {
+        let behavior: usize = if follow {
+            CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY
+        } else {
+            0 // NSWindowCollectionBehaviorDefault
+        };
         let _: () = msg_send![handle, setCollectionBehavior: behavior];
     });
 }

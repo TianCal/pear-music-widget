@@ -213,6 +213,7 @@ fn main() {
             commands::open_app,
             commands::search_tracks,
             commands::play_result,
+            commands::play_queued,
             commands::set_panel,
             commands::context_menu,
             commands::set_skin,

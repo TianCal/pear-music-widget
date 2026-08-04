@@ -74,11 +74,14 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .shadow(true)
     .visible(false)
     .theme(window::forced_theme())
+    .accept_first_mouse(true)
     .build()?;
 
     // `Menu` rather than `UnderWindowBackground`: a dropdown should read as part
     // of the menu bar it hangs from.
-    window::dress(&panel, NSVisualEffectMaterial::Menu, Some(macos::LEVEL_POPUP_MENU));
+    // The dropdown always follows: it drops from the menu bar, which is
+    // wherever you are, including over a fullscreen app.
+    window::dress(&panel, NSVisualEffectMaterial::Menu, Some(macos::LEVEL_POPUP_MENU), true);
     window::apply_zoom(app, &panel);
 
     Ok(panel)

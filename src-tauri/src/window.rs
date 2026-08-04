@@ -324,7 +324,12 @@ pub fn apply_zoom_to(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
 /// second writer for the same property is how it ended up floating regardless
 /// of the setting. The dropdown needs one, because Tauri cannot express the
 /// pop-up-menu level a menu-bar dropdown has to sit at.
-pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: Option<isize>) {
+pub fn dress(
+    window: &WebviewWindow,
+    material: NSVisualEffectMaterial,
+    level: Option<isize>,
+    follow_everywhere: bool,
+) {
     if let Err(err) = apply_vibrancy(
         window,
         material,
@@ -337,7 +342,7 @@ pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: Op
     if let Some(level) = level {
         macos::set_level(window, level);
     }
-    macos::join_all_spaces(window);
+    macos::follow_everywhere(window, follow_everywhere);
 }
 
 // ------------------------------------------------------------------ create
@@ -376,9 +381,21 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .shadow(true)
         .visible(false)
         .theme(forced_theme())
+        // Clicking an inactive window normally just activates it and the click
+        // is swallowed, which is why a "Next tracks" row needed clicking twice:
+        // the first press only brought the widget forward. A widget is meant to
+        // be operable without focusing it first.
+        .accept_first_mouse(true)
         .build()?;
 
-    dress(&window, NSVisualEffectMaterial::UnderWindowBackground, None);
+    // Following you across Spaces — and over a fullscreen app — is part of what
+    // "always on top" means. Off, the widget is an ordinary window.
+    dress(
+        &window,
+        NSVisualEffectMaterial::UnderWindowBackground,
+        None,
+        store.get(|s| s.always_on_top),
+    );
     macos::set_alpha(&window, store.get(|s| s.opacity));
     apply_size_limits(&window, &skin);
     macos::set_aspect_ratio(&window, Some(base_for(&skin)));

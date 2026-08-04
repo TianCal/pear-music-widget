@@ -23,6 +23,27 @@ fn core(app: &AppHandle) -> Arc<Core> {
     app.state::<Arc<Core>>().inner().clone()
 }
 
+/// Refresh "Next tracks" once the player has actually landed on `index`.
+///
+/// The queue can change without the *track* changing — jumping between two
+/// copies of the same song is the obvious case — and `apply_song` only refreshes
+/// it when the videoId moves. So the jump says so itself rather than relying on
+/// a track change that may never come. Waiting for the slot to go selected
+/// first, because reading the queue before the player has switched just returns
+/// the list we already had.
+fn refresh_queue_after_jump(core: Arc<Core>, index: usize) {
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
+            if entries.get(index).map(|entry| entry.selected).unwrap_or(false) {
+                break;
+            }
+        }
+        core.refresh_upnext().await;
+    });
+}
+
 #[tauri::command]
 pub fn widget_state(app: AppHandle) -> PlayerState {
     core(&app).snapshot()
@@ -161,12 +182,58 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
         }
 
         return match core.api.set_queue_index(current + 1).await {
-            Ok(()) => json!({ "ok": true, "index": current + 1 }),
+            Ok(()) => {
+                refresh_queue_after_jump(Arc::clone(&core), current + 1);
+                json!({ "ok": true, "index": current + 1 })
+            }
             Err(err) => json!({ "ok": false, "error": err.message }),
         };
     }
 
     json!({ "ok": false, "error": "Queued, but it did not appear in time" })
+}
+
+/// Play a track that is already in the queue — every "Next tracks" row is one.
+///
+/// Jumping to it is the whole job. Queueing it, as `play_result` does, inserts a
+/// *second copy* after the playing track and jumps to that, which leaves the
+/// original where it was: the queue behind the new position is untouched, so the
+/// list you just clicked comes back looking identical and the track you picked
+/// is still sitting in it.
+#[tauri::command]
+pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
+    if video_id.is_empty() {
+        return json!({ "ok": false });
+    }
+    let core = core(&app);
+    let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
+
+    // Search forward from the playing track: the same id can appear earlier in
+    // the queue, and jumping to that would rewind rather than skip ahead.
+    let start = entries
+        .iter()
+        .position(|entry| entry.selected)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let found = entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, entry)| entry.video_id.as_deref() == Some(video_id.as_str()))
+        .map(|(index, _)| index);
+
+    match found {
+        Some(index) => match core.api.set_queue_index(index).await {
+            Ok(()) => {
+                refresh_queue_after_jump(Arc::clone(&core), index);
+                json!({ "ok": true, "index": index })
+            }
+            Err(err) => json!({ "ok": false, "error": err.message }),
+        },
+        // The queue moved on between the row being drawn and clicked; queueing
+        // it is then the honest fallback.
+        None => play_result(app, video_id).await,
+    }
 }
 
 /// Open or close an expanding panel on the window that asked.

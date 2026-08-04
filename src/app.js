@@ -363,8 +363,9 @@ const applyState = (next) => {
 };
 
 el.upnextGrid.addEventListener('click', (event) => {
+  // Already in the queue — jump to it rather than queueing another copy.
   const row = event.target.closest('.upnext-item');
-  if (row?.dataset.videoId) window.widget.playResult(row.dataset.videoId);
+  if (row?.dataset.videoId) window.widget.playQueued(row.dataset.videoId);
 });
 
 // ------------------------------------------------------------------ lyrics

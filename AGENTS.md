@@ -236,6 +236,21 @@ results, so `parse_search_results` collects every `musicResponsiveListItemRender
 in the tree and keeps the ones carrying a videoId. Songs, albums and videos all
 use that renderer.
 
+That insert-and-jump is for a track that is **not in the queue**. A "Next
+tracks" row already is one, so it uses `play_queued`, which just jumps to its
+index. Queueing it instead inserts a *second copy* after the playing track and
+jumps to that, leaving the original where it was — the queue behind the new
+position is untouched, so the list comes back looking identical with the track
+you picked still sitting in it. That is what "clicking a next track does not
+refresh the list" turned out to be.
+
+A jump also refreshes "Next tracks" itself, rather than leaving it to
+`apply_song`: the queue can move without the *track* moving — jumping between
+two copies of the same song is the obvious case — and `apply_song` only
+refreshes when the videoId changes. It waits for the target slot to go
+`selected` first, since reading the queue before the player has switched just
+returns the list we already had.
+
 Playing a result inserts it with `INSERT_AFTER_CURRENT_VIDEO`, then **polls the
 queue** until the slot after the playing track holds it, and jumps to that index.
 
@@ -327,6 +342,16 @@ A manual retry (`Realtime::request_retry`) is a `Notify` pulse that both cancels
 the backoff sleep and tears down an established socket, so Reconnect is immediate
 whatever state the link is in.
 
+## A widget has to work without being focused
+
+Clicking an inactive window on macOS activates it and **swallows the click** —
+the content never sees it. That is why a "Next tracks" row needed clicking
+twice: the first press only brought the widget forward. Both windows are built
+with `accept_first_mouse(true)`, which is Tauri's wrapper for the same
+`acceptsFirstMouse:` every menu-bar utility needs. The symptom is easy to
+misread as a bug in whatever was clicked; the tell is that the command never
+runs at all on the first press.
+
 ## Window level
 
 **One writer per window level.** `dress()` used to force `LEVEL_FLOATING` on the
@@ -337,6 +362,15 @@ now owns the widget's level outright and `dress()` takes `None` for it.
 
 The dropdown still gets an explicit level, because Tauri cannot express the
 pop-up-menu level a menu-bar dropdown has to sit at.
+
+The level is only half of "always on top", though. The window's *collection
+behaviour* decides which Spaces it appears on: `CAN_JOIN_ALL_SPACES` puts it on
+every Space including a fullscreen app's, and `FULL_SCREEN_AUXILIARY` is exactly
+what lets it draw over that app. Both used to be set unconditionally, so a
+widget with always-on-top off behaved on the desktop and still appeared over a
+fullscreen app on another display. `macos::follow_everywhere` now follows the
+setting: 257 when on, 0 — an ordinary window belonging to one Space — when off.
+The dropdown always follows, since it drops from the menu bar.
 
 ## Windows are hidden, never closed
 

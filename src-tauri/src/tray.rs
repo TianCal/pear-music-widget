@@ -361,6 +361,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             store.update(|s| s.always_on_top = next);
             if let Some(widget) = &widget {
                 let _ = widget.set_always_on_top(next);
+                crate::macos::follow_everywhere(widget, next);
             }
         }
         "reset" => {
