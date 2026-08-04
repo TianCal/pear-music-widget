@@ -208,14 +208,23 @@ the window has to go through it.
 ## Lyrics
 
 `src-tauri/src/lyrics.rs` is **the only code that talks to a non-localhost host**
-(LRCLib). Keep it that way: the renderer's CSP allows no network at all, so
-anything fetched has to come through Rust.
+(LRCLib and YouTube Music). Keep it that way: the renderer's CSP allows no
+network at all, so anything fetched has to come through Rust.
 
-Matching is three-tier, because YouTube Music titles carry soundtrack credits
-and 《…》 wrappers that LRCLib will not match on: exact with everything we know,
-exact on a cleaned title, then free-text search picking the hit whose duration
-is closest. Empty LRC lines are kept — they are the instrumental gaps and the
-roll needs them.
+Matching is four-tier. The first three ask LRCLib, which needs help because
+YouTube Music titles carry soundtrack credits and 《…》 wrappers it will not match
+on: exact with everything we know, exact on a cleaned title, then free-text
+search picking the hit whose duration is closest. Empty LRC lines are kept —
+they are the instrumental gaps and the roll needs them.
+
+The fourth asks YouTube Music for its own timed lyrics, which covers what LRCLib
+has never heard of — smaller labels, and much of the Mandarin and Cantonese
+catalogue. Two calls, the pair Pear Desktop's `synced-lyrics` plugin makes:
+`/next` names the lyrics tab for a video id, `/browse` returns what is on it, and
+only the iOS Music client (`clientName: "26"`) is served timings. Pear proxies
+the browse call through a third party because its renderer is bound by CORS; we
+are not, so we ask YouTube directly. Being keyed by video id, this tier is also
+the one that can never return another song's words.
 
 Misses are cached as well as hits, so reopening the panel on a track with no
 lyrics does not re-query.

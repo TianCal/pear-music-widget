@@ -63,11 +63,13 @@ seeks to it. Scrolling over the panel scrolls the lyrics rather than the volume,
 and holds them still for a few seconds before playback takes the roll back. Classic gets tighter type to suit the small card; Stack gets a
 larger, airier roll to match its scale.
 
-Lyrics come from [LRCLib](https://lrclib.net) — the same source YouTube Music's
-own `synced-lyrics` plugin uses, since the api-server exposes no lyrics route.
-**This is the only time the widget talks to anything other than localhost**; it
-sends the track title and artist to look them up. Tracks with no synced lyrics
-fall back to a plain unsynced block, and tracks with none say so.
+Lyrics come from [LRCLib](https://lrclib.net) first, and from YouTube Music's own
+timed lyrics when LRCLib has never heard of the track — between them they cover
+most of what the `synced-lyrics` plugin finds, since the api-server exposes no
+lyrics route of its own. **This is the only time the widget talks to anything
+other than localhost**; it sends the track title and artist to LRCLib, and the
+video id to YouTube. Tracks with no synced lyrics fall back to a plain unsynced
+block, and tracks with none say so.
 
 ## Search
 
