@@ -35,6 +35,33 @@ const LIKE_POLL: Duration = Duration::from_secs(20);
 /// player often enough that it is never wrong for long.
 const PLAY_STATE_POLL: Duration = Duration::from_secs(5);
 
+/// Whether anything is actually on screen to be wrong.
+///
+/// Both pollers exist to correct a display, so neither has any work to do while
+/// both surfaces are hidden — which, for a menu-bar app, is nearly all the
+/// time. Skipping the tick costs nothing in accuracy because showing either
+/// surface resyncs it first; see `resync`.
+fn showing_anything(app: &AppHandle) -> bool {
+    [WIDGET, PANEL].iter().any(|label| {
+        app.get_webview_window(label)
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false)
+    })
+}
+
+/// Pull the player's ground truth now. Called whenever a surface comes back on
+/// screen, since the pollers stand down while nothing is showing.
+pub fn resync(app: &AppHandle) {
+    let Some(core) = app.try_state::<Arc<Core>>() else {
+        return;
+    };
+    let core = core.inner().clone();
+    if core.status() != "connected" {
+        return;
+    }
+    tauri::async_runtime::spawn(async move { core.refresh_all().await });
+}
+
 /// Quit for real. Windows hide rather than close, so something has to say when
 /// "hide" stops being the right answer.
 pub fn quit(app: &AppHandle) {
@@ -71,7 +98,10 @@ fn spawn_pollers(core: Arc<Core>) {
         loop {
             ticker.tick().await;
             let snapshot = like.snapshot();
-            if snapshot.status != "connected" || snapshot.song.is_none() {
+            if snapshot.status != "connected"
+                || snapshot.song.is_none()
+                || !showing_anything(&like.app)
+            {
                 continue;
             }
             if let Ok(Some(value)) = like.api.like_state().await {
@@ -88,7 +118,7 @@ fn spawn_pollers(core: Arc<Core>) {
         let mut ticker = tokio::time::interval(PLAY_STATE_POLL);
         loop {
             ticker.tick().await;
-            if core.status() != "connected" {
+            if core.status() != "connected" || !showing_anything(&core.app) {
                 continue;
             }
             if let Ok(Some(song)) = core.api.song().await {
@@ -179,11 +209,24 @@ fn main() {
         std::process::exit(runtime.block_on(doctor::run()));
     }
 
+    // Tauri's default runtime sizes itself to the machine — ten worker threads
+    // on this one — for a workload that is one websocket, a poller and the
+    // occasional fetch. Two is more than the app ever has in flight, and the
+    // rest were pure stack and scheduler overhead. Set before anything can
+    // spawn onto the default.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tauri::async_runtime::set(runtime.handle().clone());
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch should surface the widget, not start a second one.
             if let Some(window) = app.get_webview_window(WIDGET) {
                 let _ = window.show();
+                resync(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(

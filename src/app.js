@@ -50,7 +50,11 @@ const el = {
   setupOpen: $('setup-open'),
 };
 
-/** Latest snapshot from the main process. */
+/** Latest snapshot from the main process.
+ *
+ *  `status` down is pushed on the `state` event roughly once a second; `cover`,
+ *  `upnext` and `lyrics` arrive on their own events and are merged in here, so
+ *  everything below still reads from one object. */
 let state = {
   status: 'connecting',
   skin: 'classic',
@@ -206,21 +210,21 @@ const renderStatus = () => {
   el.setupOpen.hidden = state.status !== 'offline';
 };
 
+const renderCover = () => {
+  if (state.cover === lastCoverSrc) return;
+  lastCoverSrc = state.cover;
+
+  if (state.cover) {
+    el.cover.src = state.cover;
+    el.card.classList.add('has-art');
+  } else {
+    el.card.classList.remove('has-art');
+  }
+  applyPalette(state.cover);
+};
+
 const renderSong = () => {
   const song = state.song;
-
-  if (state.cover !== lastCoverSrc) {
-    lastCoverSrc = state.cover;
-    if (state.cover) {
-      el.cover.src = state.cover;
-      el.card.classList.add('has-art');
-      applyPalette(state.cover);
-    } else {
-      el.card.classList.remove('has-art');
-      applyPalette(null);
-    }
-  }
-
   const title = song?.title || 'Nothing playing';
   const subtitle = song ? [song.artist, song.album].filter(Boolean).join(' — ') : '';
 
@@ -237,12 +241,22 @@ const renderSong = () => {
 
 };
 
+/** What is currently drawn in the queue, so an unchanged queue is left alone. */
+let upnextRendered = null;
+
 const renderUpNext = () => {
   // Hidden whenever the setup screen is up: a queue from a previous session is
   // stale the moment YouTube Music goes away.
   const playerShowing = state.status === 'connected' && !!state.song;
   el.upnext.hidden = !playerShowing || skinOf(state) !== 'stack';
   if (el.upnext.hidden) return;
+
+  // The queue changes about once a track. Tearing four rows down and building
+  // them again — images and all — on every position tick was most of what this
+  // surface cost while a track played.
+  const identity = state.upnext.map((item) => item.videoId).join('\n');
+  if (identity === upnextRendered) return;
+  upnextRendered = identity;
 
   el.upnextGrid.replaceChildren();
   for (const item of state.upnext) {
@@ -272,22 +286,37 @@ const renderUpNext = () => {
   }
 };
 
+/* Written on every push, but almost never actually different. `classList.toggle`
+   is already a no-op when the class is where it should be; `setAttribute` on a
+   `<use>` is not — it re-resolves the reference — and neither is a style write. */
+const written = { play: null, like: null, volume: null };
+
 const renderControls = () => {
-  el.playIcon.firstElementChild.setAttribute('href', state.isPlaying ? '#i-pause' : '#i-play');
-  el.play.title = state.isPlaying ? 'Pause' : 'Play';
+  if (written.play !== state.isPlaying) {
+    written.play = state.isPlaying;
+    el.playIcon.firstElementChild.setAttribute('href', state.isPlaying ? '#i-pause' : '#i-play');
+    el.play.title = state.isPlaying ? 'Pause' : 'Play';
+  }
 
   el.shuffle.classList.toggle('on', !!state.shuffle);
 
   const like = (state.like || '').toUpperCase();
-  el.like.classList.toggle('on', like === 'LIKE');
-  el.like.title = like === 'LIKE' ? 'Remove like' : 'Like';
+  if (written.like !== like) {
+    written.like = like;
+    el.like.classList.toggle('on', like === 'LIKE');
+    el.like.title = like === 'LIKE' ? 'Remove like' : 'Like';
+  }
 
   // Volume 0 reads as muted even when the player's own mute flag is off.
-  const silent = state.muted || state.volume === 0;
-  el.volFill.style.width = `${clamp(state.muted ? 0 : state.volume, 0, 100)}%`;
-  el.volumeIcon.firstElementChild.setAttribute('href', silent ? '#i-muted' : '#i-volume');
-  el.mute.classList.toggle('on', silent);
-  el.mute.title = `Volume ${Math.round(state.muted ? 0 : state.volume)}%`;
+  const level = clamp(state.muted ? 0 : state.volume, 0, 100);
+  if (written.volume !== level) {
+    written.volume = level;
+    const silent = state.muted || state.volume === 0;
+    el.volFill.style.width = `${level}%`;
+    el.volumeIcon.firstElementChild.setAttribute('href', silent ? '#i-muted' : '#i-volume');
+    el.mute.classList.toggle('on', silent);
+    el.mute.title = `Volume ${Math.round(level)}%`;
+  }
 };
 
 /* The rail's pixel width, cached. Measuring it inside the tick would force a
@@ -370,7 +399,9 @@ const applyState = (next) => {
   // Keep the level the user is actually setting while our own echoes drain.
   const heldVolume = holdingVolume() ? { volume: state.volume, muted: state.muted } : null;
 
-  state = next;
+  // Merged rather than replaced: artwork, the queue and the lyrics live on this
+  // same object but arrive on their own events, and this push does not carry them.
+  Object.assign(state, next);
 
   if (heldVolume) {
     state.volume = heldVolume.volume;
@@ -398,13 +429,30 @@ const applyState = (next) => {
   }
   clock.playing = !!next.isPlaying;
 
-  // The cover has not changed, so renderSong will not re-mix the wash.
-  if (tintChanged) applyPalette(next.cover);
+  // The cover has not changed, so renderCover will not re-mix the wash.
+  if (tintChanged) applyPalette(state.cover);
 
   renderStatus();
   renderSong();
   renderControls();
   renderUpNext();
+  bumpProgress();
+};
+
+/** Artwork, the queue and the lyrics: each pushed only when it changes. */
+const applyCover = (cover) => {
+  state.cover = cover ?? null;
+  renderCover();
+};
+
+const applyUpNext = (items) => {
+  state.upnext = items || [];
+  renderUpNext();
+};
+
+const applyLyrics = (view) => {
+  state.lyrics = view?.lyrics ?? null;
+  state.lyricsState = view?.state || 'idle';
   renderLyrics();
   bumpProgress();
 };
@@ -420,38 +468,109 @@ el.upnextGrid.addEventListener('click', (event) => {
 let lyricLines = [];       // [{ time, text }]
 let lyricSynced = false;
 let lyricActive = -1;
-let lyricOffset = 0;
 let lyricManualUntil = 0;
 let lyricManualTimer = null;
 
 // How long a hand scroll holds the roll still before playback takes it back.
 const LYRIC_MANUAL_MS = 5000;
 
-/** Furthest we let a hand scroll go: content height, less half a viewport so
- *  the final lines can still sit centred. */
-const lyricMaxOffset = () =>
-  Math.max(0, el.lyricsLines.offsetHeight - el.lyricsScroll.clientHeight / 2);
+/* What made the roll stutter was never the transition — it was that the target
+   moved underneath it. The active line used to grow from 12px to 13.5px, which
+   reflowed every line below it *while* the glide to it was still running, and
+   `offsetTop` was read back inside the animation frame, forcing a layout flush
+   on every line change.
 
-const applyLyricOffset = (offset) => {
-  lyricOffset = clamp(offset, 0, lyricMaxOffset());
-  el.lyricsLines.style.transform = `translateY(${-lyricOffset}px)`;
+   So: the emphasis is a transform now (nothing below an active line moves), the
+   geometry is measured once per render, and the glide itself stays a CSS
+   transition — the compositor runs it with no per-frame JavaScript at all. All
+   this code does is write a destination and a duration, twice a verse. */
+let lyricCentres = [];     // the offset that puts each line in the middle
+let lyricRange = [0, 0];   // how far the roll may travel, first line to last
+let lyricMeasured = false;
+/** False until the roll has been put somewhere. The first placement after
+ *  opening the panel or changing track snaps: gliding there would mean watching
+ *  the words swoop up from the top every time you open the panel. */
+let lyricSettled = false;
+let lyricOffset = 0;
+
+const LYRIC_GLIDE_MIN_MS = 260;
+const LYRIC_GLIDE_MAX_MS = 620;
+/** Milliseconds per pixel travelled, between those two bounds. */
+const LYRIC_GLIDE_PACE = 5;
+
+/** The line being sung sits this far above the true middle. Dead centre reads
+ *  as slightly low, because what you want to see next is underneath it — the
+ *  lines already sung need less room than the ones coming. */
+const LYRIC_RAISE = 14;
+
+/** Where every line would have to sit to be centred. Costs one layout, taken
+ *  when the panel is open and the lines have just changed shape. */
+const measureLyrics = () => {
+  const rows = el.lyricsLines.children;
+  const height = el.lyricsScroll.clientHeight;
+  // Nothing laid out yet — the panel is mid-open. Stay unmeasured and try again
+  // on the next frame rather than caching a viewport of zero.
+  if (!height) return false;
+  const middle = height / 2;
+
+  lyricCentres = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    lyricCentres.push(rows[i].offsetTop + rows[i].offsetHeight / 2 - middle + LYRIC_RAISE);
+  }
+
+  // The roll travels between "first line centred" and "last line centred", and
+  // no further. Clamping the low end at 0 instead is what put the opening lines
+  // up in the top fade and let the closing ones drift down into the bottom one:
+  // a line was being sung while it sat outside the readable band. Both ends are
+  // allowed to be negative — a short lyric simply sits in the middle.
+  const first = lyricCentres[0] ?? 0;
+  const last = lyricCentres[lyricCentres.length - 1] ?? 0;
+  lyricRange = [Math.min(first, last), Math.max(first, last)];
+  lyricMeasured = true;
+  return true;
+};
+
+/** Send the roll to `target`, over a distance-appropriate glide. Two style
+ *  writes, and the compositor does the rest. */
+const glideLyricsTo = (target, { instant = false } = {}) => {
+  const to = clamp(target, lyricRange[0], lyricRange[1]);
+  // A line-to-line step should feel immediate; a jump across a seek should not
+  // race. Distance picks where between those the glide lands.
+  const ms =
+    instant ? 0
+    : clamp(Math.abs(to - lyricOffset) * LYRIC_GLIDE_PACE, LYRIC_GLIDE_MIN_MS, LYRIC_GLIDE_MAX_MS);
+
+  lyricOffset = to;
+  el.lyricsLines.style.setProperty('--roll-ms', `${ms}ms`);
+  el.lyricsLines.style.transform = `translateY(${(-to).toFixed(2)}px)`;
 };
 
 /** Scrolling over the lyrics moves the lyrics, not the volume. */
 const scrollLyrics = (deltaY) => {
   if (!lyricSynced) return; // unsynced is a plain block that scrolls natively
+  if (!lyricMeasured) measureLyrics();
 
   lyricManualUntil = performance.now() + LYRIC_MANUAL_MS;
-  el.lyrics.classList.add('manual');
-  applyLyricOffset(lyricOffset + deltaY);
+  // Follows the wheel exactly: an eased glide would lag behind the fingers.
+  glideLyricsTo(lyricOffset + deltaY, { instant: true });
 
   clearTimeout(lyricManualTimer);
   lyricManualTimer = setTimeout(() => {
-    el.lyrics.classList.remove('manual');
     lyricActive = -1; // force the next tick to re-centre on the playing line
+    bumpProgress();
   }, LYRIC_MANUAL_MS);
 };
-let lyricRendered = null;  // identity of what is currently in the DOM
+
+// A resize or a skin change rewraps the lines, so every measurement taken
+// against the old shape is stale.
+new ResizeObserver(() => {
+  lyricMeasured = false;
+  lyricSettled = false;
+  if (openPanel === 'lyrics') {
+    lyricActive = -1;
+    bumpProgress();
+  }
+}).observe(el.lyricsScroll);
 
 const LYRIC_NOTE = {
   idle: '',
@@ -459,22 +578,25 @@ const LYRIC_NOTE = {
   none: 'No lyrics found for this track.',
 };
 
+/* No dirty check here any more: the main process pushes the `lyrics` event only
+   when the words or the state actually change, so being called at all is the
+   signal that this has to be rebuilt. */
 const renderLyrics = () => {
   const data = state.lyrics;
-  const identity = `${state.song?.videoId || ''}:${state.lyricsState}:${data?.lines?.length || 0}`;
-  if (identity === lyricRendered) return;
-  lyricRendered = identity;
-
   lyricLines = data?.lines || [];
   lyricSynced = !!data?.synced;
   lyricActive = -1;
-  lyricOffset = 0;
   lyricManualUntil = 0;
   clearTimeout(lyricManualTimer);
-  el.lyrics.classList.remove('manual');
+
+  lyricOffset = 0;
+  lyricMeasured = false;
+  lyricSettled = false;
+  lyricRange = [0, 0];
 
   el.lyrics.classList.toggle('plain', !!data && !lyricSynced);
   el.lyricsLines.replaceChildren();
+  el.lyricsLines.style.removeProperty('--roll-ms');
   el.lyricsLines.style.transform = '';
 
   if (!lyricLines.length) {
@@ -518,25 +640,33 @@ const lyricIndexAt = (position) => {
 /** Called from the rAF tick with the interpolated playhead. */
 const rollLyrics = (position) => {
   if (openPanel !== 'lyrics' || !lyricSynced || !lyricLines.length) return;
+  // Deferred to here rather than done at render: the panel may well have been
+  // closed then, and a hidden panel has no height to measure against.
+  if (!lyricMeasured && !measureLyrics()) return;
 
   const index = lyricIndexAt(position);
   if (index === lyricActive) return;
+  const previous = lyricActive;
   lyricActive = index;
 
+  // Only the rows whose state actually changed. Repainting the class on all of
+  // them meant a hundred style invalidations per line on a long lyric, to move
+  // one word's worth of emphasis.
   const rows = el.lyricsLines.children;
-  for (let i = 0; i < rows.length; i += 1) {
-    rows[i].classList.toggle('active', i === index);
-    rows[i].classList.toggle('past', i < index);
+  rows[previous]?.classList.remove('active');
+  rows[index]?.classList.add('active');
+  for (let i = Math.min(previous, index); i < Math.max(previous, index); i += 1) {
+    rows[i]?.classList.toggle('past', i < index);
   }
 
   // Leave the roll where the user parked it until their scroll times out.
   if (performance.now() < lyricManualUntil) return;
 
-  // Centre the active line in the viewport.
-  const row = rows[index];
-  applyLyricOffset(
-    row ? row.offsetTop + row.offsetHeight / 2 - el.lyricsScroll.clientHeight / 2 : 0,
-  );
+  // Centre the active line. Before the first cue there is no active line, so
+  // the roll waits on the opening one rather than pinning the list to the top
+  // and leaving it half inside the fade.
+  glideLyricsTo(lyricCentres[index] ?? lyricRange[0], { instant: !lyricSettled });
+  lyricSettled = true;
 };
 
 const toggleLyrics = () => {
@@ -545,7 +675,11 @@ const toggleLyrics = () => {
     return;
   }
   if (searching) resetSearch(false);
+  // Opening lands on the line being sung rather than gliding to it from
+  // wherever the roll happened to be left.
   lyricActive = -1;
+  lyricMeasured = false;
+  lyricSettled = false;
   setPanel('lyrics');
 };
 
@@ -1050,7 +1184,23 @@ window.widget.onZoom((zoom) => {
 });
 
 window.widget.onState(applyState);
-window.widget.getState().then(applyState);
+window.widget.onCover(applyCover);
+window.widget.onUpNext(applyUpNext);
+window.widget.onLyrics(applyLyrics);
+
+// One reply carries all four channels: a window loading from cold cannot wait a
+// track for the artwork to change.
+window.widget.getState().then((boot) => {
+  applyCover(boot.cover);
+  applyUpNext(boot.upnext);
+  applyLyrics(boot.lyrics);
+  applyState(boot.state);
+
+  // The widget reopens the panel it was left showing. The main process has
+  // already sized the window for it; this is what tells the page to draw it and
+  // the main process that somebody is watching, so the lyrics get fetched.
+  if (!IS_PANEL && boot.panel === 'lyrics') toggleLyrics();
+});
 
 window.addEventListener('resize', () => {
   setupMarquee(el.title);

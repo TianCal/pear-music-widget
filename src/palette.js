@@ -311,14 +311,28 @@
     accent: FALLBACK,
   };
 
+  /* The artwork is read exactly once. Decoding the cover, drawing it and
+     walking 1,764 pixels is the whole cost of this file, and it answers a
+     question that only changes when the artwork does — yet it was being asked
+     again every time the dropdown was opened, every time the tint moved and
+     every time the system flipped appearance. Those all want the same hues in a
+     different arrangement, which is what `build` does, for free. */
+  let sampledFrom = null;
+  let sampled = null;
+
   /**
    * @returns {Promise<{accent: string, accentSoft: string, wash1: string,
    *                    wash2: string, wash3: string, washBase: string}>}
    */
   const extract = (dataUrl, strength = 1) =>
     new Promise((resolve) => {
-      const done = (palette) => resolve(build(palette, strength));
+      const done = (palette) => {
+        sampledFrom = dataUrl;
+        sampled = palette;
+        resolve(build(palette, strength));
+      };
       if (!dataUrl) return done(FALLBACK_PALETTE);
+      if (dataUrl === sampledFrom && sampled) return resolve(build(sampled, strength));
 
       const img = new Image();
 

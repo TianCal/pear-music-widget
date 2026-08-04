@@ -468,6 +468,15 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     apply_size_limits(&window, shape);
     macos::set_aspect_ratio(&window, Some(shape));
 
+    // Come back up showing whatever panel was left open. Done here, before the
+    // window is ever on screen, rather than waiting for the renderer to ask:
+    // the page boots well after `show`, so restoring it from there would put a
+    // visible grow into every launch. The renderer's own `set_panel` then finds
+    // the window already expanded and does nothing.
+    if let Some(panel) = store.get(|s| s.panel.clone()) {
+        set_expanded(app, &window, Some(&panel));
+    }
+
     apply_zoom(app, &window);
     #[cfg(debug_assertions)]
     if std::env::var("PMW_DEVTOOLS").is_ok() {

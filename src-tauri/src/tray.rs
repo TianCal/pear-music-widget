@@ -348,6 +348,9 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 } else {
                     // Showing it must not steal focus from whatever you were doing.
                     let _ = widget.show();
+                    // The pollers stand down while nothing is on screen, so a
+                    // widget coming back could be showing a stale glyph.
+                    crate::resync(app);
                 }
             }
         }

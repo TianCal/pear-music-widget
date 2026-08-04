@@ -5,11 +5,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
+use crate::api::THUMB_PX;
 use crate::search;
-use crate::state::{Core, PlayerState};
+use crate::state::{Bootstrap, Core};
 use crate::window::{self, PANEL};
 
 /// Polling budget for a queued track to show up (see `play_result`).
@@ -44,9 +46,12 @@ fn refresh_queue_after_jump(core: Arc<Core>, index: usize) {
     });
 }
 
+/// The state, the artwork, the queue and the lyrics in one reply. They travel
+/// on four separate events afterwards, but a window loading from cold needs all
+/// four before it can draw anything.
 #[tauri::command]
-pub fn widget_state(app: AppHandle) -> PlayerState {
-    core(&app).snapshot()
+pub fn widget_state(app: AppHandle) -> Bootstrap {
+    core(&app).bootstrap()
 }
 
 #[tauri::command]
@@ -132,12 +137,18 @@ pub async fn search_tracks(app: AppHandle, query: String) -> Value {
     let results = search::parse_search_results(&payload);
 
     // Artwork goes through here for the same reason cover art does: the
-    // renderer's CSP allows data: URLs only.
-    let mut resolved = Vec::with_capacity(results.len());
-    for item in results {
-        let thumbnail = core.api.fetch_cover(item.thumbnail.as_deref()).await;
-        resolved.push(search::SearchResult { thumbnail, ..item });
-    }
+    // renderer's CSP allows data: URLs only. Ten of them one after another put
+    // ten round trips between typing and seeing the list.
+    let resolved = future::join_all(results.into_iter().map(|item| {
+        let core = Arc::clone(&core);
+        async move {
+            search::SearchResult {
+                thumbnail: core.api.fetch_cover(item.thumbnail.as_deref(), THUMB_PX).await,
+                ..item
+            }
+        }
+    }))
+    .await;
 
     json!({ "ok": true, "results": resolved })
 }
@@ -241,6 +252,16 @@ pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
 pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -> Value {
     let which = which.filter(|which| !which.is_empty());
     let core = core(&app);
+
+    // The widget comes back up showing whatever it was left showing. Only the
+    // lyrics: a search is a query you have finished with, and the dropdown is a
+    // menu that collapses on blur, so neither is worth restoring.
+    if window.label() != PANEL {
+        let remembered = which.clone().filter(|which| which == "lyrics");
+        if core.store.get(|s| s.panel.clone()) != remembered {
+            core.store.update(|s| s.panel = remembered);
+        }
+    }
 
     // Resizing a window is AppKit work; IPC arrives on a worker thread.
     let (handle, target, panel) = (app.clone(), window.clone(), which.clone());

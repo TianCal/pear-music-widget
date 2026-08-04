@@ -600,8 +600,10 @@ body.panel .resize-edges {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* No hairline along the top edge: the well is already a shade darker than the
+     card, and that reads as the boundary on its own. A rule as well made the
+     queue above look like a different pane bolted on. */
   background: var(--well);
-  box-shadow: inset 0 0.5px 0 var(--hairline);
 }
 
 .lyrics[hidden] {
@@ -620,19 +622,17 @@ body.panel .resize-edges {
   mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 82%, transparent 100%);
 }
 
-/* While the user is scrolling by hand the eased transition would lag behind the
-   wheel, so it is dropped for the duration. */
-.lyrics.manual .lyrics-lines {
-  transition: none;
-}
-
+/* app.js writes a destination and a duration once per line; the compositor
+   animates between them with no JavaScript running per frame. The duration is
+   set inline because it scales with how far the roll has to travel — and to 0
+   when the wheel is driving it, which has to track the fingers exactly. */
 .lyrics-lines {
   position: absolute;
   left: 0;
   right: 0;
   top: 0;
   padding: 0 16px;
-  transition: transform 0.45s cubic-bezier(0.22, 0.61, 0.36, 1);
+  transition: transform var(--roll-ms, 450ms) cubic-bezier(0.22, 0.61, 0.36, 1);
   will-change: transform;
 }
 
@@ -648,7 +648,7 @@ body.panel .resize-edges {
   line-height: 1.35;
   color: var(--fg-faint);
   cursor: pointer;
-  transition: color 0.25s ease, opacity 0.25s ease;
+  transition: color 0.25s ease, opacity 0.25s ease, scale 0.25s ease;
 }
 
 .lyric.past {
@@ -656,10 +656,14 @@ body.panel .resize-edges {
   opacity: 0.5;
 }
 
+/* Emphasised with `scale` rather than a larger font, deliberately. Growing the
+   type reflowed every line below the one being sung, which moved the very
+   offsets the roll was gliding toward — the stutter you could see. A transform
+   changes nothing about the layout, so the measurements stay true and the
+   growth composites. */
 .lyric.active {
   color: var(--fg);
-  font-size: 13.5px;
-  font-weight: 600;
+  scale: 1.12;
 }
 
 .lyric.gap::before {
@@ -1005,8 +1009,8 @@ body.skin-stack .upnext:not([hidden]) {
   flex: 1 1 auto;
   min-height: 0;
   padding: 10px 14px 14px;
+  /* Same as the lyrics well: the tone change is the boundary, no rule needed. */
   background: var(--well);
-  box-shadow: inset 0 0.5px 0 var(--hairline);
 }
 
 .upnext[hidden] {
@@ -1226,23 +1230,35 @@ body.skin-classic .setup p {
 }
 
 .pulse {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 0 var(--accent-soft);
+}
+
+/* The ring is drawn once and then scaled, rather than animating the spread of a
+   box-shadow. Spread is a paint property: growing it repainted the setup screen
+   every frame for as long as the widget was disconnected, which is exactly when
+   it is sat there doing nothing else. Scale and opacity composite. */
+.pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--accent-soft);
   animation: pulse 1.9s ease-out infinite;
 }
 
 @keyframes pulse {
   0% {
-    box-shadow: 0 0 0 0 var(--accent-soft);
+    opacity: 1;
+    scale: 1;
   }
-  70% {
-    box-shadow: 0 0 0 11px rgba(0, 0, 0, 0);
-  }
+  70%,
   100% {
-    box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+    opacity: 0;
+    scale: 3.4;
   }
 }
 

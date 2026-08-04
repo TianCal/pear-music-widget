@@ -5,6 +5,8 @@
 //! videoId. Songs, albums and videos all use that renderer, so one pass gets the
 //! lot in roughly the order the app displays them.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -18,7 +20,7 @@ pub struct SearchResult {
     pub video_id: String,
     pub title: String,
     pub subtitle: String,
-    pub thumbnail: Option<String>,
+    pub thumbnail: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -27,7 +29,7 @@ pub struct UpNextItem {
     pub video_id: String,
     pub title: String,
     pub artist: String,
-    pub thumbnail: Option<String>,
+    pub thumbnail: Option<Arc<str>>,
 }
 
 /// One entry per queue slot, with the playing one marked.
@@ -111,7 +113,7 @@ fn column_text(item: &Value, index: usize) -> String {
 }
 
 /// Smallest thumbnail is plenty for a 30px row and keeps the fetch cheap.
-fn thumbnail_of(item: &Value) -> Option<String> {
+fn thumbnail_of(item: &Value) -> Option<Arc<str>> {
     dig(
         item,
         &["thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"],
@@ -120,7 +122,7 @@ fn thumbnail_of(item: &Value) -> Option<String> {
     .and_then(|list| list.first())
     .and_then(|first| first.get("url"))
     .and_then(Value::as_str)
-    .map(str::to_string)
+    .map(Arc::from)
 }
 
 pub fn parse_search_results(payload: &Value) -> Vec<SearchResult> {
@@ -243,7 +245,7 @@ pub fn parse_queue_upcoming(queue: &Value, limit: usize) -> Vec<UpNextItem> {
                 .and_then(|list| list.first())
                 .and_then(|first| first.get("url"))
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(Arc::from),
         });
     }
     out

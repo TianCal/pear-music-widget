@@ -38,6 +38,13 @@ const on = (event, handler) => {
 window.widget = {
   getState: () => invoke('widget_state'),
   onState: (handler) => on('state', handler),
+  // Artwork, the queue and the lyrics are each far larger than the state they
+  // used to ride on, and each changes about once a track where the state
+  // changes once a second. They get their own channels so the position tick
+  // does not drag them across the IPC boundary sixty times a minute.
+  onCover: (handler) => on('cover', handler),
+  onUpNext: (handler) => on('upnext', handler),
+  onLyrics: (handler) => on('lyrics', handler),
   command: (name, payload) => invoke('command', { name, payload }),
   setSkin: (skin) => invoke('set_skin', { skin }),
   setPanelSkin: (skin) => invoke('set_panel_skin', { skin }),

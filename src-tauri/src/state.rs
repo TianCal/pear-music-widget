@@ -5,17 +5,27 @@
 //! Repeat is deliberately absent: `POST /switch-repeat` is accepted but
 //! `GET /repeat-mode` always answers null on the shipped api-server plugin, so
 //! the widget can never show a truthful repeat state.
+//!
+//! **The heavy fields travel on their own channels.** Artwork, the queue and the
+//! lyrics are each an order of magnitude larger than everything else put
+//! together, and they change once a track where `position` changes once a
+//! second. Tauri's `emit` serialises the payload and then formats *a separate
+//! JS source string per webview* to eval, so a cover riding along on the
+//! position tick was being copied five times a second and parsed twice as
+//! JavaScript — for a number that moved by one. Hence `cover`, `upnext` and
+//! `lyrics` are separate events, pushed only when they actually change.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::future;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
-use crate::api::{Api, ErrorCode};
+use crate::api::{Api, ErrorCode, COVER_PX, THUMB_PX};
 use crate::lyrics::{self, Lyrics};
 use crate::search::{self, UpNextItem};
 use crate::store::Store;
@@ -73,6 +83,8 @@ impl Song {
     }
 }
 
+/// Everything small enough to ride the once-a-second position tick. Around
+/// 400 bytes serialised, and nothing in here grows with the track.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerState {
@@ -85,12 +97,6 @@ pub struct PlayerState {
     /// renderer, so it travels with the rest of the state.
     pub tint: f64,
     pub song: Option<Song>,
-    /// Artwork as a `data:` URL — see `api::fetch_cover`.
-    pub cover: Option<String>,
-    pub upnext: Vec<UpNextItem>,
-    pub lyrics: Option<Lyrics>,
-    /// idle | loading | ready | none
-    pub lyrics_state: String,
     pub is_playing: bool,
     pub position: f64,
     pub volume: f64,
@@ -108,10 +114,6 @@ impl PlayerState {
             panel_skin,
             tint,
             song: None,
-            cover: None,
-            upnext: Vec::new(),
-            lyrics: None,
-            lyrics_state: "idle".into(),
             is_playing: false,
             position: 0.0,
             volume: 100.0,
@@ -120,6 +122,40 @@ impl PlayerState {
             like: None,
         }
     }
+}
+
+/// The lyrics panel's whole world, pushed on the `lyrics` event. The state
+/// string travels with the words so the note under the roll can never describe
+/// a different fetch than the one showing.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsView {
+    /// idle | loading | ready | none
+    pub state: String,
+    pub lyrics: Option<Arc<Lyrics>>,
+}
+
+impl LyricsView {
+    fn idle() -> Self {
+        Self {
+            state: "idle".into(),
+            lyrics: None,
+        }
+    }
+}
+
+/// What a freshly loaded window needs before its first event arrives: the
+/// state plus the three channels it would otherwise have to wait a track for.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bootstrap {
+    pub state: PlayerState,
+    /// Artwork as a `data:` URL — see `api::fetch_cover`.
+    pub cover: Option<Arc<str>>,
+    pub upnext: Arc<[UpNextItem]>,
+    pub lyrics: LyricsView,
+    /// The panel the widget was last left showing, for the renderer to reopen.
+    pub panel: Option<String>,
 }
 
 // ------------------------------------------------------------------- volume
@@ -211,6 +247,11 @@ pub struct Core {
     pub store: Arc<Store>,
     pub api: Arc<Api>,
     player: Mutex<PlayerState>,
+    /// The three heavy channels. Separate locks as well as separate events:
+    /// resolving artwork must not block a position tick behind it.
+    cover: Mutex<Option<Arc<str>>>,
+    upnext: Mutex<Arc<[UpNextItem]>>,
+    lyrics: Mutex<LyricsView>,
     volume: Mutex<VolumeCalibration>,
     /// Window labels with a lyrics panel open. No point reaching out to the
     /// network for a panel nobody is looking at.
@@ -229,6 +270,9 @@ impl Core {
             store,
             api,
             player: Mutex::new(PlayerState::new(skin, panel_skin, tint)),
+            cover: Mutex::new(None),
+            upnext: Mutex::new(Arc::from([])),
+            lyrics: Mutex::new(LyricsView::idle()),
             volume: Mutex::new(VolumeCalibration::default()),
             lyrics_wanted_by: Mutex::new(HashSet::new()),
             cover_token: AtomicU64::new(0),
@@ -239,6 +283,17 @@ impl Core {
 
     pub fn snapshot(&self) -> PlayerState {
         self.player.lock().expect("player lock").clone()
+    }
+
+    /// Everything a window needs to draw itself from cold.
+    pub fn bootstrap(&self) -> Bootstrap {
+        Bootstrap {
+            state: self.snapshot(),
+            cover: self.cover.lock().expect("cover lock").clone(),
+            upnext: Arc::clone(&self.upnext.lock().expect("upnext lock")),
+            lyrics: self.lyrics.lock().expect("lyrics lock").clone(),
+            panel: self.store.get(|s| s.panel.clone()),
+        }
     }
 
     pub fn status(&self) -> String {
@@ -260,6 +315,44 @@ impl Core {
         let _ = self.app.emit("state", &next);
     }
 
+    // ------------------------------------------------------- heavy channels
+
+    /// Each of these pushes only on a real change, and drops its lock before
+    /// emitting: `emit` formats the payload once per webview, which is not work
+    /// to be holding a lock the position tick wants through.
+    fn set_cover(&self, cover: Option<Arc<str>>) {
+        {
+            let mut held = self.cover.lock().expect("cover lock");
+            if *held == cover {
+                return;
+            }
+            *held = cover.clone();
+        }
+        let _ = self.app.emit("cover", &cover);
+    }
+
+    fn set_upnext(&self, items: Arc<[UpNextItem]>) {
+        {
+            let mut held = self.upnext.lock().expect("upnext lock");
+            if *held == items {
+                return;
+            }
+            *held = Arc::clone(&items);
+        }
+        let _ = self.app.emit("upnext", &items);
+    }
+
+    fn set_lyrics(&self, view: LyricsView) {
+        {
+            let mut held = self.lyrics.lock().expect("lyrics lock");
+            if *held == view {
+                return;
+            }
+            *held = view.clone();
+        }
+        let _ = self.app.emit("lyrics", &view);
+    }
+
     // ---------------------------------------------------------------- tracks
 
     /// Swap in a new song, then resolve its artwork and like state out of band.
@@ -277,15 +370,15 @@ impl Core {
 
         self.update(|state| {
             state.song = song.clone();
-            state.cover = None;
             state.like = None;
         });
+        self.set_cover(None);
 
         let Some(song) = song else { return };
 
         let token = self.cover_token.fetch_add(1, Ordering::SeqCst) + 1;
         let (cover, like) = tokio::join!(
-            self.api.fetch_cover(song.image_src.as_deref()),
+            self.api.fetch_cover(song.image_src.as_deref(), COVER_PX),
             self.api.like_state(),
         );
         if token != self.cover_token.load(Ordering::SeqCst) {
@@ -296,10 +389,8 @@ impl Core {
             .ok()
             .flatten()
             .and_then(|value| value.get("state").and_then(Value::as_str).map(str::to_string));
-        self.update(|state| {
-            state.cover = cover;
-            state.like = like;
-        });
+        self.set_cover(cover);
+        self.update(|state| state.like = like);
 
         let core = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
@@ -315,7 +406,7 @@ impl Core {
         let wanted = crate::window::skin_of(&self.store) == "stack"
             || crate::window::panel_skin_of(&self.store) == "stack";
         if !wanted {
-            self.update(|state| state.upnext.clear());
+            self.set_upnext(Arc::from([]));
             return;
         }
 
@@ -327,17 +418,23 @@ impl Core {
             return;
         }
 
-        let items = search::parse_queue_upcoming(&queue, 4);
-        let mut resolved = Vec::with_capacity(items.len());
-        for item in items {
-            let thumbnail = self.api.fetch_cover(item.thumbnail.as_deref()).await;
-            resolved.push(UpNextItem { thumbnail, ..item });
-        }
+        // Four independent fetches against the same keep-alive connection:
+        // waiting for each in turn made the queue take four round trips to
+        // appear when it only ever needed one.
+        let resolved = future::join_all(search::parse_queue_upcoming(&queue, 4).into_iter().map(
+            |item| async move {
+                UpNextItem {
+                    thumbnail: self.api.fetch_cover(item.thumbnail.as_deref(), THUMB_PX).await,
+                    ..item
+                }
+            },
+        ))
+        .await;
         if token != self.upnext_token.load(Ordering::SeqCst) {
             return;
         }
 
-        self.update(|state| state.upnext = resolved);
+        self.set_upnext(Arc::from(resolved));
     }
 
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
@@ -347,17 +444,14 @@ impl Core {
         let song = self.player.lock().expect("player lock").song.clone();
 
         let Some(song) = song.filter(|_| wanted) else {
-            self.update(|state| {
-                state.lyrics = None;
-                state.lyrics_state = "idle".into();
-            });
+            self.set_lyrics(LyricsView::idle());
             return;
         };
 
         let token = self.lyrics_token.fetch_add(1, Ordering::SeqCst) + 1;
-        self.update(|state| {
-            state.lyrics = None;
-            state.lyrics_state = "loading".into();
+        self.set_lyrics(LyricsView {
+            state: "loading".into(),
+            lyrics: None,
         });
 
         let result = lyrics::fetch_lyrics(self.api.client(), &song).await;
@@ -378,9 +472,9 @@ impl Core {
             return;
         }
 
-        self.update(|state| {
-            state.lyrics_state = if result.is_some() { "ready" } else { "none" }.into();
-            state.lyrics = result;
+        self.set_lyrics(LyricsView {
+            state: if result.is_some() { "ready" } else { "none" }.into(),
+            lyrics: result.map(Arc::new),
         });
     }
 
@@ -468,10 +562,8 @@ impl Core {
             tauri::async_runtime::spawn(async move { core.refresh_all().await });
         } else if status != "connecting" {
             // Drop the queue too: it belongs to a player we can no longer see.
-            self.update(|state| {
-                state.is_playing = false;
-                state.upnext.clear();
-            });
+            self.update(|state| state.is_playing = false);
+            self.set_upnext(Arc::from([]));
         }
 
         crate::tray::refresh(&self.app);

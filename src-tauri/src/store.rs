@@ -74,6 +74,11 @@ pub struct Settings {
     /// How strongly the cover's colours wash the card, 0..=1.
     #[serde(default = "default_tint")]
     pub tint: f64,
+    /// The panel the floating widget was last left showing, restored on the
+    /// next launch. Only "lyrics" is ever stored: search is a query you have
+    /// finished with, and the dropdown collapses on blur by design.
+    #[serde(default)]
+    pub panel: Option<String>,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -94,6 +99,7 @@ impl Default for Settings {
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
             tint: default_tint(),
+            panel: None,
             extra: BTreeMap::new(),
         }
     }

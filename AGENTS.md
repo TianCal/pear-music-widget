@@ -8,8 +8,7 @@ the user-facing description; this file is the parts that will bite you.
 ```
 YouTube Music (API Server plugin, :26538)
         │  ws://…/api/v1/ws     push: song / position / volume / shuffle
-        │  http://…/api/v1/*    pull: song, like-state, shuffle, volume
-        │                       push: play, pause, next, seek-to, volume, like, …
+        │  http://…/api/v1/*    pull + control
         ▼
 src-tauri/src/ws.rs  ──▶  src-tauri/src/state.rs  ──IPC──▶  src/app.js
 src-tauri/src/api.rs                                        src/palette.js
@@ -23,31 +22,43 @@ src-tauri/src/api.rs                                        src/palette.js
 | `src-tauri/src/ws.rs` | WebSocket client with backoff and re-auth |
 | `src-tauri/src/window.rs` | Floating widget: sizes, zoom, position persistence |
 | `src-tauri/src/panel.rs` | Menu-bar dropdown: anchoring, blur-to-close, toggle guard |
-| `src-tauri/src/tray.rs` | Menu-bar item, settings menu, widget right-click menu |
+| `src-tauri/src/tray.rs` | Menu-bar item and the right-click menus |
 | `src-tauri/src/commands.rs` | Every `invoke` the renderer can make |
 | `src-tauri/src/macos.rs` | The AppKit calls Tauri does not wrap |
 | `src-tauri/src/search.rs` | innertube search + queue parsing |
 | `src-tauri/src/lyrics.rs` | LRCLib matching and LRC parsing |
 | `src-tauri/src/store.rs` | `settings.json` |
-| `src-tauri/build.rs` | Generates the app icon and menu-bar icons from scratch |
+| `src-tauri/build.rs` | Generates the app and menu-bar icons from scratch |
 | `src/bridge.js` | `window.widget` on top of Tauri IPC, plus window dragging |
 | `src/app.js` | Rendering, playhead interpolation, seek/volume input |
 | `src/palette.js` | Accent colour extraction |
 
-**All networking happens in Rust.** Cover art is fetched there and handed to the
-renderer as a `data:` URL, which keeps the renderer's CSP closed to the network
-*and* lets `<canvas>` read the pixels for colour extraction without cross-origin
-tainting. Do not fetch from the renderer.
+## Five rules that are easy to break
 
-**One renderer, several presentations.** `index.html` is loaded twice — plain for
-the widget, with `?mode=panel` for the dropdown. `app.js` branches on `IS_PANEL`
-only to pick which skin applies. Everything else is a `body.skin-*` class.
+**All networking happens in Rust.** Cover art is fetched there and handed over as
+a `data:` URL, which keeps the renderer's CSP closed to the network *and* lets
+`<canvas>` read the pixels without cross-origin tainting.
 
-**There is no npm and no bundler.** `frontendDist` points straight at `src/`, and
-the frontend is embedded into the binary by `tauri::generate_context!`. That last
-part catches everyone: **editing anything under `src/` does nothing until you
-rebuild.** A stale frontend in a running debug binary looks exactly like an IPC
-failure.
+**Nothing track-sized goes on the `state` event.** `state` carries the ~400 bytes
+that change every second; `cover`, `upnext` and `lyrics` are separate events sent
+only when they change. Tauri's `emit` serialises the payload and then formats a
+separate JS source string *per webview* to `eval`, so anything on `state` is
+copied once per window per tick and parsed as JavaScript at the far end. A 187KB
+base64 cover riding the position tick was the largest single cost in the app.
+`widget_state` returns all four at once, for a window loading from cold.
+
+**AppKit work belongs on the main thread, and has to be queued.** See below.
+
+**There is no npm and no bundler.** `frontendDist` points straight at `src/` and
+the frontend is embedded by `tauri::generate_context!`, so **editing anything
+under `src/` does nothing until you rebuild.** A stale frontend in a running
+binary looks exactly like an IPC failure.
+
+**The renderer's globals are shared.** `bridge.js` replaces the Electron preload,
+but a preload had its own context and a `<script>` does not: a top-level `const`
+declared in both files is a `SyntaxError` that takes down *both* before either
+runs. `bridge.js` is wrapped in an IIFE for that reason; only `window.widget` is
+deliberately global.
 
 ## The API surface we depend on
 
@@ -56,520 +67,295 @@ failure.
 | WebSocket | `GET /api/v1/ws?token=…` |
 | Socket events | `PLAYER_INFO`, `VIDEO_CHANGED`, `PLAYER_STATE_CHANGED`, `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED` |
 | Read | `GET /song`, `/like-state`, `/shuffle`, `/volume`, `/queue` |
-| Write | `POST /play`, `/pause`, `/toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle` |
+| Write | `POST /toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle` |
 | Search | `POST /search`, `POST /queue`, `PATCH /queue` |
-| Auth | `POST /auth/{clientId}` → JWT; `Authorization: Bearer` on REST, `?token=` on the socket |
+| Auth | `POST /auth/{clientId}` → JWT; `Bearer` on REST, `?token=` on the socket |
 
-If the plugin bumps to `/api/v2`: change `API` in `src-tauri/src/api.rs` and the
-socket path in `src-tauri/src/ws.rs`. Verified against YouTube Music 3.12.0.
+Verified against YouTube Music 3.12.0. For `/api/v2`, change `API` in `api.rs`
+and the socket path in `ws.rs`.
 
-### Plugin quirks worked around
+Two quirks worked around: **`GET /repeat-mode` always returns `null`** even
+though `POST /switch-repeat` is accepted, so there is no repeat button; and **the
+volume you POST is not the volume reported back** — see Volume.
 
-- **`GET /repeat-mode` always returns `{"mode": null}`.** `POST /switch-repeat`
-  is accepted (204) but the state can never be read back, so there is no repeat
-  button. `/shuffle` and `/like-state` return real values, so this is specific to
-  repeat. Re-check after a plugin upgrade.
-- **The volume you POST is not the volume reported back** — see below.
+## Threads
 
-## Threads: AppKit work belongs on the main thread
+Tauri delivers IPC on a worker thread and runs `async` commands on its own
+runtime, so a command handler is **not** on the main thread. Touching an
+`NSWindow` or building an `NSMenu` from there is undefined behaviour that does
+not announce itself: the symptom is a status item that has quietly stopped
+opening, or a window that ignores a resize, with no crash and nothing logged.
 
-The single sharpest edge in the port. Tauri delivers IPC on a worker thread and
-runs `async` commands on its own runtime, so a command handler is **not** on the
-main thread. Anything that touches an `NSWindow` or builds an `NSMenu` from
-there is undefined behaviour, and it does not announce itself as one: the
-symptom is a status item that has quietly stopped opening its menu, or a window
-that ignores a resize, with no crash and nothing in the log.
+Everything in `macos.rs`, every `Menu::with_items` and every `popup_menu` goes
+through `AppHandle::run_on_main_thread`. The hop is taken at the **command
+boundary**, not inside the helpers, because the sequences matter — `apply_skin`
+must release the aspect lock, resize and re-apply it in that order, and three
+separate hops would interleave with Tauri's own queued window messages.
+`tray::refresh` takes the hop itself, since the realtime task calls it.
 
-Everything in `macos.rs`, every `Menu::with_items`, and every `popup_menu` must
-therefore be reached through `AppHandle::run_on_main_thread`. The hop is taken at
-the **command boundary**, not inside the helpers, because the sequences matter:
-`apply_skin` has to release the aspect lock, resize, and re-apply the lock in
-that order, and splitting those across three separate hops would interleave them
-with Tauri's own queued window messages.
+**Being on the main thread is not enough.** Tauri's window setters are messages
+posted to the event loop, while a raw `msg_send!` executes immediately and jumps
+ahead of a resize requested before it. Everything in `macos.rs` is posted through
+the same proxy so it stays FIFO with the setters.
 
-`tray::refresh` takes the hop itself, because it is called from the realtime task
-on every status change.
+The mirror image is on the reading side: getters (`outer_position`, `inner_size`,
+`scale_factor`) run inline, so measuring a window straight after resizing it
+returns the **old** geometry. Anything that has just resized calls `apply_zoom_to`
+with the rect it asked for; only a real `Resized` event may measure.
 
-Tauri's own getters (`outer_position`, `inner_size`, `scale_factor`) are safe
-from either thread — they run inline when already on the main thread and post a
-message otherwise.
+## Windows
 
-### …and it has to be *queued*, not just on the main thread
+**Hidden, never closed.** `CloseRequested` is turned into a hide until
+`WindowState::begin_quit` runs — Tauri exits when the last window is destroyed.
 
-Being on the main thread is not enough. Tauri's window **setters** (`set_size`,
-`set_position`, `set_min_size`) are messages posted to the event loop, while a
-raw `msg_send!` executes immediately — so a direct AppKit call always jumps
-ahead of a resize requested before it. Re-applying the aspect ratio at the end
-of `apply_skin` therefore landed *before* the resize it was meant to follow, and
-the window settled at a size matching neither skin.
+**A widget has to work unfocused.** Clicking an inactive macOS window activates it
+and swallows the click, which is why a "Next tracks" row once needed clicking
+twice. Both windows use `accept_first_mouse(true)`.
 
-Everything in `macos.rs` is posted through `run_on_main_thread` for that reason:
-same proxy, same queue, FIFO with the setters.
+**One writer per window level.** `dress()` forcing `LEVEL_FLOATING` silently
+overrode `always_on_top(false)`, so the widget came back floating after every
+launch. Tauri's `always_on_top` owns the widget's level; `dress()` passes `None`.
+The dropdown still needs an explicit level, since Tauri cannot express the
+pop-up-menu level a menu-bar dropdown sits at.
 
-The mirror image of the same trap is on the reading side. `bounds_of` runs
-inline, so measuring a window straight after resizing it returns the **old**
-geometry. `apply_zoom` did exactly that and scaled the page for the previous
-skin — a 330×284 dropdown rendering its layout at 0.4 zoom in the top corner.
-Anything that has just resized a window calls `apply_zoom_to` with the rect it
-asked for; only a real `Resized` event may measure.
+Level is only half of "always on top": *collection behaviour* decides which
+Spaces a window appears on, and `CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY` is
+what draws it over a fullscreen app. `macos::follow_everywhere` follows the
+setting rather than being set unconditionally. The dropdown always follows.
 
-## The renderer's globals are shared
+**Glass.** `transparent: true` + `decorations: false` needs `macOSPrivateApi`, or
+WKWebView paints an opaque background and the vibrancy never shows.
+`apply_vibrancy` takes the corner radius, and that plus `NSWindow.hasShadow`
+replaces Electron's `roundedCorners`. Widget: `UnderWindowBackground`. Dropdown:
+`Menu`, so it reads as part of the menu bar.
 
-`bridge.js` replaces the Electron preload, but a preload ran in its own context
-and a `<script>` does not. A top-level `const` in `bridge.js` that also exists in
-`app.js` is a `SyntaxError` that takes down **both** files before either runs —
-`IS_PANEL` was declared in both, and the result was a widget that rendered its
-static markup and never updated. `bridge.js` is wrapped in an IIFE for exactly
-this reason; only `window.widget` is deliberately global.
+**Dragging.** WKWebView has no `-webkit-app-region`, so `bridge.js` arms on
+`mousedown` outside the no-drag selector and calls `startDragging()` only after
+3px of travel. The threshold is load-bearing: `startDragging` hands the mouse to
+AppKit's drag loop, which swallows everything after it — arming immediately would
+eat the double-click that raises YouTube Music. Resizing needs no JavaScript; a
+borderless-but-resizable `NSWindow` resizes from its edges, and `.resize-edges`
+is the ring the drag handler ignores. The aspect lock is
+`NSWindow.contentAspectRatio`; AppKit has no call to clear it, so
+`contentResizeIncrements` is the documented way.
 
-## Dragging and resizing a frameless window
+## Skins and sizing
 
-WKWebView has no `-webkit-app-region`, so the drag region is implemented in
-`bridge.js`: a `mousedown` outside the no-drag selector arms a drag, and
-`startDragging()` fires only once the pointer has travelled 3px.
+`window.rs` holds a flat `BASE` table of natural sizes per skin. Each skin has
+its own aspect ratio, so `apply_skin` releases the lock, resizes, then re-applies
+it. The two surfaces choose independently — `skin` for the widget, `panelSkin`
+for the dropdown — so `refresh_upnext` fetches the queue when *either* is `stack`.
 
-The threshold is not cosmetic. `startDragging` hands the mouse to AppKit's window
-drag loop, which swallows everything after it — arming on `mousedown` alone would
-eat the click and the double-click, and double-clicking the card is how you bring
-YouTube Music forward. Because the handoff is deferred, the *whole card* now
-responds to a double click, where Electron could only manage the artwork.
+The renderer is authored once at each layout's natural size and **does not
+reflow**: `apply_zoom` sets `webview.set_zoom(width / base_width)`, taking
+whichever axis is tighter. The corner radius must *not* scale — the vibrancy
+layer is rounded in fixed points — so the zoom is sent to the renderer and the
+CSS radius divided by it. `sizes` stores only the width per skin; the height is
+re-derived, so a stored size can never drift off the ratio.
 
-Resizing needs no JavaScript at all: a borderless-but-resizable `NSWindow` still
-resizes from its edges, and the window server sees those events before the
-webview does. `.resize-edges` survives from the Electron build as the ring the
-drag handler ignores — without it, a press near the edge would start a window
-move instead of a resize.
+**An open panel is a shape, not an exception.** A panel scales with the page, so
+an expanded window has a constant aspect ratio — the skin's, plus the panel's
+height. `shape_of` returns it and every constraint takes it, so expanding widens
+the aspect lock instead of dropping it. **Limits must be applied before the
+resize they allow** (`setFrame:` clamps to min/max) and the aspect ratio after.
+`apply_collapsed_size` exists so changing skin or resetting with a panel open
+does not shrink the window *under* it.
 
-The aspect lock is `NSWindow.contentAspectRatio` (`macos::set_aspect_ratio`).
-AppKit has no call to clear it; setting `contentResizeIncrements` is the
-documented way, since the two are mutually exclusive.
+**The anchor is observed, never re-derived.** The skins differ by 174 points, so
+a resize moves one edge and `resize_keeping_corner` holds whichever corner was
+nearest a screen corner *when the user last placed the window*. Deciding it at
+resize time makes the swap irreversible and walks the widget up the screen.
+`set_bounds` records what it asked for so the persist task can tell our own move
+events from the user's. `reset_window` is the one place that *sets* an anchor.
 
-## Skins
-
-`window.rs` holds a flat `BASE` table of natural sizes per skin — there are no
-variants and no automatic switching, so dragging an edge only ever scales the
-skin that is showing. Each skin has its own aspect ratio, so `apply_skin` must
-release the lock, resize, then re-apply it, or the next drag snaps the window
-back to the old shape.
-
-The two surfaces choose independently: `skin` drives the floating widget,
-`panelSkin` the dropdown. The renderer picks with `skinOf(snapshot)`, which keys
-off `IS_PANEL`. `refresh_upnext` therefore has to fetch the queue when *either* is
-`stack`, and the panel's natural size follows `panelSkin` rather than a constant.
-
-`.upnext` is hidden whenever the setup screen is up — a queue from a previous
-session is stale the moment YouTube Music goes away. The skin rule is written
-`body.skin-stack .upnext:not([hidden])` on purpose: as a plain
-`body.skin-stack .upnext` it out-specifies `.upnext[hidden]` and the hidden
-attribute silently does nothing.
-
-The renderer expresses both from **one DOM** via `body.skin-*` classes. The
-trick that makes that possible: the seek bar is a flex child of `.controls`
-rather than a sibling, so each skin places it with `order` alone — above the
-buttons (classic, via `flex-basis: 100%` and wrapping) or below them (stack).
-
-`--well` is deliberately translucent enough for the wash to read through it;
-at its old opacity the queue was a flat slab that the card's tint stopped at.
-
-`.upnext` is `position: relative` for a reason: `.ambient` and `.scrim` are
-absolutely positioned siblings, and an unpositioned block paints *underneath*
-them, so the scrim washed the queue out until it was given a position.
-
-Stack's "Next tracks" comes from `GET /queue`, parsed by `parse_queue_upcoming`.
-It has its own `--well` backdrop because the ambient artwork layer bleeds
-through the whole card — without it, queue legibility depends on whatever cover
-happens to be playing.
-
-## Context menus
-
-Each surface's right-click menu acts on that surface: the widget's has its own
-skin, opacity, always-on-top and reset; the dropdown's has only its own skin
-plus the app-level items. Neither carries the other's layout.
-
-Giving the dropdown a menu at all needs care, and is why the Electron build did
-without one: a menu takes focus, and losing focus is what closes the dropdown,
-so it would dismiss the window it was opened from. `PanelState::menu_open` holds
-it open for the duration — `popup_menu` runs macOS's modal menu loop, so the
-flag can simply be cleared once it returns.
+Two CSS details that look arbitrary: `.upnext` is `position: relative` because
+`.ambient` and `.scrim` are absolutely positioned siblings that would otherwise
+paint over it; and the skin rule is `body.skin-stack .upnext:not([hidden])`
+because the plain form out-specifies `.upnext[hidden]` and silently defeats it.
 
 ## Panels
 
-`search` and `lyrics` share one slot — only one can be open at a time, which is
-what keeps the height arithmetic to a single addition. `panel_height` in
-`window.rs` must match the `flex-basis` of `.search` and `.lyrics` in the
-stylesheet; the window grows by exactly what the panel occupies, times the
-current zoom.
+`search` and `lyrics` share one slot, which keeps the height arithmetic to a
+single addition. `panel_height` in `window.rs` must match the `flex-basis` of
+`.search` and `.lyrics` in the stylesheet.
 
-`apply_collapsed_size` exists because changing skin or resetting while a panel is
-open would otherwise shrink the window to the collapsed size *under* the open
-panel, and the panel would overlap whatever is above it. Anything that resizes
-the window has to go through it.
+The widget's open panel is stored as `panel` and restored in `window::create`,
+before the window is ever on screen — restoring it from the renderer instead puts
+a visible grow into every launch. Only `lyrics` is stored: a search is a query
+you have finished with, and the dropdown collapses on blur by design.
+
+Growing for a panel must never be persisted as the user's preferred size — hence
+the `expanded_by` guard.
 
 ## Lyrics
 
-`src-tauri/src/lyrics.rs` is **the only code that talks to a non-localhost host**
-(LRCLib and YouTube Music). Keep it that way: the renderer's CSP allows no
-network at all, so anything fetched has to come through Rust.
+`lyrics.rs` is **the only code that talks to a non-localhost host**. Keep it that
+way: the renderer's CSP allows no network at all.
 
 Matching is four-tier. The first three ask LRCLib, which needs help because
 YouTube Music titles carry soundtrack credits and 《…》 wrappers it will not match
-on: exact with everything we know, exact on a cleaned title, then free-text
-search picking the hit whose duration is closest. Empty LRC lines are kept —
-they are the instrumental gaps and the roll needs them.
+on: exact with everything known, exact on a cleaned title, then free-text search
+picking the closest duration. The fourth asks YouTube Music for its own timed
+lyrics, covering what LRCLib has never heard of — smaller labels and much of the
+Mandarin and Cantonese catalogue. That is `/next` to name the lyrics tab and
+`/browse` to read it, and only the iOS Music client (`clientName: "26"`) is
+served timings. Being keyed by video id, it can never return another song's
+words. Empty LRC lines are kept — they are the instrumental gaps. Misses are
+cached as well as hits.
 
-The fourth asks YouTube Music for its own timed lyrics, which covers what LRCLib
-has never heard of — smaller labels, and much of the Mandarin and Cantonese
-catalogue. Two calls, the pair Pear Desktop's `synced-lyrics` plugin makes:
-`/next` names the lyrics tab for a video id, `/browse` returns what is on it, and
-only the iOS Music client (`clientName: "26"`) is served timings. Pear proxies
-the browse call through a third party because its renderer is bound by CORS; we
-are not, so we ask YouTube directly. Being keyed by video id, this tier is also
-the one that can never return another song's words.
+The roll is a `transform` on `.lyrics-lines`, not `scrollTop`, and the active
+index comes from the same interpolated playhead the progress bar uses. Three
+things keep it from stuttering, all load-bearing:
 
-Misses are cached as well as hits, so reopening the panel on a track with no
-lyrics does not re-query.
+- **The active line is emphasised with `scale`, never a larger font.** Growing
+  the type reflows every line below it, moving the offsets the roll is already
+  travelling toward. That was the stutter.
+- **Geometry is measured once per render** into `lyricCentres`. Reading
+  `offsetTop` inside the animation frame forces a layout flush per line.
+- **The glide is a CSS transition**, with `--roll-ms` written per line. Driving
+  the transform frame by frame from the rAF tick measured *worse* — it burns
+  main-thread JS for what the compositor was already doing free.
 
-A wheel over the panel scrolls the lyrics, not the volume, and parks the roll
-for `LYRIC_MANUAL_MS` so auto-centring does not fight the user's hand. The eased
-transition is dropped while scrolling or the roll lags behind the wheel.
+The roll travels between "first line centred" and "last line centred", both ends
+allowed to be negative; clamping the low end at 0 is what put the opening lines
+inside the top fade. `LYRIC_RAISE` lifts the sung line slightly above centre. A
+wheel over the panel scrolls the lyrics rather than the volume and parks the roll
+for `LYRIC_MANUAL_MS`, with the glide duration set to zero so it tracks the hand.
 
-The roll is a `transform` on `.lyrics-lines`, not `scrollTop`: it animates on the
-compositor and lands on sub-pixel offsets, which is what makes it glide. The
-active index comes from the same interpolated playhead the progress bar uses, so
-it stays smooth between the server's ~1/sec position pushes.
-
-## Search
+## Search and the queue
 
 `POST /search` returns ~270KB of raw innertube JSON with no stable path to the
-results, so `parse_search_results` collects every `musicResponsiveListItemRenderer`
-in the tree and keeps the ones carrying a videoId. Songs, albums and videos all
-use that renderer.
-
-That insert-and-jump is for a track that is **not in the queue**. A "Next
-tracks" row already is one, so it uses `play_queued`, which just jumps to its
-index. Queueing it instead inserts a *second copy* after the playing track and
-jumps to that, leaving the original where it was — the queue behind the new
-position is untouched, so the list comes back looking identical with the track
-you picked still sitting in it. That is what "clicking a next track does not
-refresh the list" turned out to be.
-
-A jump also refreshes "Next tracks" itself, rather than leaving it to
-`apply_song`: the queue can move without the *track* moving — jumping between
-two copies of the same song is the obvious case — and `apply_song` only
-refreshes when the videoId changes. It waits for the target slot to go
-`selected` first, since reading the queue before the player has switched just
-returns the list we already had.
+results, so `parse_search_results` collects every
+`musicResponsiveListItemRenderer` in the tree and keeps those carrying a videoId.
 
 Playing a result inserts it with `INSERT_AFTER_CURRENT_VIDEO`, then **polls the
-queue** until the slot after the playing track holds it, and jumps to that index.
+queue** until the slot after the playing track holds it. Do not shortcut this to
+`next()`: the insert returns `204` *before* the queue has actually changed, so a
+`next()` fired straight after skips onto whatever was already queued. The poll
+also accepts a slot when the queue has simply grown, since the id is sometimes
+re-resolved on insert.
 
-Do not shortcut this to `next()`. The insert returns `204` *before* YouTube Music
-has actually mutated its queue, so a `next()` fired straight after skips onto
-whatever was already queued — you click A, an unrelated track plays, and A only
-starts when you click something else. The poll accepts the slot either when it
-carries our videoId or when the queue has simply grown, since the id is
-occasionally re-resolved on insert.
-
-Opening the panel grows the window; that growth must not be persisted as the
-user's preferred size — hence the `expanded_by` guard at the top of the `Resized`
-handler in `main.rs`.
+A "Next tracks" row is already in the queue, so it uses `play_queued`, which
+jumps to its index. Queueing it instead inserts a *second copy* and jumps to
+that, leaving the list looking identical with the track still in it. A jump
+refreshes "Next tracks" itself, because the queue can move without the track
+moving, and waits for the target slot to go `selected` first.
 
 ## Volume
 
-The single most subtle part of the codebase. Three separate problems, all in
-`setVolume` in the renderer and the `VOLUME_CHANGED` arm of `handle_message`:
+The most subtle part of the codebase. Three problems, all in `setVolume` in the
+renderer and the `VOLUME_CHANGED` arm of `handle_message`:
 
-1. **Echo ordering.** Every `pointermove` used to POST, so a drag put a dozen
-   requests in flight and the last echo to land was not necessarily the newest.
-   Sends are throttled to 70ms and the released value is always flushed.
-2. **Echo adoption mid-drag.** Our own value wins for `VOLUME_ECHO` (1.5s)
-   after we set it, otherwise the server fights the cursor.
+1. **Echo ordering.** A drag used to put a dozen POSTs in flight and the last
+   echo to land was not the newest. Sends are throttled to 70ms, and the
+   released value is always flushed.
+2. **Echo adoption mid-drag.** Our own value wins for `VOLUME_ECHO` (1.5s) after
+   we set it, or the server fights the cursor.
 3. **Scale.** The player applies an exponential curve between what you POST and
-   what it reports: measured `reported = 100*(15^(sent/100)-1)/14` on 3.12.0, so
-   POSTing 80 echoes back 55.
+   what it reports — measured `reported = 100*(15^(sent/100)-1)/14` — so POSTing
+   80 echoes back 55.
 
 That curve comes from a plugin the user can disable, so `solve_volume_curve`
-learns `b` numerically from the first (sent, echoed) pair instead of hardcoding
-it, and `reported_to_slider` maps reported values back before display. The unit
-tests in `state.rs` pin both directions against the measured shape.
-
-**Calibration is display-only and can never send the wrong volume.** The `volume`
-command always POSTs the raw slider value. Calibration can fail — you only ever
-set volume at the extremes (endpoints are fixed for every `b`), no echo arrives,
-or the pair does not match the expected shape. The consequence is limited to
-volume changed *outside* the widget (or a very late echo) showing on the player's
-raw gain scale. It self-corrects on the first mid-range drag.
-
-Calibration only runs when the echo pairs with the *latest* send
-(`awaiting_echo.seq == send_seq`); mid-drag there are several echoes in flight
-and none of them pairs with anything.
-
-The slider is linear in slider units — the player's curve is what makes it
-perceptually exponential. Do not add a second curve in the widget.
-
-## Sizing
-
-`sizes` in the store holds the width the user last left **each skin** at, so
-switching back to a skin restores it. Only the width is stored — the height is
-always re-derived from the skin's aspect ratio, so a stored size can never drift
-off it. `reset_window` forgets the current skin's entry and returns it to the
-natural size in the default corner.
-
-The renderer is authored once at each layout's natural size and **does not
-reflow**. `apply_zoom` sets `webview.set_zoom(width / base_width)`. The zoom is
-derived from whichever axis is tighter, because rounding the window height to
-whole pixels can leave it a fraction under the ratio and scaling on width alone
-would clip the last row.
-
-The corner radius must *not* scale: the vibrancy layer is rounded in fixed
-points, so `apply_zoom` sends the zoom to the renderer and the CSS radius is
-divided by it to stay flush.
-
-**An open panel is a shape, not an exception.** A panel's height scales with the
-page, so `collapsed_height + panel * zoom` is linear in the width — an expanded
-window has a *constant* aspect ratio, the skin's with the panel added to its
-height. `shape_of` returns it and everything that constrains the window takes it,
-so expanding widens the aspect lock instead of dropping it. Dropping it is what
-made dragging an edge with the lyrics open stretch a window whose contents did
-not follow. **The limits must be applied before the resize they are meant to
-allow** — `setFrame:` clamps to min and max, so limits still describing the old
-shape swallow the new size — and the aspect ratio after it.
-
-Every path that resizes has to ask what is open: `apply_skin` re-imposing the
-*collapsed* limits on a window standing open at a panel's height is the bug that
-looked like the anchor fix not working. macOS clamped the too-tall window on the
-next drag, and that resize — ours in cause, nobody's in intent — was read as the
-user placing the widget.
-
-**The anchor is observed, never re-derived.** The skins differ by 174 points of
-height, so a resize has to move one edge, and `resize_keeping_corner` holds
-whichever corner is nearest a screen corner. That corner is decided from a
-position the *user* left the window in and then remembered in `WindowExtras`.
-Deciding it at resize time is a bug that looks like the widget wandering: the
-resize itself carries the window into the other half of the display, so the
-answer flips and the swap stops being reversible — classic at y=450 pins its
-bottom and lands at y=276, from where the top is nearer, so switching back leaves
-it there, 174 points up, every round trip. `set_bounds` records the geometry it
-asked for so the persist task can tell our own move events from the user's and
-leave the anchor alone for ours. `reset_window` is the one place that *sets* an
-anchor, because it parks the widget top right itself.
-
-The breakpoint has hysteresis (compact below 392px, normal above 412px) so a slow
-drag does not flap.
+learns `b` numerically from the first (sent, echoed) pair rather than hardcoding
+it. **Calibration is display-only and can never send the wrong volume**: the
+command always POSTs the raw slider value. It only runs when the echo pairs with
+the *latest* send, and self-corrects on the first mid-range drag. The slider is
+linear in slider units — the player's curve is what makes it perceptually
+exponential, so do not add a second one.
 
 ## Connection state
 
-Once a token is cached, `ensure_token()` returns without touching the network, so
-a dead API server produces **no error there at all**. The only signal is the
-WebSocket's close — which is why that path reports `offline` regardless of
-whether a connection was ever established. Getting this wrong left the widget
-stuck on "Connecting…" forever.
+Once a token is cached, `ensure_token()` never touches the network, so a dead API
+server produces **no error there at all**. The WebSocket's close is the only
+signal — which is why that path reports `offline` regardless of whether a
+connection was ever established. `connecting` is shown only on the first attempt
+or after a manual retry, so background reconnects do not flicker the UI.
 
-`connecting` is shown only on the first attempt or after a manual retry, so
-background reconnects do not flicker the UI.
+**A retry is not free**: it tears the socket down and comes back through
+`offline`, which clears the queue. `launch_music_app` only retries when the link
+is not already up. `Realtime::request_retry` is a `Notify` pulse that both
+cancels the backoff sleep and tears down an established socket.
 
-**A retry is not free.** It tears the socket down and comes back through
-`offline`, which clears the queue — so `launch_music_app` only retries when the
-link is not already up. Without that guard, double-clicking the artwork to raise
-a player that was running anyway emptied "Next tracks". `refresh_all` also
-refreshes the queue now, because `apply_song` only does so when the track
-actually changed, and a reconnect on the same track would otherwise leave it
-empty until the song ended.
-
-A manual retry (`Realtime::request_retry`) is a `Notify` pulse that both cancels
-the backoff sleep and tears down an established socket, so Reconnect is immediate
-whatever state the link is in.
-
-## A widget has to work without being focused
-
-Clicking an inactive window on macOS activates it and **swallows the click** —
-the content never sees it. That is why a "Next tracks" row needed clicking
-twice: the first press only brought the widget forward. Both windows are built
-with `accept_first_mouse(true)`, which is Tauri's wrapper for the same
-`acceptsFirstMouse:` every menu-bar utility needs. The symptom is easy to
-misread as a bug in whatever was clicked; the tell is that the command never
-runs at all on the first press.
-
-## Window level
-
-**One writer per window level.** `dress()` used to force `LEVEL_FLOATING` on the
-widget, which silently overrode the `always_on_top(false)` passed to the builder
-two lines above — so the widget came back floating after every launch however it
-had been left, and the menu toggle fought it afterwards. Tauri's `always_on_top`
-now owns the widget's level outright and `dress()` takes `None` for it.
-
-The dropdown still gets an explicit level, because Tauri cannot express the
-pop-up-menu level a menu-bar dropdown has to sit at.
-
-The level is only half of "always on top", though. The window's *collection
-behaviour* decides which Spaces it appears on: `CAN_JOIN_ALL_SPACES` puts it on
-every Space including a fullscreen app's, and `FULL_SCREEN_AUXILIARY` is exactly
-what lets it draw over that app. Both used to be set unconditionally, so a
-widget with always-on-top off behaved on the desktop and still appeared over a
-fullscreen app on another display. `macos::follow_everywhere` now follows the
-setting: 257 when on, 0 — an ordinary window belonging to one Space — when off.
-The dropdown always follows, since it drops from the menu bar.
-
-## Windows are hidden, never closed
-
-`CloseRequested` is intercepted on both windows and turned into a hide, released
-only once `WindowState::begin_quit` has been called. Tauri exits when the last
-window is destroyed, so a real close would take the app down and leave the tray
-icon holding nothing.
-
-## Glass, corners and shadow
-
-The window is `transparent: true` + `decorations: false`, which needs
-`macOSPrivateApi` in `tauri.conf.json` — without it WKWebView paints an opaque
-background and the vibrancy never shows.
-
-`window_vibrancy::apply_vibrancy` is given a corner radius, and that rounding
-plus `NSWindow.hasShadow` is what replaces Electron's `roundedCorners`. The
-widget uses `UnderWindowBackground`; the dropdown uses `Menu`, so it reads as
-part of the menu bar it hangs from.
-
-`macos::join_all_spaces` sets `canJoinAllSpaces | fullScreenAuxiliary` so the
-widget follows you between Spaces and stays visible over a fullscreen app.
+The two pollers (play state, like state) stand down while neither surface is
+visible, and showing either one calls `resync` first.
 
 ## Tray menu
 
 **Register the menu handler exactly once.** `Builder::on_menu_event` already
 receives the tray's menu *and* the widget's popup menu, so also passing one to
-`TrayIconBuilder::on_menu_event` runs every item twice. That is invisible for
-the idempotent items — setting a skin or an opacity twice is the same as once —
-and silently cancels every toggle, which is how "Show floating widget", "Always
-on top" and "Open at login" all came to do nothing at all.
+`TrayIconBuilder::on_menu_event` runs every item twice — invisible for idempotent
+items, and silently cancelling every toggle.
 
-macOS renders whatever menu was last handed to the status item, so a checkbox
-built at the wrong moment stays wrong. The menu is rebuilt on every state change
-*and* on `TrayIconEvent::Enter` — the last moment before a click can open it.
-
-`show_menu_on_left_click(false)` is what splits the two gestures: left click
-toggles the dropdown, right click opens the settings menu (tray-icon's
-`menu_on_right_click` defaults to true and Tauri does not expose it).
+macOS renders whatever menu was last handed to the status item, so the menu is
+rebuilt on every state change *and* on `TrayIconEvent::Enter`, the last moment
+before a click can open it. `show_menu_on_left_click(false)` splits the gestures:
+left toggles the dropdown, right opens settings.
 
 The tray rect arrives as an untagged `Position`/`Size` that may be either scale,
-so `icon_rect` resolves it twice — guess the display with the primary monitor's
-scale, then convert against the display the icon is actually on. On one display
-the passes agree; with the menu bar on a secondary display of a different
-density, the second is what keeps the dropdown under the icon.
+so `icon_rect` resolves it twice — guess with the primary monitor's scale, then
+convert against the display the icon is actually on.
 
-## Double click opens the music app
+Giving the dropdown a right-click menu needs `PanelState::menu_open`: a menu
+takes focus, and losing focus is what closes the dropdown, so it would otherwise
+dismiss the window it was opened from.
 
-The listener is on `.art`, plus a document-level `dblclick`. Both work now that
-the drag handler defers to a movement threshold — see the dragging section.
-
-## Quitting the music app
-
-`quit_music_app_then` addresses YouTube Music by **bundle id**, not by name.
+`quit_music_app_then` addresses YouTube Music by **bundle id**, not by name —
 `application "YouTube Music" is running` answers `false` even while it is
-running, which silently turns the guard into a no-op — by id it is accurate.
-pear-desktop and th-ch's build ship the same appId, so one id covers both.
-
-The guard is still worth keeping: an unguarded `quit` is harmless for a closed
-app, but the check keeps us from raising the Apple-event permission prompt for
-no reason. `quit` is an Apple event, so the first use prompts; if it is denied
-the script fails and the 4s timeout makes sure we quit ourselves anyway.
+running. pear-desktop and th-ch's build ship the same appId.
 
 ## Colour from the cover
 
-The card is tinted from the artwork, not just the transport: `palette.js`
-returns an accent plus three washes, and `.ambient` paints them as three soft
-pools over a base tint.
+`palette.js` returns an accent plus three washes, and `.ambient` paints them as
+soft pools over a base tint. The washes are **generated**, not the cover blurred:
+blurring drags every dark and desaturated region into the mix, and a bright
+sleeve came out brown.
 
-The washes are **generated**, not the cover itself. `.ambient` used to be the
-artwork blurred to 34px, which drags every dark and desaturated region into the
-mix — a bright sleeve came out brown, and the scrim over it made that worse.
-Sampling the hues and painting gradients from them keeps only what the eye reads
-as the colour.
+It draws the cover into a 42×42 canvas, discards pixels with no hue, weights the
+rest by `s² · (1 − |l−0.5|·1.2)` — squaring saturation is what stops a muddy
+background winning on pixel count — bins into 24 hue buckets scored with their
+neighbours at half value, then keeps *only the hue* and re-lights it at fixed
+lightness so the accent stays legible on both light and dark glass. Three hues,
+not one: the winner's bucket and its neighbours are zeroed before the next is
+taken, and a runner-up under 12% (then 8%) of the winner is treated as absent so
+a one-colour cover gets an analogous spread rather than an unrelated stripe.
 
-**"Is this greyscale?" has to be a rate, not a total.** A black-and-white
-photograph is never perfectly desaturated: JPEG chroma noise leaves a scattering
-of coloured pixels, and those artefacts skew warm. The old test — total vivid
-weight under 2 — was passed by noise alone, so a monochrome sleeve picked an
-orange hue out of 41 pixels in 1,764 and washed the card red. Measured over real
-covers, a monochrome one scores 0.0024 of vivid weight per pixel and the least
-colourful cover that genuinely has a hue scores 0.0193; `MIN_COLOUR_RATE` sits
-between them. A rate also keeps a small vivid logo on black counting as colour,
-which a share of coloured pixels would not.
+**"Is this greyscale?" has to be a rate, not a total.** JPEG chroma noise leaves
+a scattering of coloured pixels in any black-and-white photograph, and those
+artefacts skew warm, so a total is passed by noise alone — a monochrome sleeve
+picked an orange hue out of 41 pixels in 1,764 and washed the card red. Measured
+over real covers, monochrome scores 0.0024 per pixel and the least colourful
+cover with a genuine hue scores 0.0193; `MIN_COLOUR_RATE` sits between them.
 
-The wash's saturation floor is the other half of the same fault: at 0.8 of the
-ceiling, an almost grey cover was forced to a loud wash whatever its real
-chroma. It follows the artwork now, and only vivid covers reach the ceiling.
+**Draw with `decode()`, not `onload`.** `onload` fires once the bytes are in;
+`decode()` only once there is a bitmap. A hidden webview can have an image loaded
+but not rasterised, and `drawImage` then paints nothing — indistinguishable from
+greyscale artwork, so a cover resolved while the dropdown was shut came up pink
+there and its real colour in the widget, from the same bytes.
 
-Three hues rather than one: after the winner is picked, its bucket and both
-neighbours are zeroed and the next strongest is taken, twice. A runner-up
-scoring under 12% (then 8%) of the winner is not really present, so a cover that
-is genuinely one colour gets an analogous spread off the winner instead — that
-is what stops a monochrome sleeve sprouting a stripe of something unrelated.
-
-**Cover tint** scales how much of the wash lands, from Off to Vivid. It is a
-store setting like `opacity`, but the wash is mixed in the renderer, so unlike
-`opacity` it has to travel in the state snapshot rather than being applied to
-the window — hence `PlayerState::tint`. It scales the wash alphas only: the
-accent is the transport's colour, not part of the tint, so it survives at Off.
-
-Dark and light get different washes from the same artwork, not the same colours
-at a different opacity, so the palette is rebuilt on `prefers-color-scheme`
-changes as well as on track changes. `PMW_THEME=dark|light` pins the webview's
-scheme for checking both without touching the machine's setting.
-
-The custom properties are registered with `@property` so a track change eases
-between palettes; an unregistered custom property is an unparsed string and
-cannot be interpolated, so without that block the card snaps.
-
-**Draw with `decode()`, not `onload`.** The two mean different things: `onload`
-fires once the bytes are in, `decode()` only once there is a bitmap ready to
-draw. A webview that is hidden — the dropdown, most of the time — can have an
-image loaded but not yet rasterised, and `drawImage` then paints nothing at all.
-That is indistinguishable from greyscale artwork, so the extractor fell back to
-its default pink: a track whose cover was resolved while the dropdown was shut
-came up pink there and its real colour in the widget, from the same bytes.
-
-`applyAccent` also re-runs on `visibilitychange`, which is the only thing that
-can correct a surface that had nothing to sample while it was off screen.
-
-`palette.js` draws the cover into a 42×42 canvas, discards pixels with no hue
-(`l < 0.14`, `l > 0.93`, `s < 0.16`), weights the rest by `s² · (1 − |l−0.5|·1.2)`
-— squaring saturation is what stops the muddy background from winning on sheer
-pixel count — bins into 24 hue buckets scored with their neighbours at half
-value, then keeps *only the hue* and re-lights it at fixed lightness 66 so the
-accent stays legible on both light and dark glass.
+**Each cover is sampled once.** The result is cached and re-mixed for tint,
+appearance and visibility changes, which all want the same hues arranged
+differently. Custom properties are registered with `@property` so a track change
+eases between palettes; unregistered ones are unparsed strings and cannot
+interpolate. `PMW_THEME=dark|light` pins the scheme for checking both.
 
 ## Settings
 
 `~/Library/Application Support/pear-music-widget/settings.json` — the literal
-path the Electron build used, because Electron derives it from the package name
-rather than the bundle id. Keeping it means an upgrade keeps your position,
-skins and cached token. Unknown keys are round-tripped rather than dropped.
+path the Electron build used, so an upgrade keeps your position, skins and cached
+token. Unknown keys are round-tripped rather than dropped.
 
-## Packaging
+## Packaging and testing
 
 `cargo tauri build` regenerates the icons, compiles arm64, ad-hoc signs and
-writes the DMG.
+writes the DMG. The ad-hoc signature is not optional on Apple Silicon and is
+configured as `macOS.signingIdentity: "-"`. Not notarised: a downloaded copy
+needs `xattr -dr com.apple.quarantine`. `build.rs` generates the icons from pure
+maths, so no binary assets are checked in.
 
-The ad-hoc signing is not optional — Apple Silicon requires at least an ad-hoc
-signature — and is configured as `macOS.signingIdentity: "-"`, which replaces the
-`afterPack` hook the Electron build needed.
-
-Not notarised: a downloaded copy needs `xattr -dr com.apple.quarantine`.
-
-`build.rs` generates `icons/` and the menu-bar template images from pure maths,
-so no binary assets are checked in. The tray images land in `OUT_DIR` and are
-pulled in with `include_bytes!`; only the app icons are written back into the
-source tree, where `.gitignore` covers them.
-
-## Testing
-
-`cargo test` covers the parts worth pinning without a running player: the volume
-curve solver against the measured `b≈15` shape, LRC parsing and title cleaning,
-and the innertube search and queue parsers.
-
-Everything else is verified by driving the running app. The frontend has no
-devtools by default; a debug build opens the Web Inspector when `PMW_DEVTOOLS` is
-set in the environment. **Console errors are the first thing to check** — a
-renderer that shows its static markup and never updates is almost always a script
-error, not a broken IPC channel.
-
-`pear-music-widget --doctor` is the connectivity check; run it when the widget
-sits on a setup screen.
+`cargo test` covers what can be pinned without a running player: the volume curve
+solver, LRC parsing and title cleaning, the search and queue parsers, and the
+artwork-size rewriting. Everything else is verified by driving the app. A debug
+build opens the Web Inspector when `PMW_DEVTOOLS` is set — **console errors are
+the first thing to check**, since a renderer showing static markup and never
+updating is almost always a script error rather than a broken IPC channel.
+`pear-music-widget --doctor` is the connectivity check.
