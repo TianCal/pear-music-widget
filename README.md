@@ -10,7 +10,7 @@ shuffle changes arrive as push events rather than on a timer.
 Inspired by [YoutubeMusicCoverWidget](https://github.com/rafailpapastamou/YoutubeMusicCoverWidget),
 which polls the same API server from an Übersicht widget.
 
-![The floating widget on the desktop](docs/widget.png)
+![The Classic skin on the desktop](docs/classic.png)
 
 ## Two surfaces
 
@@ -43,6 +43,10 @@ YouTube Music before quitting the widget.
 **Skin** sets the floating widget, **Dropdown skin** the menu-bar popover, and
 they are independent. Dragging an edge scales whichever skin is showing; it never
 switches between them.
+
+<img src="docs/stack.png" alt="The Stack skin with the lyrics panel open" width="380">
+
+*Stack, with the lyrics panel open.*
 
 ## Lyrics
 
@@ -135,7 +139,7 @@ editing.
 No third-party assets. The transport glyphs are hand-authored SVG paths in
 [src/index.html](src/index.html); the menu-bar and app icons are computed
 procedurally at build time by [src-tauri/build.rs](src-tauri/build.rs). The only
-binary in the repo is the screenshot.
+binaries in the repo are the two screenshots.
 
 ## Contributing
 
