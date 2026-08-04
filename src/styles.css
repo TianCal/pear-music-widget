@@ -479,6 +479,14 @@ body.panel .resize-edges {
   color: var(--accent);
 }
 
+/* Hidden in both skins: Stack has no room in its centred transport, and Classic
+   trades it for the larger cover — six controls want 186px of a 180px column,
+   five want 156px. The button stays in the markup so restoring it is one line
+   and `renderControls` needs no special case. */
+#btn-shuffle {
+  display: none;
+}
+
 .btn.play {
   width: 34px;
   height: 34px;
@@ -949,7 +957,6 @@ body.skin-stack .btn.play svg {
   height: 18px;
 }
 
-body.skin-stack #btn-shuffle,
 body.skin-stack #btn-like,
 body.skin-stack .volume {
   display: none;
@@ -1093,15 +1100,19 @@ body.skin-classic .search {
   padding: 0 10px 8px;
 }
 
+/* Exactly the height of the row it sits in — card 110, less 11px of padding top
+   and bottom — so its edges line up with the title above and the transport
+   below instead of floating in the middle of them. Anything taller would need
+   the padding back. */
 body.skin-classic .art {
-  width: 72px;
-  height: 72px;
-  border-radius: 10px;
+  width: 88px;
+  height: 88px;
+  border-radius: 12px;
 }
 
 body.skin-classic .art-empty .glyph {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
 }
 
 body.skin-classic .meta {
