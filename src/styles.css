@@ -20,7 +20,7 @@
   --hairline: rgba(255, 255, 255, 0.14);
   --rail: rgba(255, 255, 255, 0.2);
   --hover: rgba(255, 255, 255, 0.12);
-  --well: rgba(10, 10, 14, 0.28);
+  --well: rgba(10, 10, 14, 0.18);
   --well-item: rgba(255, 255, 255, 0.1);
   --shadow: 0 18px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
 }
@@ -34,7 +34,7 @@
     --hairline: rgba(0, 0, 0, 0.1);
     --rail: rgba(0, 0, 0, 0.16);
     --hover: rgba(0, 0, 0, 0.08);
-    --well: rgba(255, 255, 255, 0.3);
+    --well: rgba(255, 255, 255, 0.18);
     --well-item: rgba(0, 0, 0, 0.06);
     --wash-1: rgba(255, 90, 110, 0.12);
     --wash-2: rgba(255, 138, 74, 0.1);
@@ -184,9 +184,9 @@ body.panel .resize-edges {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(118% 132% at 8% 0%, var(--wash-1), transparent 62%),
-    radial-gradient(104% 124% at 94% 16%, var(--wash-2), transparent 60%),
-    radial-gradient(120% 118% at 50% 104%, var(--wash-3), transparent 70%),
+    radial-gradient(126% 140% at 6% -4%, var(--wash-1), transparent 78%),
+    radial-gradient(112% 132% at 96% 12%, var(--wash-2), transparent 76%),
+    radial-gradient(128% 126% at 50% 106%, var(--wash-3), transparent 84%),
     var(--wash-base);
   opacity: 0;
   transition: opacity 0.6s ease;
@@ -200,12 +200,12 @@ body.panel .resize-edges {
 .scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(105deg, rgba(0, 0, 0, 0.3) 0%, rgba(0, 0, 0, 0.1) 55%, rgba(0, 0, 0, 0.24) 100%);
+  background: linear-gradient(105deg, rgba(0, 0, 0, 0.2) 0%, rgba(0, 0, 0, 0.04) 55%, rgba(0, 0, 0, 0.16) 100%);
 }
 
 @media (prefers-color-scheme: light) {
   .scrim {
-    background: linear-gradient(105deg, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0.4) 55%, rgba(255, 255, 255, 0.6) 100%);
+    background: linear-gradient(105deg, rgba(255, 255, 255, 0.34) 0%, rgba(255, 255, 255, 0.14) 55%, rgba(255, 255, 255, 0.3) 100%);
   }
 }
 

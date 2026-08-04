@@ -233,11 +233,14 @@
     const lean = palette.lightness < 0.42 ? -4 : 3;
 
     const band = dark
-      ? { s: [58, 50, 44], l: [40 + lean, 33 + lean, 28 + lean], a: [0.62, 0.5, 0.42], base: [26, 16, 0.5] }
-      : { s: [72, 64, 56], l: [76 + lean, 82 + lean, 86 + lean], a: [0.6, 0.5, 0.42], base: [40, 92, 0.42] };
+      ? { s: [82, 72, 64], l: [43 + lean, 36 + lean, 30 + lean], a: [0.86, 0.74, 0.64], base: [48, 19, 0.74] }
+      : { s: [94, 86, 76], l: [70 + lean, 76 + lean, 80 + lean], a: [0.84, 0.72, 0.62], base: [66, 87, 0.66] };
 
+    // Pushed well past the artwork's own saturation, with a high floor: the
+    // card is small and sits on translucent glass, so a wash that merely
+    // matches the cover's chroma reads as grey by the time it is composited.
     const sat = (i, source) =>
-      palette.greyscale ? band.s[i] * 0.12 : clamp(source * 100 * 1.25, band.s[i] * 0.7, band.s[i]);
+      palette.greyscale ? band.s[i] * 0.14 : clamp(source * 100 * 1.5, band.s[i] * 0.8, band.s[i]);
 
     return {
       wash1: toRgba(one.hue, sat(0, one.sat), band.l[0], band.a[0]),
