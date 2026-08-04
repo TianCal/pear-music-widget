@@ -96,6 +96,10 @@ pub struct PlayerState {
     /// How strongly the cover's colours wash the card, 0..=1. Mixed in the
     /// renderer, so it travels with the rest of the state.
     pub tint: f64,
+    /// Seconds to shift the lyric roll by, positive turning the lines over
+    /// earlier. The roll is driven in the renderer, so — like `tint` — the
+    /// setting has to reach it as state rather than staying in the store.
+    pub lyrics_offset: f64,
     pub song: Option<Song>,
     pub is_playing: bool,
     pub position: f64,
@@ -106,13 +110,14 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(skin: String, panel_skin: String, tint: f64) -> Self {
+    fn new(skin: String, panel_skin: String, tint: f64, lyrics_offset: f64) -> Self {
         Self {
             status: "connecting".into(),
             status_message: String::new(),
             skin,
             panel_skin,
             tint,
+            lyrics_offset,
             song: None,
             is_playing: false,
             position: 0.0,
@@ -265,11 +270,15 @@ impl Core {
     pub fn new(app: AppHandle, store: Arc<Store>, api: Arc<Api>) -> Self {
         let (skin, panel_skin) = (crate::window::skin_of(&store), crate::window::panel_skin_of(&store));
         let tint = store.get(|s| s.tint.clamp(0.0, 1.0));
+        // The menu offers ±2s; the file is documented as hand-editable, so a
+        // wider nudge typed in by hand is honoured — just not one that would
+        // park the roll a whole verse away from the music.
+        let lyrics_offset = store.get(|s| s.lyrics_offset.clamp(-10.0, 10.0));
         Self {
             app,
             store,
             api,
-            player: Mutex::new(PlayerState::new(skin, panel_skin, tint)),
+            player: Mutex::new(PlayerState::new(skin, panel_skin, tint, lyrics_offset)),
             cover: Mutex::new(None),
             upnext: Mutex::new(Arc::from([])),
             lyrics: Mutex::new(LyricsView::idle()),

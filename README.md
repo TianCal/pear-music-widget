@@ -55,6 +55,15 @@ highlighted and held just above centre, clicking a line seeks to it, and
 scrolling over the panel scrolls the lyrics rather than the volume. Leave the
 panel open and it reopens next launch.
 
+Only the middle of a line takes a click — the ends are there to be read past, so
+a stray click while you scroll cannot throw the song somewhere else.
+
+When the words and the music disagree by a beat, **Lyrics timing** nudges the
+roll in half-second steps, up to two seconds either way. It is one setting for
+every track, not per song: the drift is between the timings and the player's
+clock, so whatever corrects one track usually corrects the next. Seeking by
+clicking a line follows the same correction, and the setting is remembered.
+
 Lyrics come from [LRCLib](https://lrclib.net) first, and from YouTube Music's own
 timed lyrics when LRCLib has never heard of the track. **This is the only time
 the widget talks to anything other than localhost**: it sends the title and

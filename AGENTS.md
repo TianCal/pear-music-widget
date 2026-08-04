@@ -222,6 +222,21 @@ inside the top fade. `LYRIC_RAISE` lifts the sung line slightly above centre. A
 wheel over the panel scrolls the lyrics rather than the volume and parks the roll
 for `LYRIC_MANUAL_MS`, with the glide duration set to zero so it tracks the hand.
 
+**Only the middle 40% of a line is clickable**, as a `::after` band on the button
+rather than a narrower button: the button is the line's layout box, so shrinking
+it would re-wrap the words and move the offsets the roll is gliding toward. The
+line itself is `pointer-events: none` and the band `auto`; a pseudo-element is
+never an event target of its own, so `event.target` is still the line. Do not
+guard the handler on `row.dataset.index` being truthy — the first line's is the
+string `"0"`, which made the opening line unclickable.
+
+`lyricsOffset` (seconds, positive turning the lines over earlier) nudges the roll
+when the timings and the player's clock disagree. It follows `tint` exactly:
+stored in `settings.json`, mirrored into `PlayerState` because the roll runs in
+the renderer, and set from a **Lyrics timing** submenu in all three menus. It is
+deliberately global rather than per-track. Click-to-seek subtracts it, so a
+nudged roll does not seek you to a point that then lights up a different line.
+
 ## Search and the queue
 
 `POST /search` returns ~270KB of raw innertube JSON with no stable path to the

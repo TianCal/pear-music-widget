@@ -60,6 +60,7 @@ let state = {
   skin: 'classic',
   panelSkin: 'classic',
   tint: 1,
+  lyricsOffset: 0,
   upnext: [],
   lyrics: null,
   lyricsState: 'idle',
@@ -620,6 +621,12 @@ const renderLyrics = () => {
   });
 };
 
+/** Seconds the roll runs ahead of the playhead, from the Lyrics timing menu.
+ *  Positive turns the lines over earlier. Set once and kept across tracks: the
+ *  drift is between the timings and the player's clock, not a property of any
+ *  one song. */
+const lyricShift = () => state.lyricsOffset || 0;
+
 /** Index of the last line whose timestamp has passed. */
 const lyricIndexAt = (position) => {
   let lo = 0;
@@ -644,7 +651,7 @@ const rollLyrics = (position) => {
   // closed then, and a hidden panel has no height to measure against.
   if (!lyricMeasured && !measureLyrics()) return;
 
-  const index = lyricIndexAt(position);
+  const index = lyricIndexAt(position + lyricShift());
   if (index === lyricActive) return;
   const previous = lyricActive;
   lyricActive = index;
@@ -688,17 +695,25 @@ el.cornerLyrics.addEventListener('click', (event) => {
   toggleLyrics();
 });
 
-// Clicking a line seeks to it — the timestamps are right there.
+// Clicking a line seeks to it — the timestamps are right there. `dataset.index`
+// is not tested for truthiness: the first line's is the string "0", which is
+// falsy, and guarding on it is what used to make the opening line unclickable.
+// A `<p>` from an unsynced block has no index at all, so the lookup misses.
 el.lyricsLines.addEventListener('click', (event) => {
   const row = event.target.closest('.lyric');
-  if (!row || !lyricSynced || !row.dataset.index) return;
+  if (!row || !lyricSynced) return;
   const line = lyricLines[Number(row.dataset.index)];
   if (!line) return;
-  clock.position = line.time;
+
+  // Land the audio where this line *sounds*, which is the same correction the
+  // roll is already applying — otherwise a nudged roll would seek you to a
+  // point that then lights up a different line.
+  const seconds = Math.max(0, line.time - lyricShift());
+  clock.position = seconds;
   clock.at = performance.now();
   ignorePositionUntil = performance.now() + 1200;
   bumpProgress();
-  send('seek', { seconds: line.time });
+  send('seek', { seconds });
 });
 
 // ------------------------------------------------------------------ search

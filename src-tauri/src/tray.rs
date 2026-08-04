@@ -44,6 +44,22 @@ const TINTS: [(u32, &str); 5] = [(0, "Off"), (35, "Subtle"), (60, "Medium"), (80
 
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
+/// Nudges for the lyric roll, in milliseconds, listed the way they read on a
+/// timeline: ahead of the music at the top, behind it at the bottom. Half a
+/// second is about the smallest drift worth correcting, and two seconds either
+/// way covers the worst of what LRCLib and YouTube Music disagree by.
+const LYRIC_OFFSETS: [(i32, &str); 9] = [
+    (2000, "2.0s earlier"),
+    (1500, "1.5s earlier"),
+    (1000, "1.0s earlier"),
+    (500, "0.5s earlier"),
+    (0, "In sync"),
+    (-500, "0.5s later"),
+    (-1000, "1.0s later"),
+    (-1500, "1.5s later"),
+    (-2000, "2.0s later"),
+];
+
 /// A menu is as wide as its widest item, and the now-playing line is the only
 /// one whose length we do not control. Budget it in display columns rather than
 /// characters: a CJK title counted by `char` is twice as wide as it looks, which
@@ -197,6 +213,30 @@ fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::W
     Submenu::with_items(app, "Cover tint", true, &refs)
 }
 
+/// The one setting here that is about the *content* rather than the chrome. It
+/// is deliberately not per-track: the drift comes from the timings and the
+/// player's clock, and whatever corrects one track usually corrects the next.
+fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
+    let selected = (current * 1000.0).round() as i32;
+    let items: Vec<CheckMenuItem<tauri::Wry>> = LYRIC_OFFSETS
+        .iter()
+        .map(|(ms, label)| {
+            CheckMenuItem::with_id(
+                app,
+                format!("lyricsOffset:{ms}"),
+                label,
+                true,
+                *ms == selected,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<_>>()?;
+
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    Submenu::with_items(app, "Lyrics timing", true, &refs)
+}
+
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
@@ -226,6 +266,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
     let opacity = store.get(|s| s.opacity);
     let tint = store.get(|s| s.tint);
+    let lyrics_offset = store.get(|s| s.lyrics_offset);
     let always_on_top = store.get(|s| s.always_on_top);
     let open_at_login = app.autolaunch().is_enabled().unwrap_or(false);
 
@@ -248,6 +289,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity)?,
+            &lyric_offset_submenu(app, lyrics_offset)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
@@ -274,6 +316,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
+            &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
@@ -287,6 +330,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 /// Right-click menu for the dropdown. Only what applies to it: opacity, always
 /// on top and the reset all act on the floating widget, so they stay out of it.
+/// The lyric nudge does apply — the dropdown rolls the same words.
 pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let store = app.state::<Arc<Store>>();
 
@@ -295,6 +339,7 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, store.get(|s| s.tint))?,
+            &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -399,6 +444,14 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     // The wash is mixed in the renderer, so the strength has to
                     // reach it like any other piece of state.
                     app.state::<Arc<Core>>().update(|state| state.tint = tint);
+                }
+            } else if let Some(ms) = other.strip_prefix("lyricsOffset:") {
+                if let Ok(ms) = ms.parse::<f64>() {
+                    let offset = ms / 1000.0;
+                    store.update(|s| s.lyrics_offset = offset);
+                    // The roll runs in the renderer, so — like the tint — the
+                    // nudge has to reach it as state.
+                    app.state::<Arc<Core>>().update(|state| state.lyrics_offset = offset);
                 }
             } else if let Some(pct) = other.strip_prefix("opacity:") {
                 if let Ok(pct) = pct.parse::<f64>() {

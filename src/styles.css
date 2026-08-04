@@ -647,8 +647,30 @@ body.panel .resize-edges {
   font-weight: 500;
   line-height: 1.35;
   color: var(--fg-faint);
-  cursor: pointer;
   transition: color 0.25s ease, opacity 0.25s ease, scale 0.25s ease;
+}
+
+/* Clicking a line seeks to it — but a full-width hit target on a panel you also
+   scroll, whose lines are marching upward under the pointer, turned a stray
+   click into a jump across the song. Only a band down the middle takes the
+   click; the ends of every line are inert text.
+
+   The band is a pseudo-element rather than a narrower button because the button
+   is also the line's layout box: shrinking that would re-wrap the words and
+   move the very offsets the roll is gliding toward. A pseudo-element is not an
+   event target of its own, so the click still arrives at the line. */
+button.lyric {
+  position: relative;
+  pointer-events: none;
+}
+
+button.lyric::after {
+  content: '';
+  position: absolute;
+  /* Full height, 30% clear at each end — so the middle 40% is what you press. */
+  inset: 0 30%;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .lyric.past {
@@ -684,7 +706,6 @@ body.panel .resize-edges {
 }
 
 .lyrics.plain .lyric {
-  cursor: default;
   color: var(--fg-dim);
   font-size: 11.5px;
   text-align: left;
