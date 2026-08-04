@@ -240,7 +240,9 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 /// Right-click menu for the floating widget itself: the things you would want
 /// while looking at it, minus the app-level plumbing that belongs in the tray.
-/// The dropdown is left alone — popping a menu over it would blur it shut.
+///
+/// Deliberately no "Dropdown skin" — every item here acts on the window you
+/// right-clicked, and the dropdown has its own menu for its own layout.
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
@@ -249,12 +251,28 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         &[
             &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
-            &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
             &MenuItem::with_id(app, "hideWidget", "Hide widget", alive, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "openApp", "Open YouTube Music", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
+            &MenuItem::with_id(app, "quitWithMusic", "Quit with YouTube Music", true, None::<&str>)?,
+        ],
+    )
+}
+
+/// Right-click menu for the dropdown. Only what applies to it: opacity, always
+/// on top and the reset all act on the floating widget, so they stay out of it.
+pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let store = app.state::<Arc<Store>>();
+
+    Menu::with_items(
+        app,
+        &[
+            &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "openApp", "Open YouTube Music", true, None::<&str>)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,

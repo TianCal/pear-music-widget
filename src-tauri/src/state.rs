@@ -402,6 +402,14 @@ impl Core {
             self.apply_song(Some(song)).await;
         }
 
+        // `apply_song` only refreshes the queue when the track actually
+        // changed, so a reconnect on the same track would otherwise leave
+        // "Next tracks" empty until the song ended.
+        {
+            let core = Arc::clone(self);
+            tauri::async_runtime::spawn(async move { core.refresh_upnext().await });
+        }
+
         let shuffle = shuffle
             .ok()
             .flatten()

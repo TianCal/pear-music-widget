@@ -168,6 +168,9 @@ trick that makes that possible: the seek bar is a flex child of `.controls`
 rather than a sibling, so each skin places it with `order` alone — above the
 buttons (classic, via `flex-basis: 100%` and wrapping) or below them (stack).
 
+`--well` is deliberately translucent enough for the wash to read through it;
+at its old opacity the queue was a flat slab that the card's tint stopped at.
+
 `.upnext` is `position: relative` for a reason: `.ambient` and `.scrim` are
 absolutely positioned siblings, and an unpositioned block paints *underneath*
 them, so the scrim washed the queue out until it was given a position.
@@ -176,6 +179,18 @@ Stack's "Next tracks" comes from `GET /queue`, parsed by `parse_queue_upcoming`.
 It has its own `--well` backdrop because the ambient artwork layer bleeds
 through the whole card — without it, queue legibility depends on whatever cover
 happens to be playing.
+
+## Context menus
+
+Each surface's right-click menu acts on that surface: the widget's has its own
+skin, opacity, always-on-top and reset; the dropdown's has only its own skin
+plus the app-level items. Neither carries the other's layout.
+
+Giving the dropdown a menu at all needs care, and is why the Electron build did
+without one: a menu takes focus, and losing focus is what closes the dropdown,
+so it would dismiss the window it was opened from. `PanelState::menu_open` holds
+it open for the duration — `popup_menu` runs macOS's modal menu loop, so the
+flag can simply be cleared once it returns.
 
 ## Panels
 
@@ -300,6 +315,14 @@ stuck on "Connecting…" forever.
 `connecting` is shown only on the first attempt or after a manual retry, so
 background reconnects do not flicker the UI.
 
+**A retry is not free.** It tears the socket down and comes back through
+`offline`, which clears the queue — so `launch_music_app` only retries when the
+link is not already up. Without that guard, double-clicking the artwork to raise
+a player that was running anyway emptied "Next tracks". `refresh_all` also
+refreshes the queue now, because `apply_song` only does so when the track
+actually changed, and a reconnect on the same track would otherwise leave it
+empty until the song ended.
+
 A manual retry (`Realtime::request_retry`) is a `Notify` pulse that both cancels
 the backoff sleep and tears down an established socket, so Reconnect is immediate
 whatever state the link is in.
@@ -365,7 +388,32 @@ app, but the check keeps us from raising the Apple-event permission prompt for
 no reason. `quit` is an Apple event, so the first use prompts; if it is denied
 the script fails and the 4s timeout makes sure we quit ourselves anyway.
 
-## Accent colour
+## Colour from the cover
+
+The card is tinted from the artwork, not just the transport: `palette.js`
+returns an accent plus three washes, and `.ambient` paints them as three soft
+pools over a base tint.
+
+The washes are **generated**, not the cover itself. `.ambient` used to be the
+artwork blurred to 34px, which drags every dark and desaturated region into the
+mix — a bright sleeve came out brown, and the scrim over it made that worse.
+Sampling the hues and painting gradients from them keeps only what the eye reads
+as the colour.
+
+Three hues rather than one: after the winner is picked, its bucket and both
+neighbours are zeroed and the next strongest is taken, twice. A runner-up
+scoring under 12% (then 8%) of the winner is not really present, so a cover that
+is genuinely one colour gets an analogous spread off the winner instead — that
+is what stops a monochrome sleeve sprouting a stripe of something unrelated.
+
+Dark and light get different washes from the same artwork, not the same colours
+at a different opacity, so the palette is rebuilt on `prefers-color-scheme`
+changes as well as on track changes. `PMW_THEME=dark|light` pins the webview's
+scheme for checking both without touching the machine's setting.
+
+The custom properties are registered with `@property` so a track change eases
+between palettes; an unregistered custom property is an unparsed string and
+cannot be interpolated, so without that block the card snaps.
 
 **Draw with `decode()`, not `onload`.** The two mean different things: `onload`
 fires once the bytes are in, `decode()` only once there is a bitmap ready to

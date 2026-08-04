@@ -6,6 +6,13 @@
   --accent: #ff5a6e;
   --accent-soft: rgba(255, 90, 110, 0.28);
 
+  /* The wash the card is tinted with, generated from the cover — see
+     palette.js. Neutral until artwork arrives. */
+  --wash-1: rgba(255, 90, 110, 0.1);
+  --wash-2: rgba(255, 138, 74, 0.08);
+  --wash-3: rgba(255, 90, 110, 0.06);
+  --wash-base: rgba(22, 22, 26, 0.4);
+
   --fg: rgba(255, 255, 255, 0.97);
   --fg-dim: rgba(255, 255, 255, 0.62);
   --fg-faint: rgba(255, 255, 255, 0.34);
@@ -13,7 +20,7 @@
   --hairline: rgba(255, 255, 255, 0.14);
   --rail: rgba(255, 255, 255, 0.2);
   --hover: rgba(255, 255, 255, 0.12);
-  --well: rgba(10, 10, 14, 0.42);
+  --well: rgba(10, 10, 14, 0.28);
   --well-item: rgba(255, 255, 255, 0.1);
   --shadow: 0 18px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
 }
@@ -27,10 +34,60 @@
     --hairline: rgba(0, 0, 0, 0.1);
     --rail: rgba(0, 0, 0, 0.16);
     --hover: rgba(0, 0, 0, 0.08);
-    --well: rgba(255, 255, 255, 0.5);
+    --well: rgba(255, 255, 255, 0.3);
     --well-item: rgba(0, 0, 0, 0.06);
+    --wash-1: rgba(255, 90, 110, 0.12);
+    --wash-2: rgba(255, 138, 74, 0.1);
+    --wash-3: rgba(255, 90, 110, 0.07);
+    --wash-base: rgba(255, 255, 255, 0.36);
     --shadow: 0 16px 36px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.12);
   }
+}
+
+/* A custom property is an unparsed string unless it is registered, and strings
+   cannot be interpolated — so without this the card would snap to each new
+   track's colours instead of easing into them. Unsupported engines ignore the
+   whole block and simply snap, which is what the old blurred-artwork layer did
+   anyway. */
+@property --wash-1 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --wash-2 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --wash-3 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --wash-base {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
+}
+@property --accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #ff5a6e;
+}
+@property --accent-soft {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 90, 110, 0.28);
+}
+
+html {
+  transition:
+    --wash-1 0.7s ease,
+    --wash-2 0.7s ease,
+    --wash-3 0.7s ease,
+    --wash-base 0.7s ease,
+    --accent 0.7s ease,
+    --accent-soft 0.7s ease;
 }
 
 * {
@@ -118,33 +175,32 @@ body.panel .resize-edges {
   display: none;
 }
 
-/* Blurred cover art bled behind the content — the "ambient" layer. */
+/* The cover's colours diffused across the whole card — the "ambient" layer.
+   Three soft pools off the artwork's three strongest hues over a base tint,
+   rather than the cover itself: blurring the artwork drags every dark and
+   desaturated region into the mix, which is what made a bright sleeve come out
+   brown. */
 .ambient {
   position: absolute;
-  inset: -40%;
-  background-size: cover;
-  background-position: center;
-  filter: blur(34px) saturate(1.7);
+  inset: 0;
+  background:
+    radial-gradient(118% 132% at 8% 0%, var(--wash-1), transparent 62%),
+    radial-gradient(104% 124% at 94% 16%, var(--wash-2), transparent 60%),
+    radial-gradient(120% 118% at 50% 104%, var(--wash-3), transparent 70%),
+    var(--wash-base);
   opacity: 0;
-  transform: scale(1.15);
-  transition: opacity 0.6s ease, background-image 0.6s ease;
+  transition: opacity 0.6s ease;
   will-change: opacity;
 }
 
 .card.has-art .ambient {
-  opacity: 0.55;
-}
-
-@media (prefers-color-scheme: light) {
-  .card.has-art .ambient {
-    opacity: 0.4;
-  }
+  opacity: 1;
 }
 
 .scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(105deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.24) 55%, rgba(0, 0, 0, 0.42) 100%);
+  background: linear-gradient(105deg, rgba(0, 0, 0, 0.3) 0%, rgba(0, 0, 0, 0.1) 55%, rgba(0, 0, 0, 0.24) 100%);
 }
 
 @media (prefers-color-scheme: light) {

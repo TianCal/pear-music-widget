@@ -38,9 +38,8 @@ use raises the one-time macOS "wants to control" prompt; if it is declined, the
 widget still quits on its own.
 
 If YouTube Music is not running, pressing play launches it. **Double-clicking the
-artwork** brings it to the front. The artwork rather than the whole card because
-macOS hands mouse events in a window's drag region to the window-move machinery
-— they never reach the page, which is the same reason buttons need `no-drag`.
+card** brings it to the front — anywhere that is not a control, since dragging
+only begins once the pointer has actually moved.
 
 ## Skins
 
@@ -53,7 +52,8 @@ Two layouts, switchable from the menu bar.
 
 **Skin** sets the floating widget; **Dropdown skin** sets the menu-bar popover.
 They are independent, so you can run one layout on the desktop and the other in
-the dropdown. Dragging an edge scales whichever skin is showing — it never
+the dropdown — and each surface's own right-click menu changes only its own
+layout. Dragging an edge scales whichever skin is showing — it never
 switches between them.
 
 ## Lyrics
@@ -82,7 +82,8 @@ index, so a song ending mid-click cannot make it play the wrong thing.
 ## Features
 
 - Real macOS vibrancy, native rounded corners and shadow
-- Accent colour extracted from the cover art on every track change
+- The whole card tinted from the cover art — three hues pulled off the artwork
+  and diffused across the glass, with a matching accent on the transport
 - Play/pause, next, previous, shuffle, like (right-click the heart to dislike)
 - Scrubable progress bar
 - Volume three ways: drag the popover on the speaker, scroll anywhere on the

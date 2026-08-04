@@ -26,6 +26,11 @@ pub struct PanelState {
     hidden_at: Mutex<Option<Instant>>,
     expanded_by: Mutex<Option<String>>,
     visible: AtomicBool,
+    /// Set while the dropdown's own context menu is up. A menu takes focus, and
+    /// blur is what closes the dropdown — without this the menu would dismiss
+    /// the window it was opened from, which is why the Electron build never
+    /// gave the dropdown a menu at all.
+    menu_open: AtomicBool,
 }
 
 impl PanelState {
@@ -34,6 +39,7 @@ impl PanelState {
             hidden_at: Mutex::new(None),
             expanded_by: Mutex::new(None),
             visible: AtomicBool::new(false),
+            menu_open: AtomicBool::new(false),
         }
     }
 }
@@ -67,6 +73,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .skip_taskbar(true)
     .shadow(true)
     .visible(false)
+    .theme(window::forced_theme())
     .build()?;
 
     // `Menu` rather than `UnderWindowBackground`: a dropdown should read as part
@@ -163,7 +170,22 @@ pub fn on_blur(app: &AppHandle, panel: &WebviewWindow) {
     if !panel.is_visible().unwrap_or(false) {
         return;
     }
+    if state(app).menu_open.load(Ordering::SeqCst) {
+        return; // it lost focus to its own context menu
+    }
     hide(app, panel);
+}
+
+/// Pop the dropdown's context menu, holding it open for the duration.
+/// `popup_menu` runs macOS's modal menu loop, so this returns once the menu has
+/// been dismissed.
+pub fn popup_menu(app: &AppHandle, panel: &WebviewWindow, menu: &tauri::menu::Menu<tauri::Wry>) {
+    let state = state(app);
+    state.menu_open.store(true, Ordering::SeqCst);
+    let _ = panel.popup_menu(menu);
+    state.menu_open.store(false, Ordering::SeqCst);
+    // Take focus back, or the next click outside would have nothing to blur.
+    let _ = panel.set_focus();
 }
 
 /// Park the panel under the tray icon, clamped to the screen it sits on.

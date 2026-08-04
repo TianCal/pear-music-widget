@@ -335,6 +335,16 @@ pub fn dress(window: &WebviewWindow, material: NSVisualEffectMaterial, level: is
 
 // ------------------------------------------------------------------ create
 
+/// `PMW_THEME=dark|light` pins the webview's colour scheme. Debug-only, and the
+/// only way to see both appearances without changing the machine's setting.
+pub fn forced_theme() -> Option<tauri::Theme> {
+    match std::env::var("PMW_THEME").ok()?.as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        _ => None,
+    }
+}
+
 pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let store = app.state::<Arc<Store>>().inner().clone();
     let skin = skin_of(&store);
@@ -358,6 +368,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .skip_taskbar(true)
         .shadow(true)
         .visible(false)
+        .theme(forced_theme())
         .build()?;
 
     dress(&window, NSVisualEffectMaterial::UnderWindowBackground, macos::LEVEL_FLOATING);

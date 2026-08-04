@@ -12,7 +12,6 @@ const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 
 
 const el = {
   card: $('card'),
-  ambient: $('ambient'),
   player: $('player'),
   cover: $('cover'),
   title: $('title'),
@@ -95,21 +94,34 @@ const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 // ----------------------------------------------------------------- accent
 
-let accentToken = 0;
+let paletteToken = 0;
 
-const applyAccent = async (coverDataUrl) => {
-  const token = ++accentToken;
-  const { hex, soft } = await window.palette.extract(coverDataUrl);
-  if (token !== accentToken) return; // a newer cover won the race
-  document.documentElement.style.setProperty('--accent', hex);
-  document.documentElement.style.setProperty('--accent-soft', soft);
+/** The whole card is tinted from the cover, not just the transport. */
+const applyPalette = async (coverDataUrl) => {
+  const token = ++paletteToken;
+  const palette = await window.palette.extract(coverDataUrl);
+  if (token !== paletteToken) return; // a newer cover won the race
+
+  const root = document.documentElement.style;
+  root.setProperty('--accent', palette.accent);
+  root.setProperty('--accent-soft', palette.accentSoft);
+  root.setProperty('--wash-1', palette.wash1);
+  root.setProperty('--wash-2', palette.wash2);
+  root.setProperty('--wash-3', palette.wash3);
+  root.setProperty('--wash-base', palette.washBase);
 };
 
 // A surface that was hidden when the track changed may have had nothing to
-// sample, so take the colour again once it is back on screen. Cheap, and it is
+// sample, so take the colours again once it is back on screen. Cheap, and it is
 // the only thing that can correct a cover resolved while the dropdown was shut.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.cover) applyAccent(state.cover);
+  if (document.visibilityState === 'visible' && state.cover) applyPalette(state.cover);
+});
+
+// Dark and light get different washes from the same artwork, so they have to be
+// rebuilt when the system flips rather than just restyled.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  applyPalette(state.cover);
 });
 
 // --------------------------------------------------------------- marquee
@@ -195,13 +207,11 @@ const renderSong = () => {
     lastCoverSrc = state.cover;
     if (state.cover) {
       el.cover.src = state.cover;
-      el.ambient.style.backgroundImage = `url("${state.cover}")`;
       el.card.classList.add('has-art');
-      applyAccent(state.cover);
+      applyPalette(state.cover);
     } else {
       el.card.classList.remove('has-art');
-      el.ambient.style.backgroundImage = '';
-      applyAccent(null);
+      applyPalette(null);
     }
   }
 
@@ -693,10 +703,11 @@ document.addEventListener('dblclick', (event) => {
   openMusicApp();
 });
 
-// Right-click anywhere on the widget for a subset of the menu-bar menu. Inputs
-// keep their own menu, and the heart already uses right-click for dislike.
+// Right-click either surface for a subset of the menu-bar menu — the widget
+// gets its own layout and chrome, the dropdown gets its layout. Inputs keep
+// their own menu, and the heart already uses right-click for dislike.
 document.addEventListener('contextmenu', (event) => {
-  if (IS_PANEL || event.target.closest('input')) return;
+  if (event.target.closest('input')) return;
   event.preventDefault();
   window.widget.contextMenu();
 });

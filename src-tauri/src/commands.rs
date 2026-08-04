@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::search;
 use crate::state::{Core, PlayerState};
-use crate::window::{self, PANEL, WIDGET};
+use crate::window::{self, PANEL};
 
 /// Polling budget for a queued track to show up (see `play_result`).
 const PLAY_POLL_ATTEMPTS: usize = 20;
@@ -193,18 +193,21 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     json!({ "ok": true })
 }
 
-/// Right-clicking the floating widget gets a focused subset of the tray menu.
+/// Right-clicking either surface gets a focused subset of the tray menu — the
+/// widget's own layout and chrome, or the dropdown's layout.
 #[tauri::command]
 pub fn context_menu(app: AppHandle, window: WebviewWindow) {
-    if window.label() != WIDGET {
-        return;
-    }
+    let label = window.label().to_string();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let Some(target) = handle.get_webview_window(WIDGET) else {
+        let Some(target) = handle.get_webview_window(&label) else {
             return;
         };
-        if let Ok(menu) = crate::tray::build_widget_menu(&handle) {
+        if label == PANEL {
+            if let Ok(menu) = crate::tray::build_panel_menu(&handle) {
+                crate::panel::popup_menu(&handle, &target, &menu);
+            }
+        } else if let Ok(menu) = crate::tray::build_widget_menu(&handle) {
             let _ = target.popup_menu(&menu);
         }
     });

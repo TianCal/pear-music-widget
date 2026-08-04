@@ -47,9 +47,21 @@ pub fn quit(app: &AppHandle) {
 /// Pressing play when YouTube Music is not up should start it. Resetting the
 /// backoff means the widget picks the app up as soon as it is listening, rather
 /// than after however long the last failure had backed off to.
+///
+/// Only when there is something to wait for, though. A retry tears the socket
+/// down and comes back through `offline`, which drops the queue — so raising an
+/// app that is already running and connected, as double-clicking the artwork
+/// does, would clear "Next tracks" for no reason.
 pub fn launch_music_app(app: &AppHandle) {
     tray::open_music_app();
-    ws::retry(app);
+
+    let connected = app
+        .try_state::<Arc<Core>>()
+        .map(|core| core.status() == "connected")
+        .unwrap_or(false);
+    if !connected {
+        ws::retry(app);
+    }
 }
 
 fn spawn_pollers(core: Arc<Core>) {
