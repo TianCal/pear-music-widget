@@ -80,6 +80,10 @@ pub struct Settings {
     /// wherever it comes from — so this is set once and kept across tracks.
     #[serde(rename = "lyricsOffset", default)]
     pub lyrics_offset: f64,
+    /// Convert the lyrics to Simplified Chinese before they are shown. Applies
+    /// to the words only — everything else on the card is the player's.
+    #[serde(rename = "simplifyLyrics", default)]
+    pub simplify_lyrics: bool,
     /// The panel the floating widget was last left showing, restored on the
     /// next launch. Only "lyrics" is ever stored: search is a query you have
     /// finished with, and the dropdown collapses on blur by design.
@@ -106,6 +110,7 @@ impl Default for Settings {
             opacity: default_opacity(),
             tint: default_tint(),
             lyrics_offset: 0.0,
+            simplify_lyrics: false,
             panel: None,
             extra: BTreeMap::new(),
         }

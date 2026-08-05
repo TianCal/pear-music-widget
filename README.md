@@ -64,6 +64,12 @@ every track, not per song: the drift is between the timings and the player's
 clock, so whatever corrects one track usually corrects the next. Seeking by
 clicking a line follows the same correction, and the setting is remembered.
 
+**Simplified Chinese lyrics** converts the words on the way to the panel, for the
+large part of the Mandarin and Cantonese catalogue that comes back traditional.
+It is phrase-aware rather than a character swap, so 乾淨 becomes 干净 while 乾坤
+stays 乾坤. Turning it back off restores the original words without refetching
+them, and anything already simplified — or not Chinese — is left alone.
+
 Lyrics come from [LRCLib](https://lrclib.net) first, and from YouTube Music's own
 timed lyrics when LRCLib has never heard of the track. **This is the only time
 the widget talks to anything other than localhost**: it sends the title and

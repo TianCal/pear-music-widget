@@ -237,6 +237,21 @@ fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<
     Submenu::with_items(app, "Lyrics timing", true, &refs)
 }
 
+/// Much of the Mandarin and Cantonese catalogue comes back traditional —
+/// LRCLib carries what was published, and YouTube Music's own timings are
+/// whatever the label uploaded. This converts the words on the way to the
+/// panel; nothing else on the card is touched.
+fn simplify_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    CheckMenuItem::with_id(
+        app,
+        "simplifyLyrics",
+        "Simplified Chinese lyrics",
+        true,
+        checked,
+        None::<&str>,
+    )
+}
+
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
@@ -267,6 +282,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let opacity = store.get(|s| s.opacity);
     let tint = store.get(|s| s.tint);
     let lyrics_offset = store.get(|s| s.lyrics_offset);
+    let simplify_lyrics = store.get(|s| s.simplify_lyrics);
     let always_on_top = store.get(|s| s.always_on_top);
     let open_at_login = app.autolaunch().is_enabled().unwrap_or(false);
 
@@ -290,6 +306,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity)?,
             &lyric_offset_submenu(app, lyrics_offset)?,
+            &simplify_lyrics_item(app, simplify_lyrics)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
@@ -317,6 +334,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
+            &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
@@ -340,6 +358,7 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
+            &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -424,6 +443,13 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else {
                 app.autolaunch().enable()
             };
+        }
+        "simplifyLyrics" => {
+            let next = !store.get(|s| s.simplify_lyrics);
+            store.update(|s| s.simplify_lyrics = next);
+            // Re-derived rather than refetched, and pushed straight away: the
+            // panel you turned this on from is the one you want it to change.
+            app.state::<Arc<Core>>().restyle_lyrics();
         }
         "reconnect" => crate::ws::retry(app),
         "quit" => crate::quit(app),

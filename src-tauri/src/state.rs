@@ -26,7 +26,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use crate::api::{Api, ErrorCode, COVER_PX, THUMB_PX};
-use crate::lyrics::{self, Lyrics};
+use crate::lyrics::{self, LyricLine, Lyrics};
 use crate::search::{self, UpNextItem};
 use crate::store::Store;
 
@@ -147,6 +147,33 @@ impl LyricsView {
             lyrics: None,
         }
     }
+
+    /// The same words in Simplified Chinese. Only the lines are touched — the
+    /// state string and `how` describe the fetch, not the text.
+    ///
+    /// Text that is already simplified, or not Chinese at all, comes back
+    /// unchanged, so this is safe to run over every line rather than trying to
+    /// guess whether a track needs it.
+    fn simplified(&self) -> Self {
+        let Some(lyrics) = &self.lyrics else {
+            return self.clone();
+        };
+        Self {
+            state: self.state.clone(),
+            lyrics: Some(Arc::new(Lyrics {
+                synced: lyrics.synced,
+                how: lyrics.how,
+                lines: lyrics
+                    .lines
+                    .iter()
+                    .map(|line| LyricLine {
+                        time: line.time,
+                        text: fast2s::convert(&line.text),
+                    })
+                    .collect(),
+            })),
+        }
+    }
 }
 
 /// What a freshly loaded window needs before its first event arrives: the
@@ -256,7 +283,13 @@ pub struct Core {
     /// resolving artwork must not block a position tick behind it.
     cover: Mutex<Option<Arc<str>>>,
     upnext: Mutex<Arc<[UpNextItem]>>,
+    /// What the renderers are showing, script conversion already applied.
     lyrics: Mutex<LyricsView>,
+    /// The same words as they were fetched. Kept because the conversion is
+    /// one-way — converted text cannot be turned back — so switching Simplified
+    /// Chinese off has to re-derive from these rather than from what is on
+    /// screen, and doing that without a round trip to LRCLib is the point.
+    lyrics_source: Mutex<LyricsView>,
     volume: Mutex<VolumeCalibration>,
     /// Window labels with a lyrics panel open. No point reaching out to the
     /// network for a panel nobody is looking at.
@@ -282,6 +315,7 @@ impl Core {
             cover: Mutex::new(None),
             upnext: Mutex::new(Arc::from([])),
             lyrics: Mutex::new(LyricsView::idle()),
+            lyrics_source: Mutex::new(LyricsView::idle()),
             volume: Mutex::new(VolumeCalibration::default()),
             lyrics_wanted_by: Mutex::new(HashSet::new()),
             cover_token: AtomicU64::new(0),
@@ -352,6 +386,21 @@ impl Core {
     }
 
     fn set_lyrics(&self, view: LyricsView) {
+        *self.lyrics_source.lock().expect("lyrics lock") = view.clone();
+        self.publish_lyrics(view);
+    }
+
+    /// Convert if the setting asks for it, then push — still only on a real
+    /// change, since a track whose words are already simplified converts to
+    /// itself and must not re-emit for every window on every fetch.
+    ///
+    /// The store is read before the lyrics lock is taken, never inside it.
+    fn publish_lyrics(&self, view: LyricsView) {
+        let view = if self.store.get(|s| s.simplify_lyrics) {
+            view.simplified()
+        } else {
+            view
+        };
         {
             let mut held = self.lyrics.lock().expect("lyrics lock");
             if *held == view {
@@ -360,6 +409,14 @@ impl Core {
             *held = view.clone();
         }
         let _ = self.app.emit("lyrics", &view);
+    }
+
+    /// Re-derive the shown words from the fetched ones. The Simplified Chinese
+    /// toggle is the only caller: it has to reach the panel that is open now,
+    /// not just the next track's words.
+    pub fn restyle_lyrics(&self) {
+        let source = self.lyrics_source.lock().expect("lyrics lock").clone();
+        self.publish_lyrics(source);
     }
 
     // ---------------------------------------------------------------- tracks
@@ -724,5 +781,56 @@ mod tests {
     fn an_uncalibrated_slider_shows_the_raw_value() {
         let calibration = VolumeCalibration::default();
         assert_eq!(calibration.reported_to_slider(55.0), 55.0);
+    }
+
+    #[test]
+    fn simplifies_the_words_and_leaves_the_rest_alone() {
+        let view = LyricsView {
+            state: "ready".into(),
+            lyrics: Some(Arc::new(Lyrics {
+                synced: true,
+                how: "exact",
+                lines: vec![
+                    LyricLine {
+                        time: Some(0.0),
+                        text: "後來我總算學會了如何去愛".into(),
+                    },
+                    // The reason this is not a character table: 乾 is 干 in
+                    // 乾淨 and stays 乾 in 乾坤. Any per-character mapping gets
+                    // one of those two wrong, in the same line.
+                    LyricLine {
+                        time: Some(1.0),
+                        text: "乾淨的乾坤".into(),
+                    },
+                    // Already simplified, and not Chinese at all: both have to
+                    // survive untouched, since every line is converted rather
+                    // than the track being sniffed first.
+                    LyricLine {
+                        time: Some(2.0),
+                        text: "Baby, already 简体 and ASCII".into(),
+                    },
+                ],
+            })),
+        };
+
+        let converted = view.simplified();
+        let lyrics = converted.lyrics.as_ref().expect("lyrics");
+        assert_eq!(lyrics.lines[0].text, "后来我总算学会了如何去爱");
+        assert_eq!(lyrics.lines[1].text, "干净的乾坤");
+        assert_eq!(lyrics.lines[2].text, "Baby, already 简体 and ASCII");
+
+        // Timings and the fetch's own description belong to the fetch, not the
+        // text — losing a timestamp here would stop the roll following along.
+        assert_eq!(lyrics.lines[0].time, Some(0.0));
+        assert_eq!(lyrics.lines[2].time, Some(2.0));
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.how, "exact");
+        assert_eq!(converted.state, "ready");
+    }
+
+    #[test]
+    fn a_track_with_no_lyrics_converts_to_itself() {
+        let idle = LyricsView::idle();
+        assert_eq!(idle.simplified(), idle);
     }
 }

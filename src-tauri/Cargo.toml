@@ -1,6 +1,6 @@
 [package]
 name = "pear-music-widget"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A floating now-playing widget and menu-bar player for macOS"
@@ -9,6 +9,10 @@ authors = ["litian"]
 [dependencies]
 anyhow = "1"
 base64 = "0.23"
+# Traditional → Simplified for the lyrics panel. Phrase-aware rather than a
+# character table, which is the whole difference between 乾淨 → 干净 and
+# 乾坤 staying 乾坤. MIT, and the rules are compiled in — no network, no C library.
+fast2s = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 regex = "1.13.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }

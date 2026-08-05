@@ -230,6 +230,23 @@ never an event target of its own, so `event.target` is still the line. Do not
 guard the handler on `row.dataset.index` being truthy — the first line's is the
 string `"0"`, which made the opening line unclickable.
 
+**Simplified Chinese is applied on the way out, and the fetched words are kept.**
+`Core` holds `lyrics_source` beside `lyrics`: the conversion is one-way, so
+turning the setting *off* has to re-derive from what was fetched rather than
+from what is on screen — and doing that without another round trip to LRCLib is
+the whole point of keeping it. `set_lyrics` stores the source and publishes;
+`restyle_lyrics` republishes from the source, which is what makes the toggle
+reach the panel that is already open. `publish_lyrics` reads the store *before*
+taking the lyrics lock, and still diffs before emitting: a track whose words are
+already simplified converts to itself, and must not re-emit to every window on
+every fetch.
+
+Conversion is `fast2s`, and it being phrase-aware rather than a character table
+is the point — 乾 is 干 in 乾淨 and stays 乾 in 乾坤, which a per-character
+mapping gets wrong in the same line. Every line is converted rather than the
+track being sniffed first: text that is already simplified, or not Chinese,
+converts to itself.
+
 `lyricsOffset` (seconds, positive turning the lines over earlier) nudges the roll
 when the timings and the player's clock disagree. It follows `tint` exactly:
 stored in `settings.json`, mirrored into `PlayerState` because the roll runs in
