@@ -346,6 +346,12 @@ the wheel. Its own listener calls `stopPropagation`, which is what makes
 scrolling the queue never change the sound, and maps a vertical wheel onto the
 axis that moves.
 
+**And it does not snap.** Driving it means assigning `scrollLeft`, and
+`scroll-snap-type` reverts any assignment smaller than its threshold. A coarse
+mouse wheel clears that in one tick and looks fine; a trackpad arrives as a
+stream of small deltas and moves the strip not at all. Snapping and a
+hand-driven scroll do not mix.
+
 ## Volume
 
 The most subtle part of the codebase. Three problems, all in `setVolume` in the
