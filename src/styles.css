@@ -1579,3 +1579,39 @@ body.skin-classic .setup p {
   display: none;
 }
 
+
+/* ======================================================================
+   PROTOTYPE — three columns, no strip heading. ?variant=w3 (PMW_VARIANT).
+   Throwaway: delete with the hooks in main/store/window.rs and app.js.
+
+   Three cards fill the strip exactly: 3 x 95.3 + 2 x 8 = 302. Dropping the
+   "Next tracks" heading frees about 21px of height, which goes into the
+   rows rather than being left as a gap under the strip — so the cards get
+   taller as well as wider, and the cover with it.
+   ====================================================================== */
+
+body.proto-w3 .upnext-title {
+  display: none;
+}
+
+/* The gutter moves off the scroller and onto the section. Inside the
+   scroller it is part of the scrollable content, so the columns tile from
+   14px in while the viewport stays 302 wide — the pitch (103.33) and the
+   viewport do not divide, and every scroll lands the edges mid-card, which
+   is the uneven slack. Outside it, three cards and two gaps come to exactly
+   302, so the strip sits flush at rest and after every scroll. */
+body.proto-w3 .upnext {
+  padding: 12px 14px 14px;
+}
+
+body.proto-w3 .upnext-grid {
+  padding: 0;
+  grid-auto-columns: calc((100% - 16px) / 3);
+  grid-template-rows: 50px 50px;
+}
+
+body.proto-w3 .upnext-item img {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+}

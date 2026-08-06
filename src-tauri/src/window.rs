@@ -454,7 +454,12 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .filter(|bounds| is_on_screen(app, *bounds, size))
         .unwrap_or_else(|| default_position(app, size));
 
-    let window = WebviewWindowBuilder::new(app, WIDGET, WebviewUrl::App("index.html".into()))
+    // PROTOTYPE HOOK: PMW_VARIANT picks a Next-tracks layout to compare.
+    let page = match std::env::var("PMW_VARIANT") {
+        Ok(v) if !v.is_empty() => format!("index.html?variant={v}"),
+        _ => "index.html".to_string(),
+    };
+    let window = WebviewWindowBuilder::new(app, WIDGET, WebviewUrl::App(page.into()))
         .title("Pear Music Widget")
         .inner_size(size.0, size.1)
         .position(position.x, position.y)

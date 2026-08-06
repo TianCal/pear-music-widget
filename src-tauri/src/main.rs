@@ -221,14 +221,21 @@ fn main() {
         .expect("tokio runtime");
     tauri::async_runtime::set(runtime.handle().clone());
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+
+    // PROTOTYPE HOOK: PMW_MULTI runs copies of the widget side by side, which
+    // the single-instance guard exists to prevent. Delete with the prototype.
+    if std::env::var("PMW_MULTI").is_err() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch should surface the widget, not start a second one.
             if let Some(window) = app.get_webview_window(WIDGET) {
                 let _ = window.show();
                 resync(app);
             }
-        }))
+        }));
+    }
+
+    let app = builder
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,

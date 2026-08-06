@@ -7,6 +7,10 @@ const $ = (id) => document.getElementById(id);
 const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 if (IS_PANEL) document.body.classList.add('panel');
 
+// PROTOTYPE HOOK: ?variant= picks a Next-tracks layout. Delete with it.
+const PROTO = new URLSearchParams(location.search).get('variant');
+if (PROTO) document.body.classList.add(`proto-${PROTO}`);
+
 /** Must match `SKINS` in src-tauri/src/window.rs. */
 const SKINS = ['classic', 'stack'];
 
@@ -435,17 +439,20 @@ const renderUpNext = () => {
     el.upnextGrid.append(card);
   });
 
-  // Park on the playing track, so the default view is what is coming next and
-  // the history is a scroll to the left. Measured off the card rather than
-  // computed from a column width: the column is a percentage of the content box
-  // less the gap, and guessing at that drifts further with every column.
+  // Centre the playing track rather than parking it at the left edge, so what
+  // has just played sits to its left and what is coming to its right — with
+  // three columns that puts it in the middle one. Clamped at zero, so the start
+  // of a queue simply sits flush left rather than leaving a gap.
+  // Measured off the card rather than computed from a column width: the column
+  // is a percentage of the content box less the gap, and guessing at that
+  // drifts further with every column.
   const now = el.upnextGrid.children[current ?? 0];
-  if (now) el.upnextGrid.scrollLeft = now.offsetLeft - UPNEXT_PAD;
+  if (now) {
+    const centred = now.offsetLeft + now.offsetWidth / 2 - el.upnextGrid.clientWidth / 2;
+    el.upnextGrid.scrollLeft = Math.max(0, centred);
+  }
   upnextArtInView();
 };
-
-/** The strip's own left padding, matching `.upnext-grid` in the stylesheet. */
-const UPNEXT_PAD = 14;
 
 /** Artwork for the cards on screen, plus a screenful either side. */
 const upnextArtInView = () => {

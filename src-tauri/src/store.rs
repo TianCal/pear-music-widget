@@ -161,6 +161,11 @@ pub struct Store {
 /// Electron build used (Electron derives it from the package name, not the
 /// bundle id), so settings survive the port.
 fn settings_path() -> PathBuf {
+    // PROTOTYPE HOOK. Lets several copies run side by side without fighting
+    // over one settings file. Unset in normal use; delete with the prototype.
+    if let Ok(dir) = std::env::var("PMW_SETTINGS_DIR") {
+        return PathBuf::from(dir).join("settings.json");
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home)
         .join("Library/Application Support/pear-music-widget")
