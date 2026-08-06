@@ -44,6 +44,16 @@ const TINTS: [(u32, &str); 5] = [(0, "Off"), (35, "Subtle"), (60, "Medium"), (80
 
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
+/// Stillness before the corner buttons fade, in seconds. "Never" first, because
+/// it is the default and the rest are opt-ins.
+const CORNER_AUTOHIDE: [(u32, &str); 5] = [
+    (0, "Never"),
+    (2, "After 2s"),
+    (3, "After 3s"),
+    (5, "After 5s"),
+    (10, "After 10s"),
+];
+
 /// Nudges for the lyric roll, in milliseconds, listed the way they read on a
 /// timeline: ahead of the music at the top, behind it at the bottom. Half a
 /// second is about the smallest drift worth correcting, and two seconds either
@@ -256,6 +266,59 @@ fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenu
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
 
+/// The three toggles in the card's top-right corner, each shown or hidden on its
+/// own — turning Search off while keeping Lyrics is a reasonable thing to want.
+/// Independent checkboxes rather than a skin-style pick-one, so unlike every
+/// other submenu here more than one is ticked at a time.
+fn corner_submenu(
+    app: &AppHandle,
+    corners: crate::store::CornerButtons,
+    autohide: f64,
+) -> tauri::Result<Submenu<tauri::Wry>> {
+    let shown: Vec<CheckMenuItem<tauri::Wry>> = [
+        ("queue", "Queue", corners.queue),
+        ("lyrics", "Lyrics", corners.lyrics),
+        ("search", "Search", corners.search),
+    ]
+    .iter()
+    .map(|(key, text, on)| {
+        CheckMenuItem::with_id(app, format!("corner:{key}"), text, true, *on, None::<&str>)
+    })
+    .collect::<tauri::Result<_>>()?;
+
+    // Pick-one, unlike the three above — hence a separator between them, so the
+    // two kinds of checkmark do not read as one list.
+    let selected = autohide.round() as u32;
+    let fade: Vec<CheckMenuItem<tauri::Wry>> = CORNER_AUTOHIDE
+        .iter()
+        .map(|(secs, text)| {
+            CheckMenuItem::with_id(
+                app,
+                format!("cornerFade:{secs}"),
+                text,
+                true,
+                *secs == selected,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<_>>()?;
+
+    let separator = PredefinedMenuItem::separator(app)?;
+    let hide_label = MenuItem::with_id(app, "cornerFadeLabel", "Hide when idle", false, None::<&str>)?;
+
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = shown
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    refs.push(&separator);
+    refs.push(&hide_label);
+    refs.extend(
+        fade.iter()
+            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>),
+    );
+    Submenu::with_items(app, "Corner buttons", true, &refs)
+}
+
 // -------------------------------------------------------------------- menus
 
 /// The menu-bar settings menu. Built fresh every time, so it can never show a
@@ -283,6 +346,8 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let tint = store.get(|s| s.tint);
     let lyrics_offset = store.get(|s| s.lyrics_offset);
     let simplify_lyrics = store.get(|s| s.simplify_lyrics);
+    let corners = store.get(|s| s.corners);
+    let corners_autohide = store.get(|s| s.corners_autohide);
     let always_on_top = store.get(|s| s.always_on_top);
     let open_at_login = app.autolaunch().is_enabled().unwrap_or(false);
 
@@ -307,6 +372,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &opacity_submenu(app, opacity)?,
             &lyric_offset_submenu(app, lyrics_offset)?,
             &simplify_lyrics_item(app, simplify_lyrics)?,
+            &corner_submenu(app, corners, corners_autohide)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
@@ -335,6 +401,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
+            &corner_submenu(app, store.get(|s| s.corners), store.get(|s| s.corners_autohide))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
@@ -359,6 +426,7 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
+            &corner_submenu(app, store.get(|s| s.corners), store.get(|s| s.corners_autohide))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -383,7 +451,7 @@ pub fn set_skin(app: &AppHandle, skin: &str) {
     core.update(|state| state.skin = skin.to_string());
 
     let spawned = Arc::clone(&core);
-    tauri::async_runtime::spawn(async move { spawned.refresh_upnext().await });
+    tauri::async_runtime::spawn(async move { spawned.refresh_queue().await });
     refresh(app);
 }
 
@@ -395,7 +463,7 @@ pub fn set_panel_skin(app: &AppHandle, skin: &str) {
     core.update(|state| state.panel_skin = skin.to_string());
 
     let spawned = Arc::clone(&core);
-    tauri::async_runtime::spawn(async move { spawned.refresh_upnext().await });
+    tauri::async_runtime::spawn(async move { spawned.refresh_queue().await });
     refresh(app);
 }
 
@@ -462,6 +530,28 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else if let Some(skin) = other.strip_prefix("panelSkin:") {
                 if SKINS.contains(&skin) {
                     set_panel_skin(app, skin);
+                }
+            } else if let Some(which) = other.strip_prefix("corner:") {
+                // Independent toggles, so this flips one rather than selecting
+                // one. The renderer draws the buttons, so — like `tint` — the
+                // flags have to reach it as state.
+                let next = store.get(|s| {
+                    let mut corners = s.corners;
+                    match which {
+                        "queue" => corners.queue = !corners.queue,
+                        "lyrics" => corners.lyrics = !corners.lyrics,
+                        "search" => corners.search = !corners.search,
+                        _ => {}
+                    }
+                    corners
+                });
+                store.update(|s| s.corners = next);
+                app.state::<Arc<Core>>().update(|state| state.corners = next);
+            } else if let Some(secs) = other.strip_prefix("cornerFade:") {
+                if let Ok(secs) = secs.parse::<f64>() {
+                    store.update(|s| s.corners_autohide = secs);
+                    app.state::<Arc<Core>>()
+                        .update(|state| state.corners_autohide = secs);
                 }
             } else if let Some(pct) = other.strip_prefix("tint:") {
                 if let Ok(pct) = pct.parse::<f64>() {

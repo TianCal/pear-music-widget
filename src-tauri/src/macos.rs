@@ -56,6 +56,19 @@ pub fn set_aspect_ratio(window: &WebviewWindow, ratio: Option<(f64, f64)>) {
     });
 }
 
+/// Deliver `mouseMoved` to the page while this window is key.
+///
+/// Off by default. It only covers the case where the widget *has* been clicked:
+/// AppKit routes `mouseMoved` to the key window alone, so a widget sitting in
+/// the background still sees none. What carries that case is hover — tracking
+/// areas fire `mouseover` in a background window — which is why the renderer
+/// wakes the corner buttons on both.
+pub fn accept_mouse_moved(window: &WebviewWindow) {
+    with_ns_window(window, move |handle| unsafe {
+        let _: () = msg_send![handle, setAcceptsMouseMovedEvents: true];
+    });
+}
+
 pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
     let alpha = alpha.clamp(0.0, 1.0);
     with_ns_window(window, move |handle| unsafe {

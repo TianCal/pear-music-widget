@@ -23,6 +23,30 @@ pub struct StoredSize {
     pub width: f64,
 }
 
+/// Which of the three top-right toggles the card shows. All on by default —
+/// this exists for people who want the chrome back off a 300×110 card, not as a
+/// feature to opt into.
+///
+/// One struct rather than three loose booleans, so `settings.json` reads as a
+/// group and the renderer gets them as one field on the state snapshot.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CornerButtons {
+    pub queue: bool,
+    pub lyrics: bool,
+    pub search: bool,
+}
+
+impl Default for CornerButtons {
+    fn default() -> Self {
+        Self {
+            queue: true,
+            lyrics: true,
+            search: true,
+        }
+    }
+}
+
 fn default_host() -> String {
     "127.0.0.1".into()
 }
@@ -61,7 +85,7 @@ pub struct Settings {
     /// The width the user last left **each skin** at.
     #[serde(default)]
     pub sizes: BTreeMap<String, StoredSize>,
-    /// Floating widget layout: "classic" | "stack".
+    /// Floating widget layout — see `window::SKINS`.
     #[serde(default = "default_skin")]
     pub skin: String,
     /// Menu-bar dropdown layout, chosen independently of `skin`.
@@ -85,10 +109,19 @@ pub struct Settings {
     #[serde(rename = "simplifyLyrics", default)]
     pub simplify_lyrics: bool,
     /// The panel the floating widget was last left showing, restored on the
-    /// next launch. Only "lyrics" is ever stored: search is a query you have
-    /// finished with, and the dropdown collapses on blur by design.
+    /// next launch — see `window::panel_is_restorable`. A search is never
+    /// stored: it is a query you have finished with. Nor is the dropdown's
+    /// panel, which collapses on blur by design.
     #[serde(default)]
     pub panel: Option<String>,
+    /// Which top-right toggles the card shows.
+    #[serde(default)]
+    pub corners: CornerButtons,
+    /// Seconds of stillness before the corner buttons fade out, 0 to keep them
+    /// up. They are chrome over someone else's artwork, and on the smallest
+    /// skin they sit right on top of the title.
+    #[serde(rename = "cornersAutohide", default)]
+    pub corners_autohide: f64,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -112,6 +145,8 @@ impl Default for Settings {
             lyrics_offset: 0.0,
             simplify_lyrics: false,
             panel: None,
+            corners: CornerButtons::default(),
+            corners_autohide: 0.0,
             extra: BTreeMap::new(),
         }
     }
