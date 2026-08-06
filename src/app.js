@@ -14,15 +14,29 @@ const SKINS = ['classic', 'stack'];
    than three enumerations: opening, closing and the dropdown's blur teardown
    each used to list every panel and every corner button by hand, and a third
    panel would have made that three near-identical lists to keep in step.
-   `corner` also names the flag in `state.corners` that hides the button. */
+   `corner` also names the flag in the skin's `corners` set that hides the
+   button. */
 const PANELS = [
   { key: 'queue', section: 'queue', corner: 'cornerQueue' },
   { key: 'lyrics', section: 'lyrics', corner: 'cornerLyrics' },
   { key: 'search', section: 'search', corner: 'cornerSearch' },
 ];
 
+/* Every button in the bar, in DOM order. The panels are a subset: repeat opens
+   nothing, so it is here and not in `PANELS`, and this is the list that decides
+   what is drawn and how wide a gutter the titles reserve. */
+const CORNERS = [
+  { key: 'repeat', node: 'cornerRepeat' },
+  ...PANELS.map((panel) => ({ key: panel.key, node: panel.corner })),
+];
+
 /** Each surface picks its own skin: the dropdown's is configured separately. */
 const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'classic';
+
+/** The corner buttons for *this* surface's skin. One snapshot carries every
+ *  skin's set, because the widget and the dropdown can be on different ones. A
+ *  skin with no entry has never been changed, so everything is on. */
+const cornersOf = (snapshot) => (snapshot.corners || {})[skinOf(snapshot)] || {};
 
 const el = {
   card: $('card'),
@@ -49,10 +63,11 @@ const el = {
   cornerSearch: $('btn-search'),
   cornerLyrics: $('btn-lyrics'),
   cornerQueue: $('btn-queue'),
+  cornerRepeat: $('btn-repeat'),
+  repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
   queue: $('queue'),
   queueList: $('queue-list'),
-  queueCount: $('queue-count'),
   queueNote: $('queue-note'),
   lyrics: $('lyrics'),
   lyricsScroll: $('lyrics-scroll'),
@@ -81,7 +96,8 @@ let state = {
   panelSkin: 'classic',
   tint: 1,
   lyricsOffset: 0,
-  corners: { queue: true, lyrics: true, search: true },
+  /** Per skin — see `cornersOf`. Empty means every skin is at its defaults. */
+  corners: {},
   cornersAutohide: 0,
   /* The whole queue, text only. Artwork arrives separately, by id, for the rows
      a surface is actually showing — see `wantArt`. */
@@ -96,6 +112,8 @@ let state = {
   volume: 100,
   muted: false,
   shuffle: false,
+  /** 'ALL' | 'ONE' | 'NONE' | null — null until the player has told us. */
+  repeat: null,
   like: null,
 };
 
@@ -252,14 +270,14 @@ const renderStatus = () => {
   // Nothing to search, read along with or queue against unless the API server
   // is answering — and each button can also be turned off from the menu.
   const offline = state.status !== 'connected';
-  const corners = state.corners || {};
-  for (const panel of PANELS) {
-    el[panel.corner].hidden = offline || corners[panel.key] === false;
+  const corners = cornersOf(state);
+  for (const button of CORNERS) {
+    el[button.node].hidden = offline || corners[button.key] === false;
   }
   // The gutter the titles reserve follows the buttons that are actually there.
   document.body.style.setProperty(
     '--corner-count',
-    String(offline ? 0 : PANELS.filter((panel) => corners[panel.key] !== false).length),
+    String(offline ? 0 : CORNERS.filter((button) => corners[button.key] !== false).length),
   );
 
   // Only when the setting itself moved. `renderStatus` runs on every state
@@ -492,12 +510,14 @@ let queueRendered = null;
 const renderQueue = () => {
   if (el.queue.hidden) return;
 
+  // The note is the panel's only text now that the head is gone, and it earns
+  // its height only when there is something to say. A truncated queue used to
+  // say so with a `+` on the slot count up there; at the foot it sits where the
+  // list actually stops.
   const { items, current } = state.queue;
-  el.queueCount.textContent = items.length
-    ? `${(current ?? -1) + 1 || '–'} of ${items.length}${state.queue.truncated ? '+' : ''}`
-    : '';
-  el.queueNote.textContent = items.length ? '' : 'Nothing queued.';
-  el.queueNote.hidden = !!items.length;
+  const note = !items.length ? 'Nothing queued.' : state.queue.truncated ? `First ${items.length}.` : '';
+  el.queueNote.textContent = note;
+  el.queueNote.hidden = !note;
 
   const identity = `${current}\n${items.map((item) => item.videoId).join('\n')}`;
   if (identity === queueRendered) {
@@ -590,7 +610,16 @@ el.queueList.addEventListener('click', (event) => {
 /* Written on every push, but almost never actually different. `classList.toggle`
    is already a no-op when the class is where it should be; `setAttribute` on a
    `<use>` is not — it re-resolves the reference — and neither is a style write. */
-const written = { play: null, like: null, volume: null };
+const written = { play: null, like: null, volume: null, repeat: null };
+
+/** Only ALL and ONE are reachable from here — see the `repeat` command. The
+ *  glyph tells them apart and nothing else does, so the title is where NONE —
+ *  set inside YouTube Music — and a mode we have not been told yet are named. */
+const REPEAT_TITLE = {
+  ALL: 'Repeat: queue',
+  ONE: 'Repeat: this track',
+  NONE: 'Repeat: off',
+};
 
 const renderControls = () => {
   if (written.play !== state.isPlaying) {
@@ -600,6 +629,20 @@ const renderControls = () => {
   }
 
   el.shuffle.classList.toggle('on', !!state.shuffle);
+
+  const repeat = (state.repeat || '').toUpperCase();
+  if (written.repeat !== repeat) {
+    written.repeat = repeat;
+    // The glyph is the difference between the two modes: the same loop, with a
+    // 1 through the middle for a single track.
+    el.repeatIcon.firstElementChild.setAttribute(
+      'href',
+      repeat === 'ONE' ? '#i-repeat-one' : '#i-repeat',
+    );
+    // No `on` class, unlike the panel toggles: the glyph is the state, and a lit
+    // disc up here means "that panel is open".
+    el.cornerRepeat.title = REPEAT_TITLE[repeat] || 'Repeat';
+  }
 
   const like = (state.like || '').toUpperCase();
   if (written.like !== like) {
@@ -1035,6 +1078,20 @@ const toggleQueue = () => {
 el.cornerQueue.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleQueue();
+});
+
+/* Not a panel: it presses the player's repeat button and the bar stays as it
+   was. The press means "the other mode", which is the same rule the command
+   applies in Rust — and like it, a mode we have not been told yet is left alone
+   rather than guessed at, since the round trip is the only thing that knows
+   where the player's own cycle will land. */
+el.cornerRepeat.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (state.repeat) {
+    state.repeat = (state.repeat || '').toUpperCase() === 'ALL' ? 'ONE' : 'ALL';
+    renderControls();
+  }
+  send('repeat');
 });
 
 // Clicking a line seeks to it — the timestamps are right there. `dataset.index`

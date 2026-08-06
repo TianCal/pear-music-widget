@@ -23,6 +23,29 @@
         <symbol id="i-lyrics" viewBox="0 0 24 24"><path d="M4 5.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1ZM4 19a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Z"/></symbol>
         <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5a1 1 0 0 0-.7 1.7l5.3 5.3-5.3 5.3a1 1 0 1 0 1.4 1.4l5.3-5.3 5.3 5.3a1 1 0 0 0 1.4-1.4L13.8 12l5.3-5.3a1 1 0 0 0-1.4-1.4L12.4 10.6 7.1 5.3A1 1 0 0 0 6.4 5Z"/></symbol>
         <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6.5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14.3-9.2a1 1 0 0 1 1.7.7v8a1 1 0 0 1-.6.9l-2.5 1.1a1.6 1.6 0 1 1-.8-1.8l1.9-.8V9.9l-2 .6a1 1 0 0 1-.6-1.9Z"/></symbol>
+        <!-- The two repeat modes the corner button cycles between. Stroked
+             rather than filled — a 13px loop drawn as a filled outline turns to
+             mush — hence the <g> carrying the paint, since `.corner svg` sets a
+             fill that the paths would otherwise inherit. The only difference
+             between them is the 1 in the middle, which is the whole point: the
+             glyph is what says which mode is on. -->
+        <symbol id="i-repeat" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6.6 10.2V8.8a3.2 3.2 0 0 1 3.2-3.2h5.9" />
+            <path d="M13.9 3.6 15.9 5.6 13.9 7.6" />
+            <path d="M17.4 13.8v1.4a3.2 3.2 0 0 1-3.2 3.2H8.3" />
+            <path d="M10.1 16.4 8.1 18.4 10.1 20.4" />
+          </g>
+        </symbol>
+        <symbol id="i-repeat-one" viewBox="0 0 24 24">
+          <g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6.6 10.2V8.8a3.2 3.2 0 0 1 3.2-3.2h5.9" />
+            <path d="M13.9 3.6 15.9 5.6 13.9 7.6" />
+            <path d="M17.4 13.8v1.4a3.2 3.2 0 0 1-3.2 3.2H8.3" />
+            <path d="M10.1 16.4 8.1 18.4 10.1 20.4" />
+            <path d="M10.9 10.7 12.4 9.7v4.6" />
+          </g>
+        </symbol>
         <symbol id="i-note" viewBox="0 0 24 24"><path d="M20 3.6a1 1 0 0 0-1.2-1L9.5 4.7a1 1 0 0 0-.8 1v9.2A3.6 3.6 0 1 0 10.7 18V9.5l7.3-1.6v4.6a3.6 3.6 0 1 0 2 3.2Z"/></symbol>
       </defs>
     </svg>
@@ -38,9 +61,14 @@
           <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
         </div>
 
-        <!-- DOM order is left-to-right, and each of the three can be turned off
-             from the Corner buttons submenu. -->
+        <!-- DOM order is left-to-right, and each of the four can be turned off
+             from the Corner buttons submenu, per skin. Repeat leads and is set
+             slightly apart: the other three open a panel, it changes what the
+             player does. -->
         <div class="corner-bar">
+          <button class="corner repeat" id="btn-repeat" title="Repeat" aria-label="Repeat">
+            <svg id="repeat-icon"><use href="#i-repeat" /></svg>
+          </button>
           <button class="corner" id="btn-queue" title="Queue" aria-label="Queue">
             <svg><use href="#i-queue" /></svg>
           </button>
@@ -107,13 +135,12 @@
           <div class="upnext-grid" id="upnext-grid"></div>
         </section>
 
+        <!-- No head at all. It had already lost its heading — the lit corner
+             button says which panel this is, and the rows are plainly a queue —
+             which left 26px of empty strip holding a slot count in the corner,
+             directly under Stack's own queue strip. The rows start at the top
+             and the panel is that much taller in list. -->
         <section class="queue" id="queue" hidden>
-          <!-- The count only. The corner button that opened this panel is lit,
-               and the rows are plainly a queue — a heading saying so was just a
-               line of chrome across the top. -->
-          <div class="queue-head">
-            <span id="queue-count"></span>
-          </div>
           <div class="queue-list" id="queue-list"></div>
           <p class="queue-note" id="queue-note" hidden></p>
         </section>

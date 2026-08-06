@@ -266,12 +266,19 @@ fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenu
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
 
-/// The three toggles in the card's top-right corner, each shown or hidden on its
+/// The four toggles in the card's top-right corner, each shown or hidden on its
 /// own — turning Search off while keeping Lyrics is a reasonable thing to want.
 /// Independent checkboxes rather than a skin-style pick-one, so unlike every
 /// other submenu here more than one is ticked at a time.
+///
+/// **Kept per skin**, and `skin` is the one this menu edits: how much chrome
+/// fits above the titles is a property of the card, so four buttons over
+/// Stack's 330×284 and one over Classic's 300×110 is a reasonable pair of
+/// answers to hold at once rather than a setting to keep re-flipping. Each
+/// menu passes the skin of the surface it belongs to.
 fn corner_submenu(
     app: &AppHandle,
+    skin: &str,
     corners: crate::store::CornerButtons,
     autohide: f64,
 ) -> tauri::Result<Submenu<tauri::Wry>> {
@@ -279,10 +286,18 @@ fn corner_submenu(
         ("queue", "Queue", corners.queue),
         ("lyrics", "Lyrics", corners.lyrics),
         ("search", "Search", corners.search),
+        ("repeat", "Repeat", corners.repeat),
     ]
     .iter()
     .map(|(key, text, on)| {
-        CheckMenuItem::with_id(app, format!("corner:{key}"), text, true, *on, None::<&str>)
+        CheckMenuItem::with_id(
+            app,
+            format!("corner:{skin}:{key}"),
+            text,
+            true,
+            *on,
+            None::<&str>,
+        )
     })
     .collect::<tauri::Result<_>>()?;
 
@@ -346,7 +361,11 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let tint = store.get(|s| s.tint);
     let lyrics_offset = store.get(|s| s.lyrics_offset);
     let simplify_lyrics = store.get(|s| s.simplify_lyrics);
-    let corners = store.get(|s| s.corners);
+    // App-level menu, but the corner buttons belong to a card — and the card
+    // this one is about is the floating widget, exactly as "Reset size and
+    // position" is. The dropdown's own menu carries its own set.
+    let widget_skin = window::skin_of(&store);
+    let corners = store.corners_for(&widget_skin);
     let corners_autohide = store.get(|s| s.corners_autohide);
     let always_on_top = store.get(|s| s.always_on_top);
     let open_at_login = app.autolaunch().is_enabled().unwrap_or(false);
@@ -366,13 +385,13 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &always_on_top_item(app, always_on_top)?,
-            &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
+            &skin_submenu(app, "skin", "Skin", &widget_skin)?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity)?,
             &lyric_offset_submenu(app, lyrics_offset)?,
             &simplify_lyrics_item(app, simplify_lyrics)?,
-            &corner_submenu(app, corners, corners_autohide)?,
+            &corner_submenu(app, &widget_skin, corners, corners_autohide)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
@@ -392,16 +411,17 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
+    let skin = window::skin_of(&store);
 
     Menu::with_items(
         app,
         &[
-            &skin_submenu(app, "skin", "Skin", &window::skin_of(&store))?,
+            &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
-            &corner_submenu(app, store.get(|s| s.corners), store.get(|s| s.corners_autohide))?,
+            &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
@@ -418,15 +438,16 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// The lyric nudge does apply — the dropdown rolls the same words.
 pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let store = app.state::<Arc<Store>>();
+    let skin = window::panel_skin_of(&store);
 
     Menu::with_items(
         app,
         &[
-            &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
+            &skin_submenu(app, "panelSkin", "Dropdown skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
             &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
-            &corner_submenu(app, store.get(|s| s.corners), store.get(|s| s.corners_autohide))?,
+            &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -531,22 +552,31 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 if SKINS.contains(&skin) {
                     set_panel_skin(app, skin);
                 }
-            } else if let Some(which) = other.strip_prefix("corner:") {
+            } else if let Some(rest) = other.strip_prefix("corner:") {
+                // `corner:<skin>:<button>`. The skin is in the id because the
+                // set is per skin and each menu edits the skin of the surface it
+                // belongs to — without it the dropdown's menu would toggle the
+                // widget's buttons whenever the two are on different skins.
+                //
                 // Independent toggles, so this flips one rather than selecting
                 // one. The renderer draws the buttons, so — like `tint` — the
                 // flags have to reach it as state.
-                let next = store.get(|s| {
-                    let mut corners = s.corners;
-                    match which {
-                        "queue" => corners.queue = !corners.queue,
-                        "lyrics" => corners.lyrics = !corners.lyrics,
-                        "search" => corners.search = !corners.search,
-                        _ => {}
+                if let Some((skin, which)) = rest.split_once(':') {
+                    if SKINS.contains(&skin) {
+                        let mut corners = store.corners_for(skin);
+                        match which {
+                            "queue" => corners.queue = !corners.queue,
+                            "lyrics" => corners.lyrics = !corners.lyrics,
+                            "search" => corners.search = !corners.search,
+                            "repeat" => corners.repeat = !corners.repeat,
+                            _ => {}
+                        }
+                        store.set_corners_for(skin, corners);
+                        let all = store.get(|s| s.corners.clone());
+                        app.state::<Arc<Core>>()
+                            .update(|state| state.corners = all.clone());
                     }
-                    corners
-                });
-                store.update(|s| s.corners = next);
-                app.state::<Arc<Core>>().update(|state| state.corners = next);
+                }
             } else if let Some(secs) = other.strip_prefix("cornerFade:") {
                 if let Ok(secs) = secs.parse::<f64>() {
                     store.update(|s| s.corners_autohide = secs);

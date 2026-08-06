@@ -599,7 +599,7 @@ body.panel .resize-edges {
 /* Height must match `panel_height` in src-tauri/src/window.rs. */
 .lyrics {
   position: relative;
-  flex: 0 0 240px;
+  flex: 0 0 192px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -830,6 +830,12 @@ body.skin-stack .lyric.active {
   background: var(--hover);
 }
 
+/* Repeat is deliberately never lit — no accent, no disc. Both of those say
+   "this surface is open", which is true of the three panel toggles and never of
+   this one, and the button only ever sits in one of two modes anyway: the glyph
+   is the whole difference between them, a 1 through the loop for a single
+   track. It keeps the ordinary hover, so it is plainly still a button. */
+
 /* Height must match `panel_height` in src-tauri/src/window.rs — the window
    grows by exactly this much. */
 .search {
@@ -983,26 +989,15 @@ body.skin-stack .lyric.active {
   display: none;
 }
 
-.queue-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: baseline;
-  padding: 9px 14px 5px;
-}
-
-.queue-head span {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--fg-faint);
-  font-variant-numeric: tabular-nums;
-}
-
+/* Flush to the top of the panel: what used to sit above it was a 26px strip
+   with a slot count in one corner, and on Stack that put two near-empty bands
+   between the transport and the first row. */
 .queue-list {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 0 8px 8px;
+  padding: 6px 8px 8px;
   scrollbar-width: thin;
 }
 

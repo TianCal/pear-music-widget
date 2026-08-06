@@ -100,6 +100,42 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
         }
         "toggleMute" => core.api.toggle_mute().await,
         "shuffle" => core.api.shuffle().await,
+        // The player exposes one control — a button cycling NONE → ALL → ONE →
+        // NONE — so a target mode has to be expressed as a number of presses.
+        //
+        // The widget offers only the two modes worth having from a widget:
+        // pressing means "the other one". NONE is still *shown* truthfully when
+        // it is set inside YouTube Music, and a press from there turns repeat
+        // on rather than cycling through it, which would make the button take
+        // two presses to do anything visible.
+        "repeat" => {
+            let known = core.snapshot().repeat;
+            let (target, presses) = match known.as_deref() {
+                Some("ALL") => ("ONE", 1),
+                Some("ONE") => ("ALL", 2),
+                _ => ("ALL", 1),
+            };
+            // Optimistic, exactly as `togglePlay` is — but only from a mode we
+            // actually knew. From an unknown one the press lands somewhere we
+            // cannot predict, so the read-back below is the first honest answer.
+            if known.is_some() {
+                core.update(|state| state.repeat = Some(target.to_string()));
+            }
+
+            let result = core.api.switch_repeat(presses).await;
+            if result.is_ok() {
+                // REPEAT_CHANGED covers this too, but only once the player's own
+                // observer fires; reading back is what makes the button correct
+                // itself when it does not.
+                let mode = core.api.repeat_mode().await.ok().flatten().and_then(|value| {
+                    value.get("mode").and_then(Value::as_str).map(str::to_string)
+                });
+                if mode.is_some() {
+                    core.update(|state| state.repeat = mode);
+                }
+            }
+            result
+        }
         "like" | "dislike" => {
             let result = if name == "like" {
                 core.api.like().await

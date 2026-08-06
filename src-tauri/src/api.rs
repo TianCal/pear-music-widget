@@ -423,6 +423,18 @@ impl Api {
         self.post("/shuffle", None).await.map(|_| ())
     }
 
+    /// Presses the player's own repeat button `iterations` times — there is no
+    /// call that sets a mode outright, and the cycle is NONE → ALL → ONE → NONE.
+    /// `commands::command` is what turns a target mode into a press count.
+    pub async fn switch_repeat(&self, iterations: u32) -> Result<()> {
+        self.post(
+            "/switch-repeat",
+            Some(serde_json::json!({ "iteration": iterations })),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn search(&self, query: &str) -> Result<Value> {
         self.request(
             reqwest::Method::POST,
@@ -459,9 +471,6 @@ impl Api {
 
     // --------------------------------------------------------------- queries
 
-    // `/repeat-mode` is intentionally not used: it answers null unconditionally
-    // on the shipped api-server plugin, so repeat state cannot be displayed
-    // truthfully — hence no repeat button.
     pub async fn song(&self) -> Result<Option<Value>> {
         self.get("/song").await
     }
@@ -470,6 +479,12 @@ impl Api {
     }
     pub async fn shuffle_state(&self) -> Result<Option<Value>> {
         self.get("/shuffle").await
+    }
+    /// `{ "mode": "ALL" | "ONE" | "NONE" }`, and `mode` is nullable: the plugin
+    /// caches whatever the player's renderer last pushed it, so before the
+    /// player bar has been observed once there is genuinely nothing to report.
+    pub async fn repeat_mode(&self) -> Result<Option<Value>> {
+        self.get("/repeat-mode").await
     }
     pub async fn volume_state(&self) -> Result<Option<Value>> {
         self.get("/volume").await

@@ -2,9 +2,10 @@
 //! it. The floating widget and the menu-bar dropdown are two views of the same
 //! state, so they can never disagree.
 //!
-//! Repeat is deliberately absent: `POST /switch-repeat` is accepted but
-//! `GET /repeat-mode` always answers null on the shipped api-server plugin, so
-//! the widget can never show a truthful repeat state.
+//! `repeat` is the player's own mode string — `ALL`, `ONE`, `NONE`, or `None`
+//! until the player has told us. It is pushed on `REPEAT_CHANGED` and pulled by
+//! `refresh_all`; see `commands::command` for why the button only ever cycles
+//! between `ALL` and `ONE`.
 //!
 //! **The heavy fields travel on their own channels.** Artwork, the queue and the
 //! lyrics are each an order of magnitude larger than everything else put
@@ -31,7 +32,7 @@ use tauri::{AppHandle, Emitter};
 use crate::api::{Api, ErrorCode, COVER_PX};
 use crate::lyrics::{self, LyricLine, Lyrics};
 use crate::search::{self, QueueView, QUEUE_MAX};
-use crate::store::{CornerButtons, Store};
+use crate::store::{SkinCorners, Store};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,10 +104,13 @@ pub struct PlayerState {
     /// earlier. The roll is driven in the renderer, so — like `tint` — the
     /// setting has to reach it as state rather than staying in the store.
     pub lyrics_offset: f64,
-    /// Which top-right toggles to draw. Three booleans on a payload this size
-    /// is nothing, and the alternative — the renderer asking — would leave the
-    /// buttons a frame behind the menu that turned them off.
-    pub corners: CornerButtons,
+    /// Which top-right toggles to draw, for **every** skin rather than for the
+    /// current one: the two surfaces can be on different skins, and they share
+    /// this one snapshot, so each picks its own set out of the map. A handful of
+    /// booleans on a payload this size is nothing, and the alternative — the
+    /// renderer asking — would leave the buttons a frame behind the menu that
+    /// turned them off.
+    pub corners: SkinCorners,
     /// Seconds of stillness before they fade; 0 keeps them up. Driven in the
     /// renderer, so — like `tint` — it travels as state.
     pub corners_autohide: f64,
@@ -116,6 +120,10 @@ pub struct PlayerState {
     pub volume: f64,
     pub muted: bool,
     pub shuffle: bool,
+    /// `ALL` | `ONE` | `NONE`, or `None` while the player has not said. The
+    /// renderer draws the loop unlit for the last two, so an unknown mode
+    /// cannot be mistaken for repeat being on.
+    pub repeat: Option<String>,
     pub like: Option<String>,
 }
 
@@ -125,7 +133,7 @@ impl PlayerState {
         panel_skin: String,
         tint: f64,
         lyrics_offset: f64,
-        corners: CornerButtons,
+        corners: SkinCorners,
         corners_autohide: f64,
     ) -> Self {
         Self {
@@ -143,6 +151,7 @@ impl PlayerState {
             volume: 100.0,
             muted: false,
             shuffle: false,
+            repeat: None,
             like: None,
         }
     }
@@ -329,7 +338,7 @@ impl Core {
         // wider nudge typed in by hand is honoured — just not one that would
         // park the roll a whole verse away from the music.
         let lyrics_offset = store.get(|s| s.lyrics_offset.clamp(-10.0, 10.0));
-        let corners = store.get(|s| s.corners);
+        let corners = store.get(|s| s.corners.clone());
         // Hand-editable file, so clamp rather than trust.
         let corners_autohide = store.get(|s| s.corners_autohide.clamp(0.0, 60.0));
         let queue_wanted_by = match store.get(|s| s.panel.clone()).as_deref() {
@@ -613,12 +622,16 @@ impl Core {
     }
 
     /// Ground truth pull — the websocket's initial values for shuffle/volume are
-    /// optimistic defaults until the player emits its first change event.
+    /// optimistic defaults until the player emits its first change event, and
+    /// `REPEAT_CHANGED` only ever fires on a *change*, so the mode has to be
+    /// asked for once per connection or the loop would sit unlit until someone
+    /// pressed it.
     pub async fn refresh_all(self: &Arc<Self>) {
-        let (song, shuffle, volume) = tokio::join!(
+        let (song, shuffle, volume, repeat) = tokio::join!(
             self.api.song(),
             self.api.shuffle_state(),
-            self.api.volume_state()
+            self.api.volume_state(),
+            self.api.repeat_mode()
         );
 
         let song = song.ok().flatten();
@@ -638,6 +651,12 @@ impl Core {
             .ok()
             .flatten()
             .and_then(|value| value.get("state").and_then(Value::as_bool));
+        // Null is a real answer here — it means the player has not reported a
+        // mode yet — so it stays `None` rather than being defaulted to NONE.
+        let repeat = repeat
+            .ok()
+            .flatten()
+            .and_then(|value| value.get("mode").and_then(Value::as_str).map(str::to_string));
         let volume = volume.ok().flatten();
         let reported = volume
             .as_ref()
@@ -656,6 +675,9 @@ impl Core {
         self.update(|state| {
             if let Some(shuffle) = shuffle {
                 state.shuffle = shuffle;
+            }
+            if repeat.is_some() {
+                state.repeat = repeat.clone();
             }
             if let Some(level) = level {
                 state.volume = level;
@@ -777,6 +799,18 @@ impl Core {
             "SHUFFLE_CHANGED" => {
                 let shuffle = flag("shuffle");
                 self.update(|state| state.shuffle = shuffle);
+            }
+            // Fires for a press inside YouTube Music as well as for our own, so
+            // this is what keeps the loop honest when the mode is changed
+            // somewhere else.
+            "REPEAT_CHANGED" => {
+                let repeat = msg
+                    .get("repeat")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if repeat.is_some() {
+                    self.update(|state| state.repeat = repeat.clone());
+                }
             }
             _ => {}
         }

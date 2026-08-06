@@ -57,7 +57,7 @@ const CORNER_RADIUS: f64 = 12.0;
 pub fn panel_height(which: &str) -> Option<f64> {
     match which {
         "search" => Some(216.0),
-        "lyrics" => Some(240.0),
+        "lyrics" => Some(192.0),
         "queue" => Some(260.0),
         _ => None,
     }

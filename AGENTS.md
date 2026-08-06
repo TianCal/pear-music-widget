@@ -80,18 +80,32 @@ deliberately global.
 | Kind | Used |
 | --- | --- |
 | WebSocket | `GET /api/v1/ws?token=…` |
-| Socket events | `PLAYER_INFO`, `VIDEO_CHANGED`, `PLAYER_STATE_CHANGED`, `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED` |
-| Read | `GET /song`, `/like-state`, `/shuffle`, `/volume`, `/queue` |
-| Write | `POST /toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle` |
+| Socket events | `PLAYER_INFO`, `VIDEO_CHANGED`, `PLAYER_STATE_CHANGED`, `POSITION_CHANGED`, `VOLUME_CHANGED`, `SHUFFLE_CHANGED`, `REPEAT_CHANGED` |
+| Read | `GET /song`, `/like-state`, `/shuffle`, `/volume`, `/queue`, `/repeat-mode` |
+| Write | `POST /toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`, `/toggle-mute`, `/like`, `/dislike`, `/shuffle`, `/switch-repeat` |
 | Search | `POST /search`, `POST /queue`, `PATCH /queue` |
 | Auth | `POST /auth/{clientId}` → JWT; `Bearer` on REST, `?token=` on the socket |
 
 Verified against YouTube Music 3.12.0. For `/api/v2`, change `API` in `api.rs`
 and the socket path in `ws.rs`.
 
-Two quirks worked around: **`GET /repeat-mode` always returns `null`** even
-though `POST /switch-repeat` is accepted, so there is no repeat button; and **the
-volume you POST is not the volume reported back** — see Volume.
+Two quirks worked around.
+
+**Repeat is a button press, not a mode you can set.** `POST /switch-repeat` takes
+`{"iteration": n}` and clicks the player's own repeat control that many times,
+cycling NONE → ALL → ONE → NONE, so a target mode has to be expressed as a press
+count — `commands::command` is where that arithmetic lives, and it is why the
+widget offers only ALL and ONE (ONE → ALL is two presses; a NONE the widget could
+also land on would make every press look like it did nothing every third time).
+`GET /repeat-mode` is nullable and answers `null` before the player bar has been
+observed once, which is where the old "always returns null, so no repeat button"
+note came from — verified against 3.12.0 it answers truthfully with a track
+loaded. `None` is kept distinct from `NONE` all the way to the renderer for that
+reason: an unknown mode draws an unlit loop rather than claiming repeat is off.
+`REPEAT_CHANGED` only fires on a *change*, so `refresh_all` pulls the mode once
+per connection, and the command reads it back after its own press.
+
+**The volume you POST is not the volume reported back** — see Volume.
 
 ## Threads
 
@@ -211,6 +225,11 @@ The renderer drives all three from the `PANELS` table in `app.js`. Opening,
 closing and the dropdown's blur teardown each used to enumerate every section and
 every corner button by hand; with three panels that is three lists to keep in
 step, and the teardown is where they drift.
+
+**The corner bar is not the panel list.** Repeat is a fourth button that opens
+nothing, so `CORNERS` — the bar in DOM order — is what decides which buttons are
+drawn and how wide a gutter the titles reserve, while `PANELS` stays the three
+that own the slot. `--corner-count` counts the former.
 
 The widget's open panel is stored as `panel` and restored in `window::create`,
 before the window is ever on screen — restoring it from the renderer instead puts
@@ -473,6 +492,18 @@ interpolate. `PMW_THEME=dark|light` pins the scheme for checking both.
 `~/Library/Application Support/pear-music-widget/settings.json` — the literal
 path the Electron build used, so an upgrade keeps your position, skins and cached
 token. Unknown keys are round-tripped rather than dropped.
+
+`corners` is **keyed by skin** — `{ "classic": {…}, "stack": {…} }` — because how
+much chrome fits above the titles is a property of the card. Files written before
+1.5 carry one flat set for every skin; `corners_from_file` reads that shape into
+each skin, and it has to keep doing so: `Store::load` swallows a parse error and
+falls back to the defaults, which would silently take the window position, the
+per-skin sizes and the cached token with it. A skin absent from the map has never
+been changed and is at its defaults, so a fresh install writes nothing. The state
+snapshot carries the **whole map** rather than one skin's set, since the widget
+and the dropdown can be on different skins and share one snapshot — `cornersOf`
+in `app.js` is where each surface picks its own. Menu item ids are
+`corner:<skin>:<button>` for the same reason.
 
 `cornersAutohide` fades the corner buttons after that many seconds of stillness,
 0 to keep them up. Driven in the renderer off `mousemove`, which fires far faster

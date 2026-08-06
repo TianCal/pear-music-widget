@@ -64,9 +64,15 @@ costs about as much as a four-track one.
 
 ## Corner buttons
 
-The three toggles in the top-right corner — **Queue**, **Lyrics** and **Search** —
-can each be turned off from **Corner buttons** in any of the menus. Turn them all
-off and the title gets the whole card back, which is worth doing on Classic.
+The four buttons in the top-right corner — **Repeat**, **Queue**, **Lyrics** and
+**Search** — can each be turned off from **Corner buttons** in any of the menus.
+Turn them all off and the title gets the whole card back, which is worth doing on
+Classic.
+
+The set is remembered **per skin**, and each menu edits the skin of the surface it
+belongs to: four buttons sit comfortably over Stack's titles and crowd Classic's,
+so you can keep an answer for each rather than re-flipping them every time you
+switch. The dropdown's own right-click menu edits the dropdown's skin.
 
 The same submenu can fade them out once the pointer has been still for a few
 seconds, under **Hide when idle**. Moving the mouse over the card brings them
@@ -115,6 +121,10 @@ queue index, so a song ending mid-click cannot make it play the wrong thing.
   and diffused across the glass, with a matching accent on the transport.
   **Cover tint** sets how far it goes, from Off to Vivid
 - Play/pause, next, previous, shuffle, like (right-click the heart to dislike)
+- Repeat, on the corner button: it switches between repeating the queue and
+  repeating the track, and the glyph is the difference — a 1 through the loop
+  means this track. Repeat turned off inside YouTube Music shows as an unlit
+  loop, and pressing the button turns it back on
 - Scrubable progress bar
 - Volume three ways: drag the popover on the speaker, scroll anywhere on the
   card, or **↑ / ↓** while focused (**Shift** for 1% steps)
@@ -122,10 +132,6 @@ queue index, so a song ending mid-click cannot make it play the wrong thing.
   reflowing
 - Light and dark appearance; position, skins and per-skin size remembered
 - No Dock icon
-
-There is no repeat button: `GET /api/v1/repeat-mode` returns `null`
-unconditionally on the shipped plugin, so repeat state cannot be displayed
-truthfully.
 
 ## Install
 
@@ -171,8 +177,8 @@ rather than leaving the widget silently blank.
 
 `~/Library/Application Support/pear-music-widget/settings.json` — `host`, `port`,
 `clientId`, cached `token`, window `bounds`, `sizes` (width per skin), `skin`,
-`panelSkin`, `alwaysOnTop`, `opacity`, `tint` and `panel`. Quit the app before
-editing.
+`panelSkin`, `alwaysOnTop`, `opacity`, `tint`, `panel` and `corners` (the corner
+buttons, keyed by skin). Quit the app before editing.
 
 ## Assets
 

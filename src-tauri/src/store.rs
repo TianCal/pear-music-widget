@@ -23,11 +23,11 @@ pub struct StoredSize {
     pub width: f64,
 }
 
-/// Which of the three top-right toggles the card shows. All on by default —
-/// this exists for people who want the chrome back off a 300×110 card, not as a
+/// Which of the top-right toggles the card shows. All on by default — this
+/// exists for people who want the chrome back off a 300×110 card, not as a
 /// feature to opt into.
 ///
-/// One struct rather than three loose booleans, so `settings.json` reads as a
+/// One struct rather than four loose booleans, so `settings.json` reads as a
 /// group and the renderer gets them as one field on the state snapshot.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -35,6 +35,7 @@ pub struct CornerButtons {
     pub queue: bool,
     pub lyrics: bool,
     pub search: bool,
+    pub repeat: bool,
 }
 
 impl Default for CornerButtons {
@@ -43,8 +44,42 @@ impl Default for CornerButtons {
             queue: true,
             lyrics: true,
             search: true,
+            repeat: true,
         }
     }
+}
+
+/// The set kept for each skin, since how much chrome a card can carry is a
+/// property of the card: four buttons sit comfortably above Stack's titles and
+/// crowd Classic's. Keyed by skin name — see `window::SKINS`.
+pub type SkinCorners = BTreeMap<String, CornerButtons>;
+
+/// Accepts both shapes the file has had: the current map of skin to buttons,
+/// and the single flat set every skin shared before 1.5. A flat set is read
+/// into *every* skin, so upgrading keeps exactly what you had until you change
+/// one of them.
+///
+/// The two are told apart by their values, which cannot collide: a per-skin map
+/// holds objects, the flat form holds booleans. `{}` is an empty map, which
+/// simply means every skin is at its default.
+fn corners_from_file<'de, D>(de: D) -> Result<SkinCorners, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Shape {
+        PerSkin(SkinCorners),
+        Flat(CornerButtons),
+    }
+
+    Ok(match Shape::deserialize(de)? {
+        Shape::PerSkin(map) => map,
+        Shape::Flat(flat) => crate::window::SKINS
+            .iter()
+            .map(|skin| ((*skin).to_string(), flat))
+            .collect(),
+    })
 }
 
 fn default_host() -> String {
@@ -114,9 +149,9 @@ pub struct Settings {
     /// panel, which collapses on blur by design.
     #[serde(default)]
     pub panel: Option<String>,
-    /// Which top-right toggles the card shows.
-    #[serde(default)]
-    pub corners: CornerButtons,
+    /// Which top-right toggles the card shows, per skin.
+    #[serde(default, deserialize_with = "corners_from_file")]
+    pub corners: SkinCorners,
     /// Seconds of stillness before the corner buttons fade out, 0 to keep them
     /// up. They are chrome over someone else's artwork, and on the smallest
     /// skin they sit right on top of the title.
@@ -145,7 +180,7 @@ impl Default for Settings {
             lyrics_offset: 0.0,
             simplify_lyrics: false,
             panel: None,
-            corners: CornerButtons::default(),
+            corners: SkinCorners::new(),
             corners_autohide: 0.0,
             extra: BTreeMap::new(),
         }
@@ -207,11 +242,73 @@ impl Store {
         std::fs::write(&self.path, text)
     }
 
+    /// The corner buttons for one skin. A skin with no entry yet is at its
+    /// defaults, which is also what a fresh install looks like — the map is
+    /// only written to once a toggle is actually changed.
+    pub fn corners_for(&self, skin: &str) -> CornerButtons {
+        self.get(|s| s.corners.get(skin).copied().unwrap_or_default())
+    }
+
+    pub fn set_corners_for(&self, skin: &str, corners: CornerButtons) {
+        self.update(|s| {
+            s.corners.insert(skin.to_string(), corners);
+        });
+    }
+
     pub fn http_base(&self) -> String {
         self.get(|s| format!("http://{}:{}", s.host, s.port))
     }
 
     pub fn ws_base(&self) -> String {
         self.get(|s| format!("ws://{}:{}", s.host, s.port))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file that fails to parse is silently replaced by the defaults
+    /// — position, sizes and the cached token with it — so the shape change on
+    /// `corners` has to read the old file, not just the new one.
+    #[test]
+    fn reads_the_pre_1_5_flat_corner_buttons_into_every_skin() {
+        let text = r#"{ "port": 26538, "corners": { "queue": true, "lyrics": true, "search": false } }"#;
+        let settings: Settings = serde_json::from_str(text).expect("old files still parse");
+
+        assert_eq!(settings.port, 26538);
+        for skin in crate::window::SKINS {
+            let corners = settings.corners.get(skin).copied().unwrap_or_default();
+            assert!(corners.queue);
+            assert!(!corners.search);
+            // Absent from the old file, so it lands on its default rather than
+            // being read as off.
+            assert!(corners.repeat);
+        }
+    }
+
+    #[test]
+    fn reads_and_keeps_a_set_per_skin() {
+        let text = r#"{ "corners": { "classic": { "search": false }, "stack": {} } }"#;
+        let settings: Settings = serde_json::from_str(text).expect("current shape parses");
+
+        assert!(!settings.corners["classic"].search);
+        assert!(settings.corners["classic"].queue);
+        assert!(settings.corners["stack"].search);
+
+        let round_tripped: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).expect("serialises"))
+                .expect("re-parses");
+        assert_eq!(round_tripped.corners, settings.corners);
+    }
+
+    #[test]
+    fn a_file_with_no_corners_key_leaves_every_skin_at_its_default() {
+        let settings: Settings = serde_json::from_str("{}").expect("parses");
+        assert!(settings.corners.is_empty());
+        assert_eq!(
+            CornerButtons::default(),
+            settings.corners.get("stack").copied().unwrap_or_default()
+        );
     }
 }
