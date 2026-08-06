@@ -70,8 +70,8 @@ off and the title gets the whole card back, which is worth doing on Classic.
 
 The same submenu can fade them out once the pointer has been still for a few
 seconds, under **Hide when idle**. Moving the mouse over the card brings them
-back, and they never fade while a panel is open — the lit button is the way back
-out of one.
+back. They fade with a panel open too — clicking the card brings them back
+before the click lands, so a faded button never leaves you stuck in one.
 
 ## Lyrics
 

@@ -476,8 +476,11 @@ token. Unknown keys are round-tripped rather than dropped.
 
 `cornersAutohide` fades the corner buttons after that many seconds of stillness,
 0 to keep them up. Driven in the renderer off `mousemove`, which fires far faster
-than the timer needs re-arming — hence the 200ms guard in `wakeCorners`. It never
-fades while a panel is open, because the lit button is the only way to close one.
+than the timer needs re-arming — hence the 200ms guard in `wakeCorners`. It runs
+with a panel open as well as without. A faded button cannot be clicked, but
+`mousedown` is one of the wake signals, so a press on the card brings the bar
+back before the click lands and the panel's own button is never unreachable —
+which is what makes the old "never while a panel is open" guard unnecessary.
 
 ## Packaging and testing
 

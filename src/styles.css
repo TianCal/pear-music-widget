@@ -797,8 +797,9 @@ body.skin-stack .lyric.active {
 
 /* Faded out after a spell of stillness, when the Corner buttons submenu asks
    for it. `pointer-events: none` so a hidden button cannot be clicked blind —
-   moving the mouse brings them back first. Never while a panel is open: the lit
-   button is the only way to close one.
+   moving the mouse brings them back first. This applies with a panel open as
+   well as without: a press anywhere on the card wakes the bar before the click
+   lands, so the panel's own button is never out of reach.
 
    **No transition here, deliberately.** `document.hidden` is true for this
    webview — the widget is a non-activating panel that never becomes key — and

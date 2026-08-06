@@ -215,8 +215,12 @@ const armCornerFade = () => {
   cornerIdleTimer = null;
   const after = state.cornersAutohide || 0;
   cornerFadeArmedFor = after;
-  // Never while a panel is open — its lit button is the way back out of it.
-  if (!after || openPanel) return;
+  // The countdown runs whether or not a panel is open. A faded button cannot
+  // be clicked, but any press or scroll on the card wakes the bar before the
+  // click lands, so the panel's own button is never out of reach. (Escape
+  // closes a panel too, but only once the widget has focus, which a widget
+  // usually does not.)
+  if (!after) return;
   cornerIdleTimer = setTimeout(() => el.cornerBar.classList.add('idle'), after * 1000);
 };
 
@@ -1071,7 +1075,8 @@ const paintPanel = (which) => {
 const setPanel = (which) => {
   openPanel = which;
   paintPanel(which);
-  // Opening one parks the fade; closing one starts it counting again.
+  // Opening or closing one is an interaction, so it restarts the countdown
+  // rather than pausing it.
   el.cornerBar.classList.remove('idle');
   armCornerFade();
   return window.widget.setPanel(which);
