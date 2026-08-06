@@ -1286,16 +1286,15 @@ body.skin-stack .upnext:not([hidden]) {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
+  /* No scroll snapping. The wheel is driven by assigning `scrollLeft`, and
+     snapping reverts any assignment smaller than its threshold — so a trackpad,
+     which arrives as a stream of small deltas, moved the strip not at all while
+     a coarse mouse wheel escaped and looked fine. */
   scrollbar-width: none;
 }
 
 .upnext-grid::-webkit-scrollbar {
   display: none;
-}
-
-.upnext-item {
-  scroll-snap-align: start;
 }
 
 /* Already played. Still there to scroll back to, but it should never compete
