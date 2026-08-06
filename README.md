@@ -127,7 +127,10 @@ queue index, so a song ending mid-click cannot make it play the wrong thing.
   loop, and pressing the button turns it back on
 - Scrubable progress bar
 - Volume three ways: drag the popover on the speaker, scroll anywhere on the
-  card, or **↑ / ↓** while focused (**Shift** for 1% steps)
+  card, or **↑ / ↓** while focused (**Shift** for 1% steps). Stack has no
+  speaker to peek, so a scroll or a keypress there shows on the progress bar:
+  it turns into the volume for a moment, in a flatter grey than the playhead,
+  and hands itself back
 - Drag any edge to resize — aspect locked, and the layout scales rather than
   reflowing
 - Light and dark appearance; position, skins and per-skin size remembered

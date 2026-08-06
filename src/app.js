@@ -60,6 +60,9 @@ const el = {
   volRail: $('vol-rail'),
   volFill: $('vol-fill'),
   volPop: document.querySelector('.vol-pop'),
+  seekVolFill: $('seek-vol-fill'),
+  seekVolLevel: $('seek-vol-level'),
+  seekVolIcon: $('seek-vol-icon'),
   cornerSearch: $('btn-search'),
   cornerLyrics: $('btn-lyrics'),
   cornerQueue: $('btn-queue'),
@@ -1426,11 +1429,27 @@ const VOLUME_THROTTLE_MS = 70;
 
 const holdingVolume = () => volumeDragging || performance.now() < ignoreVolumeUntil;
 
-/** Briefly reveal the slider so wheel and keyboard changes are visible. */
+/** Briefly show a wheel or keyboard change, both ways the card has of showing
+ *  one: the slider peeks out from under the speaker, and the progress bar turns
+ *  into the volume. Which of the two you see is the stylesheet's business — the
+ *  speaker is hidden on Stack, and Classic would otherwise say it twice. */
 const peekVolume = () => {
   el.volPop.classList.add('peek');
+
+  const level = clamp(state.muted ? 0 : state.volume, 0, 100);
+  el.seekVolFill.style.width = `${level}%`;
+  el.seekVolLevel.textContent = String(Math.round(level));
+  el.seekVolIcon.firstElementChild.setAttribute(
+    'href',
+    state.muted || state.volume === 0 ? '#i-muted' : '#i-volume',
+  );
+  el.seek.classList.add('showing-volume');
+
   clearTimeout(volumePeekTimer);
-  volumePeekTimer = setTimeout(() => el.volPop.classList.remove('peek'), 1100);
+  volumePeekTimer = setTimeout(() => {
+    el.volPop.classList.remove('peek');
+    el.seek.classList.remove('showing-volume');
+  }, 1100);
 };
 
 const flushVolume = () => {

@@ -402,6 +402,20 @@ the *latest* send, and self-corrects on the first mid-range drag. The slider is
 linear in slider units — the player's curve is what makes it perceptually
 exponential, so do not add a second one.
 
+**Showing a change is per skin, and the stylesheet decides.** `peekVolume` does
+both things unconditionally — peeks the popover *and* writes the readout onto the
+seek bar — because a skin that hides the speaker (Stack does) had nowhere to show
+a wheel change at all, while a skin that shows it would say the same thing twice.
+Which one you see is `body.skin-stack .seek-vol { display: flex }`, so a new skin
+declares its answer in CSS rather than in another `if` in the renderer. The seek
+readout is deliberately **not** in the accent: the accent is the playhead, and
+being read as position is the whole risk of drawing volume on that bar.
+
+`.vol-pop` is anchored by its right edge rather than centred on the speaker. The
+speaker is the last control in the row, so a centred popover overhangs the card
+and `overflow: hidden` — which is what keeps the corner radius — clips it. The
+symptom was a slider sawn in half on Classic.
+
 ## Connection state
 
 Once a token is cached, `ensure_token()` never touches the network, so a dead API
@@ -512,6 +526,43 @@ with a panel open as well as without. A faded button cannot be clicked, but
 `mousedown` is one of the wake signals, so a press on the card brings the bar
 back before the click lands and the panel's own button is never unreachable —
 which is what makes the old "never while a panel is open" guard unnecessary.
+
+## Prototyping a look
+
+**Build the variants and launch them at once. Do not write a standalone HTML
+page.** This overrides the generic advice in the `prototype` skill, which asks
+for one shareable file or a throwaway route — neither shape exists here, and a
+page mocked up beside the real card is judged against a card that is not the one
+running: the vibrancy, the cover's tint, the real titles at the real width and a
+real queue underneath are most of what there is to judge. `docs/queue-prototype.html`
+is the older shape, kept for its record rather than as a pattern to copy.
+
+Each variant is the committed app plus an appended block, built to its own
+binary, and they all run side by side so a decision is a glance rather than a
+memory of the last one. What makes that work:
+
+- **Append, never edit.** Each variant is a CSS block and a JS block
+  concatenated onto `src/styles.css` and `src/app.js`, so `git checkout -- src`
+  is the whole cleanup and no variant can leave a fragment behind. Appended
+  script sees `el`, `state` and the rest — it is the same classic script, not a
+  module — and a listener added there runs *after* the app's own, which is
+  usually what you want: for the volume prototypes the card's wheel handler had
+  already moved `state.volume`, so each variant only had to draw it.
+- **A different `identifier` per build**, patched into `tauri.conf.json`. The
+  single-instance plugin keys on it, so without that only the first one launched
+  survives — the rest hand off and exit.
+- **A different `HOME` per instance.** Settings are read from
+  `$HOME/Library/Application Support/…`, so copy the real `settings.json` into a
+  scratch home per variant — the cached token comes with it, which is what saves
+  re-authorising four clients — and give each one its own `bounds` so they land
+  in a row instead of on top of each other.
+- **`touch src-tauri/src/main.rs` before every build**, or `generate_context!`
+  is not re-expanded and the binary ships the previous variant's frontend.
+- **Label each card**, with a tag element in a corner. Four unlabelled copies of
+  the same widget is a memory test.
+
+Copy each binary out of `target/debug/` as you go — the next build overwrites it.
+Expect one tray icon per instance while they run.
 
 ## Packaging and testing
 

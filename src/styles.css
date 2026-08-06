@@ -533,12 +533,19 @@ body.panel .resize-edges {
 
 /* The wrapper is deliberately padded rather than offset: its bottom edge meets
    the button, so moving the cursor up onto the slider never crosses a gap where
-   :hover would drop. The visible panel sits inside the padding. */
+   :hover would drop. The visible panel sits inside the padding.
+
+   Anchored by its right edge, not centred on the button. The speaker is the
+   last control in the row, so a centred popover hangs past the right edge of
+   the card — and the card clips it, since `overflow: hidden` is what keeps the
+   corner radius, so the slider came out sawn in half. `right: -14px` cancels
+   the wrapper's own padding, which leaves the panel flush with the speaker and
+   inside the card by the player's own padding. */
 .vol-pop {
   position: absolute;
   bottom: 100%;
-  left: 50%;
-  transform: translate(-50%, 4px);
+  right: -14px;
+  transform: translate(0, 4px);
   padding: 0 14px 7px;
   opacity: 0;
   pointer-events: none;
@@ -562,7 +569,7 @@ body.panel .resize-edges {
 .vol-pop.dragging,
 .vol-pop.peek {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translate(0, 0);
 }
 
 /* 'peek' is a transient readout for wheel and keyboard changes, so it must not
@@ -592,6 +599,80 @@ body.panel .resize-edges {
   width: 100%;
   border-radius: 99px;
   background: var(--accent);
+}
+
+/* --------------------------------------------------- volume on the seek bar */
+
+/* Stack hides the speaker and its popover, but the wheel still changes the
+   volume everywhere on the card — so the change had nowhere to show. It shows
+   on the progress bar instead: the one horizontal bar the card already has
+   turns into the volume for as long as the wheel is turning, then hands itself
+   back. No new chrome, and nothing moves.
+
+   Hidden by default and revealed per skin below: Classic peeks its own slider,
+   and two readouts for one change would be one too many. */
+.seek-vol {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.14s ease;
+  /* The bar underneath is still a seek target while this is over it. */
+  pointer-events: none;
+}
+
+.seek-vol-rail {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--rail);
+  overflow: hidden;
+}
+
+/* Not the accent: the accent is the playhead's colour, and the whole risk of
+   drawing volume here is being read as position. */
+.seek-vol-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 99px;
+  background: var(--fg-dim);
+}
+
+.seek-vol-read {
+  position: absolute;
+  right: 0;
+  bottom: 9px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+}
+
+.seek-vol-read svg {
+  width: 11px;
+  height: 11px;
+  fill: currentColor;
+}
+
+/* The playhead fades rather than going away, so the bar never looks like it
+   jumped backwards and then forwards again. */
+body.skin-stack .seek-vol {
+  display: flex;
+}
+
+body.skin-stack .seek.showing-volume .seek-vol {
+  opacity: 1;
+}
+
+body.skin-stack .seek.showing-volume .rail,
+body.skin-stack .seek.showing-volume .knob {
+  opacity: 0.18;
+  transition: opacity 0.14s ease;
 }
 
 /* --------------------------------------------------------------- lyrics */

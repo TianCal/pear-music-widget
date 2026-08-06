@@ -99,6 +99,16 @@
               <div class="seek" id="seek" role="slider" aria-label="Seek" tabindex="-1">
                 <div class="rail"><div class="fill" id="fill"></div></div>
                 <div class="knob" id="knob"></div>
+                <!-- Where a volume change shows up on a skin with no speaker to
+                     peek — see `peekVolume`. The stylesheet is what decides
+                     which skins those are. -->
+                <div class="seek-vol" id="seek-vol" aria-hidden="true">
+                  <div class="seek-vol-rail"><div class="seek-vol-fill" id="seek-vol-fill"></div></div>
+                  <span class="seek-vol-read">
+                    <svg id="seek-vol-icon"><use href="#i-volume" /></svg>
+                    <span id="seek-vol-level"></span>
+                  </span>
+                </div>
               </div>
               <button class="btn sm" id="btn-shuffle" data-cmd="shuffle" title="Shuffle">
                 <svg><use href="#i-shuffle" /></svg>
