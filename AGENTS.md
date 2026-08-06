@@ -332,13 +332,22 @@ wearing the playing mark for that long is not, so the renderer moves `current`
 optimistically and lets the push correct it — the same bargain the transport
 already makes for `togglePlay`.
 
-Stack's strip is two grid rows with `grid-auto-flow: column`, scrolled
-sideways — same density as the fixed 2×2 it replaced, but the whole queue is
-reachable. Column flow is load-bearing: with row flow, scrolling right would
-step two tracks at a time through a list ordered left-to-right. It parks on the
-playing track by reading a card's `offsetLeft` rather than multiplying a column
-width, because the column is a percentage of the content box less the gap and
-guessing at that drifts further with every column.
+Stack's strip is two grid rows with `grid-auto-flow: column`, three columns to a
+view, scrolled sideways. Column flow is load-bearing: with row flow, scrolling
+right would step two tracks at a time through a list ordered left-to-right. It
+centres on the playing track by reading a card's `offsetLeft` rather than
+multiplying a column width, because the column is a percentage of the content
+box less the gap and guessing at that drifts further with every column.
+
+**The gutter belongs to the section, not the scroller.** Inside the scroller it
+is part of the scrollable content, so the columns tile from 14px in while the
+viewport stays 302 wide; the column pitch and the viewport never divide and every
+scroll leaves the edges mid-card. On the section, three cards and two gaps come
+to exactly 302 and the strip is flush at rest and after every scroll.
+
+Three columns is a trade, not a free win: the title column drops from 101px at
+two-up to 48px, so titles ellipsize hard. Six tracks visible instead of four is
+what buys it.
 
 **The strip claims the wheel.** It only overflows sideways, so a plain wheel
 would do nothing to it and everything to the volume — the card's handler owns

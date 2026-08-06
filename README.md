@@ -55,9 +55,9 @@ dropdown too. Tracks you have already played sit above the one playing, which is
 marked; everything still to come is below it. Click any row to jump straight to it — including one you have
 already heard. Leave the panel open and it reopens next launch.
 
-Stack shows the same queue inline, as a strip you scroll sideways: what is next
-to the right, what has already played to the left. Scrolling it never touches the
-volume.
+Stack shows the same queue inline, as a strip you scroll sideways — six tracks
+to a view, with the one playing centred, what came before it to the left and
+what is next to the right. Scrolling it never touches the volume.
 
 Artwork is fetched for the rows you can actually see, so a fifty-track queue
 costs about as much as a four-track one.

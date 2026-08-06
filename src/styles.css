@@ -1226,7 +1226,13 @@ body.skin-stack .upnext:not([hidden]) {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 10px 14px 14px;
+  /* The gutter lives here rather than on the scroller, and that is
+     load-bearing. Inside the scroller it is part of the scrollable content,
+     so the columns tile from 14px in while the viewport stays 302 wide — the
+     column pitch and the viewport then never divide, and every scroll leaves
+     the strip's edges mid-card. Out here, three cards and two gaps come to
+     exactly 302, so it is flush at rest and after every scroll. */
+  padding: 12px 14px 14px;
   /* Same as the lyrics well: the tone change is the boundary, no rule needed. */
   background: var(--well);
 }
@@ -1235,40 +1241,24 @@ body.skin-stack .upnext:not([hidden]) {
   display: none;
 }
 
-/* The strip runs the whole queue, so the padding lives on the scroller rather
-   than the section — otherwise the first and last cards sit against a hard edge
-   while everything between them scrolls under it. */
-.upnext {
-  padding: 10px 0 14px;
-}
+/* Two rows that flow into columns and scroll sideways, three columns to a
+   view. Column flow is what makes scrolling right mean "later" — with row
+   flow the second card would be the third track.
 
-.upnext-title {
-  padding-left: 14px;
-}
-
-.upnext-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--fg);
-  padding-bottom: 8px;
-}
-
-/* Two rows that flow into columns and scroll sideways: same density as the old
-   fixed 2×2, but the whole queue is reachable rather than the next four. Column
-   flow is what makes scrolling right mean "later" — with row flow the second
-   card would be the third track. */
+   Three fill the strip exactly: 3 x 95.33 + 2 x 8 = 302. The cost is the
+   title column, which drops from 101px at two-up to 48px here — six tracks
+   visible instead of four, at the price of hard-ellipsised titles. */
 .upnext-grid {
   display: grid;
-  grid-template-rows: 40px 40px;
+  grid-template-rows: 50px 50px;
   grid-auto-flow: column;
-  grid-auto-columns: calc(50% - 11px);
+  grid-auto-columns: calc((100% - 16px) / 3);
   align-content: start;
   /* Positioned so a card's `offsetLeft` is measured against the strip, which is
-     what parks the playing track at the left edge. */
+     what centres the playing track. */
   position: relative;
   gap: 8px;
   min-height: 0;
-  padding: 0 14px;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
@@ -1315,8 +1305,8 @@ body.skin-stack .upnext:not([hidden]) {
 
 .upnext-item img {
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   border-radius: 5px;
   object-fit: cover;
   background: var(--rail);
