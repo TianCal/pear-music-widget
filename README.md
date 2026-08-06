@@ -25,7 +25,7 @@ Both are the same renderer on the same state, so they never disagree.
 | Tray icon | |
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
-| **Right click** | Settings — widget visibility, skin, dropdown skin, cover tint, opacity, always on top, reset size and position, open at login, reconnect, quit |
+| **Right click** | Settings — widget visibility, skin, dropdown skin, cover tint, opacity, lyrics timing, corner buttons, always on top, reset size and position, open at login, reconnect, quit |
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
@@ -38,7 +38,7 @@ YouTube Music before quitting the widget.
 | Skin | Natural size | Layout |
 | --- | --- | --- |
 | **Classic** | 300×110 | Artwork left, titles and the full transport right |
-| **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the next four queued tracks below — click any to play it |
+| **Stack** | 330×284 | Artwork and titles on top, centred transport, full-width progress, and the queue below — scroll it sideways for what is coming and what has already played, and click any card to jump to it |
 
 **Skin** sets the floating widget, **Dropdown skin** the menu-bar popover, and
 they are independent. Dragging an edge scales whichever skin is showing; it never
@@ -48,9 +48,34 @@ switches between them.
 
 *Stack, with the lyrics panel open.*
 
+## The queue
+
+The left-hand corner button opens the **whole playlist**, on any skin and in the
+dropdown too. Played tracks sit dimmed above the one playing; everything still to
+come is below it. Click any row to jump straight to it — including one you have
+already heard. Leave the panel open and it reopens next launch.
+
+Stack shows the same queue inline, as a strip you scroll sideways: what is next
+to the right, what has already played to the left. Scrolling it never touches the
+volume.
+
+Artwork is fetched for the rows you can actually see, so a fifty-track queue
+costs about as much as a four-track one.
+
+## Corner buttons
+
+The three toggles in the top-right corner — **Queue**, **Lyrics** and **Search** —
+can each be turned off from **Corner buttons** in any of the menus. Turn them all
+off and the title gets the whole card back, which is worth doing on Classic.
+
+The same submenu can fade them out once the pointer has been still for a few
+seconds, under **Hide when idle**. Moving the mouse over the card brings them
+back, and they never fade while a panel is open — the lit button is the way back
+out of one.
+
 ## Lyrics
 
-The list icon opens a rolling lyrics panel on either skin. The line being sung is
+The lyrics icon opens a rolling lyrics panel on any skin. The line being sung is
 highlighted and held just above centre, clicking a line seeks to it, and
 scrolling over the panel scrolls the lyrics rather than the volume. Leave the
 panel open and it reopens next launch.

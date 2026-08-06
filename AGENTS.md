@@ -40,12 +40,22 @@ a `data:` URL, which keeps the renderer's CSP closed to the network *and* lets
 `<canvas>` read the pixels without cross-origin tainting.
 
 **Nothing track-sized goes on the `state` event.** `state` carries the ~400 bytes
-that change every second; `cover`, `upnext` and `lyrics` are separate events sent
+that change every second; `cover`, `queue` and `lyrics` are separate events sent
 only when they change. Tauri's `emit` serialises the payload and then formats a
 separate JS source string *per webview* to `eval`, so anything on `state` is
 copied once per window per tick and parsed as JavaScript at the far end. A 187KB
 base64 cover riding the position tick was the largest single cost in the app.
 `widget_state` returns all four at once, for a window loading from cold.
+
+**Queue artwork rides no event at all.** The `queue` event is text — every slot's
+title, artist and duration, a few KB even for a long queue. Artwork is asked for
+by video id, for the rows a surface is actually showing, and comes back in the
+`queue_art` command's *reply*: a reply is formatted once, an event once per
+webview, and each surface asks only for the rows it is showing. Resolving every
+slot up front would also blow the cover cache, which is why `IMAGE_CACHE_MAX` is now
+loose enough that `IMAGE_CACHE_BYTES` is the ceiling that binds, and why
+`ImageCache::get` promotes on a hit — insertion order was fine for four rows and
+evicts exactly the covers a scroll is about to come back to.
 
 **AppKit work belongs on the main thread, and has to be queued.** See below.
 
@@ -53,6 +63,11 @@ base64 cover riding the position tick was the largest single cost in the app.
 the frontend is embedded by `tauri::generate_context!`, so **editing anything
 under `src/` does nothing until you rebuild.** A stale frontend in a running
 binary looks exactly like an IPC failure.
+
+Worse, `cargo build` is not always that rebuild. The macro is expanded in
+`main.rs`, so a change to `src/` alone leaves the crate looking clean and cargo
+skips it — the binary is relinked with the *old* assets and nothing warns you.
+`touch src-tauri/src/main.rs` first whenever only the frontend changed.
 
 **The renderer's globals are shared.** `bridge.js` replaces the Electron preload,
 but a preload had its own context and a `<script>` does not: a top-level `const`
@@ -144,7 +159,17 @@ is the ring the drag handler ignores. The aspect lock is
 `window.rs` holds a flat `BASE` table of natural sizes per skin. Each skin has
 its own aspect ratio, so `apply_skin` releases the lock, resizes, then re-applies
 it. The two surfaces choose independently — `skin` for the widget, `panelSkin`
-for the dropdown — so `refresh_upnext` fetches the queue when *either* is `stack`.
+for the dropdown.
+
+Whether the queue is fetched is two questions, not one: `skin_shows_queue` says
+whether a skin draws it as part of its layout (Stack does, under the transport),
+and `queue_wanted_by` tracks the surfaces with a queue panel open, exactly as
+`lyrics_wanted_by` does. Either, on either surface, is enough. Declaring the
+appetite beside `BASE` is what stops a third skin having to be remembered in
+`refresh_queue` as well.
+
+A skin's natural height must actually fit its content: the renderer does not
+reflow, so too small a `BASE` silently overlaps rather than scrolling.
 
 The renderer is authored once at each layout's natural size and **does not
 reflow**: `apply_zoom` sets `webview.set_zoom(width / base_width)`, taking
@@ -161,28 +186,45 @@ resize they allow** (`setFrame:` clamps to min/max) and the aspect ratio after.
 `apply_collapsed_size` exists so changing skin or resetting with a panel open
 does not shrink the window *under* it.
 
-**The anchor is observed, never re-derived.** The skins differ by 174 points, so
-a resize moves one edge and `resize_keeping_corner` holds whichever corner was
+**The anchor is observed, never re-derived.** The skins differ by up to 174
+points, so a resize moves one edge and `resize_keeping_corner` holds whichever corner was
 nearest a screen corner *when the user last placed the window*. Deciding it at
 resize time makes the swap irreversible and walks the widget up the screen.
 `set_bounds` records what it asked for so the persist task can tell our own move
 events from the user's. `reset_window` is the one place that *sets* an anchor.
 
-Two CSS details that look arbitrary: `.upnext` is `position: relative` because
-`.ambient` and `.scrim` are absolutely positioned siblings that would otherwise
-paint over it; and the skin rule is `body.skin-stack .upnext:not([hidden])`
-because the plain form out-specifies `.upnext[hidden]` and silently defeats it.
+Two CSS details that look arbitrary, and both apply to every skin-owned section
+— `.upnext` and the panels alike: they are `position: relative`
+because `.ambient` and `.scrim` are absolutely positioned siblings that would
+otherwise paint over them (the symptom is text that looks washed out rather than
+missing); and the reveal rule is `body.skin-X .thing:not([hidden])` because the
+plain form out-specifies `.thing[hidden]` and silently defeats it.
 
 ## Panels
 
-`search` and `lyrics` share one slot, which keeps the height arithmetic to a
-single addition. `panel_height` in `window.rs` must match the `flex-basis` of
-`.search` and `.lyrics` in the stylesheet.
+`queue`, `lyrics` and `search` share one slot, which keeps the height arithmetic
+to a single addition. `panel_height` in `window.rs` must match the `flex-basis`
+of `.queue`, `.lyrics` and `.search` in the stylesheet, and returning `Some(_)`
+from it is what makes a name a panel at all — every caller filters through it.
+
+The renderer drives all three from the `PANELS` table in `app.js`. Opening,
+closing and the dropdown's blur teardown each used to enumerate every section and
+every corner button by hand; with three panels that is three lists to keep in
+step, and the teardown is where they drift.
 
 The widget's open panel is stored as `panel` and restored in `window::create`,
 before the window is ever on screen — restoring it from the renderer instead puts
-a visible grow into every launch. Only `lyrics` is stored: a search is a query
-you have finished with, and the dropdown collapses on blur by design.
+a visible grow into every launch. `panel_is_restorable` decides what is worth
+storing: the lyrics and the queue are modes you left open, a search is a query
+you have finished with, and the dropdown collapses on blur by design. Because the
+window is restored before the renderer says anything, `Core::new` seeds
+`queue_wanted_by` from the same store entry — otherwise a widget coming up with
+the queue panel open paints an empty list and fills it a round trip later.
+
+`panel::collapse` clears both wanted-sets itself. The renderer tears its panel
+down locally when it gets `panel-collapsed` and never calls `set_panel(null)`, so
+nothing else would: the dropdown would go on fetching lyrics — and a `/queue` GET
+per track — for the rest of the process, for a panel dismissed once.
 
 Growing for a panel must never be persisted as the user's preferred size — hence
 the `expanded_by` guard.
@@ -267,11 +309,42 @@ queue** until the slot after the playing track holds it. Do not shortcut this to
 also accepts a slot when the queue has simply grown, since the id is sometimes
 re-resolved on insert.
 
-A "Next tracks" row is already in the queue, so it uses `play_queued`, which
-jumps to its index. Queueing it instead inserts a *second copy* and jumps to
-that, leaving the list looking identical with the track still in it. A jump
-refreshes "Next tracks" itself, because the queue can move without the track
-moving, and waits for the target slot to go `selected` first.
+`play_queued` searches *forward* from the playing track and jumps to it. Queueing
+it instead inserts a *second copy* and jumps to that, leaving the list looking
+identical with the track still in it. A jump refreshes the queue itself, because
+the queue can move without the track moving, and waits for the target slot to go
+`selected` first.
+
+**Forward-only is why neither queue surface can use it.** Both the panel and
+Stack's strip reach behind the playing track, and the forward search can never
+get there — it would fall through to `play_result` and queue the duplicate
+`play_queued` exists to avoid. So they send the slot index they drew, via
+`play_queue_index`, with the video id alongside it to verify against the live
+queue; a mismatch falls back to `play_queued`. `parse_queue` and `queue_entries`
+are two projections over one walk for the same reason: the first drops slots that
+name no track, so its positions are its own, while the second keeps every slot
+because *its* positions are what `set_queue_index` takes. `QueueTrack::index` is
+the bridge between them.
+
+The jump then polls for up to 2.4s before the queue is re-read. With four
+upcoming rows that was invisible; with the whole list on screen the wrong row
+wearing the playing mark for that long is not, so the renderer moves `current`
+optimistically and lets the push correct it — the same bargain the transport
+already makes for `togglePlay`.
+
+Stack's strip is two grid rows with `grid-auto-flow: column`, scrolled
+sideways — same density as the fixed 2×2 it replaced, but the whole queue is
+reachable. Column flow is load-bearing: with row flow, scrolling right would
+step two tracks at a time through a list ordered left-to-right. It parks on the
+playing track by reading a card's `offsetLeft` rather than multiplying a column
+width, because the column is a percentage of the content box less the gap and
+guessing at that drifts further with every column.
+
+**The strip claims the wheel.** It only overflows sideways, so a plain wheel
+would do nothing to it and everything to the volume — the card's handler owns
+the wheel. Its own listener calls `stopPropagation`, which is what makes
+scrolling the queue never change the sound, and maps a vertical wheel onto the
+axis that moves.
 
 ## Volume
 
@@ -358,6 +431,16 @@ picked an orange hue out of 41 pixels in 1,764 and washed the card red. Measured
 over real covers, monochrome scores 0.0024 per pixel and the least colourful
 cover with a genuine hue scores 0.0193; `MIN_COLOUR_RATE` sits between them.
 
+**Transitions do not run in this webview.** `document.hidden` is `true` for the
+widget — it is a non-activating panel that never becomes key — and WebKit does
+not advance CSS transitions in a hidden document. A transitioned property stays
+pinned at its start value for ever, which reads as "the rule is not applying" and
+sends you hunting through specificity. It is the same family of problem as the
+`decode()` note below. Anything that must actually change state — the corner
+buttons' fade is the one that caught this — sets the property with no transition
+on it. `renderProgress` and the lyric roll are unaffected: they are driven by
+`transform`, written per frame from the rAF tick, not left to the compositor.
+
 **Draw with `decode()`, not `onload`.** `onload` fires once the bytes are in;
 `decode()` only once there is a bitmap. A hidden webview can have an image loaded
 but not rasterised, and `drawImage` then paints nothing — indistinguishable from
@@ -375,6 +458,11 @@ interpolate. `PMW_THEME=dark|light` pins the scheme for checking both.
 `~/Library/Application Support/pear-music-widget/settings.json` — the literal
 path the Electron build used, so an upgrade keeps your position, skins and cached
 token. Unknown keys are round-tripped rather than dropped.
+
+`cornersAutohide` fades the corner buttons after that many seconds of stillness,
+0 to keep them up. Driven in the renderer off `mousemove`, which fires far faster
+than the timer needs re-arming — hence the 200ms guard in `wakeCorners`. It never
+fades while a panel is open, because the lit button is the only way to close one.
 
 ## Packaging and testing
 
