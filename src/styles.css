@@ -989,14 +989,6 @@ body.skin-stack .lyric.active {
   padding: 9px 14px 5px;
 }
 
-.queue-head b {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--fg-dim);
-}
-
 .queue-head span {
   margin-left: auto;
   font-size: 10px;
@@ -1040,12 +1032,6 @@ body.skin-stack .lyric.active {
 
 .queue-item:hover {
   background: var(--hover);
-}
-
-/* Everything above the playing track is history — still reachable, but it must
-   not compete with what is coming. */
-.queue-item.past {
-  opacity: 0.42;
 }
 
 .queue-item.now {
@@ -1295,12 +1281,6 @@ body.skin-stack .upnext:not([hidden]) {
 
 .upnext-grid::-webkit-scrollbar {
   display: none;
-}
-
-/* Already played. Still there to scroll back to, but it should never compete
-   with what is coming. */
-.upnext-item.past {
-  opacity: 0.42;
 }
 
 .upnext-item.now {

@@ -404,10 +404,10 @@ const renderUpNext = () => {
   items.forEach((item, at) => {
     const card = document.createElement('button');
     card.className = 'upnext-item';
-    if (current !== null && current !== undefined) {
-      if (at < current) card.className += ' past';
-      else if (at === current) card.className += ' now';
-    }
+    // Only the playing track is marked. Already-played ones are left at full
+    // strength — they are as readable as anything else in the list, and dimming
+    // them made the strip look half broken.
+    if (at === current) card.className += ' now';
     card.type = 'button';
     // Both: the slot index is what a jump takes, the id is what verifies it.
     card.dataset.slot = String(item.index);
@@ -503,10 +503,7 @@ const renderQueue = () => {
   items.forEach((item, at) => {
     const row = document.createElement('button');
     row.className = 'queue-item';
-    if (current !== null && current !== undefined) {
-      if (at < current) row.className += ' past';
-      else if (at === current) row.className += ' now';
-    }
+    if (at === current) row.className += ' now';
     row.type = 'button';
     // Both: the slot index is what the jump takes, the id is what verifies it.
     row.dataset.slot = String(item.index);
