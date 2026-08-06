@@ -41,9 +41,10 @@ window.widget = {
   // Artwork, the queue and the lyrics are each far larger than the state they
   // used to ride on, and each changes about once a track where the state
   // changes once a second. They get their own channels so the position tick
-  // does not drag them across the IPC boundary sixty times a minute.
+  // does not drag them across the IPC boundary sixty times a minute. The queue
+  // carries text only; its artwork is fetched per visible row via `queueArt`.
   onCover: (handler) => on('cover', handler),
-  onUpNext: (handler) => on('upnext', handler),
+  onQueue: (handler) => on('queue', handler),
   onLyrics: (handler) => on('lyrics', handler),
   command: (name, payload) => invoke('command', { name, payload }),
   setSkin: (skin) => invoke('set_skin', { skin }),
@@ -52,6 +53,10 @@ window.widget = {
   search: (query) => invoke('search_tracks', { query }),
   playResult: (videoId) => invoke('play_result', { videoId }),
   playQueued: (videoId) => invoke('play_queued', { videoId }),
+  playQueueIndex: (index, videoId) => invoke('play_queue_index', { index, videoId }),
+  // Artwork for the queue rows a surface is showing. A command rather than an
+  // event: a reply is formatted once, an event once per webview.
+  queueArt: (ids, size) => invoke('queue_art', { ids, size }),
   setPanel: (which) => invoke('set_panel', { which }),
   contextMenu: () => invoke('context_menu'),
   onPanelCollapsed: (handler) => on('panel-collapsed', handler),
@@ -74,7 +79,8 @@ window.widget = {
  * artwork the way Electron forced.
  */
 const NO_DRAG =
-  '.art, .seek, .btn, .vol-pop, .lyrics, .corner, .search, .upnext-item, .pill, .edge, input, button';
+  '.art, .seek, .btn, .vol-pop, .lyrics, .corner, .search, .upnext, .queue, ' +
+  '.pill, .edge, input, button';
 
 const DRAG_THRESHOLD = 3;
 

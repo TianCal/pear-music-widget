@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 use window_vibrancy::NSVisualEffectMaterial;
 
 use crate::macos;
+use crate::state::Core;
 use crate::store::Store;
 use crate::window::{self, Rect, PANEL};
 
@@ -156,6 +157,17 @@ fn collapse(app: &AppHandle, panel: &WebviewWindow) {
         return;
     }
     set_expanded(app, panel, None);
+
+    // The renderer tears its panel down locally when it gets `panel-collapsed`
+    // and never calls `set_panel(null)`, so nothing else would ever clear these.
+    // The dropdown would go on pulling lyrics — and, worse, a `/queue` GET on
+    // every track change — for the rest of the process, for a panel dismissed
+    // once. Cleared here because this is where the truth is.
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        core.set_lyrics_wanted(PANEL, false);
+        core.set_queue_wanted(PANEL, false);
+    }
+
     let _ = app.emit_to(PANEL, "panel-collapsed", ());
 }
 

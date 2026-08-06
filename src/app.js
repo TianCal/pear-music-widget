@@ -7,6 +7,20 @@ const $ = (id) => document.getElementById(id);
 const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 if (IS_PANEL) document.body.classList.add('panel');
 
+/** Must match `SKINS` in src-tauri/src/window.rs. */
+const SKINS = ['classic', 'stack'];
+
+/* The three panels that share the one slot, in corner-bar order. A table rather
+   than three enumerations: opening, closing and the dropdown's blur teardown
+   each used to list every panel and every corner button by hand, and a third
+   panel would have made that three near-identical lists to keep in step.
+   `corner` also names the flag in `state.corners` that hides the button. */
+const PANELS = [
+  { key: 'queue', section: 'queue', corner: 'cornerQueue' },
+  { key: 'lyrics', section: 'lyrics', corner: 'cornerLyrics' },
+  { key: 'search', section: 'search', corner: 'cornerSearch' },
+];
+
 /** Each surface picks its own skin: the dropdown's is configured separately. */
 const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'classic';
 
@@ -34,6 +48,12 @@ const el = {
   volPop: document.querySelector('.vol-pop'),
   cornerSearch: $('btn-search'),
   cornerLyrics: $('btn-lyrics'),
+  cornerQueue: $('btn-queue'),
+  cornerBar: document.querySelector('.corner-bar'),
+  queue: $('queue'),
+  queueList: $('queue-list'),
+  queueCount: $('queue-count'),
+  queueNote: $('queue-note'),
   lyrics: $('lyrics'),
   lyricsScroll: $('lyrics-scroll'),
   lyricsLines: $('lyrics-lines'),
@@ -53,7 +73,7 @@ const el = {
 /** Latest snapshot from the main process.
  *
  *  `status` down is pushed on the `state` event roughly once a second; `cover`,
- *  `upnext` and `lyrics` arrive on their own events and are merged in here, so
+ *  `queue` and `lyrics` arrive on their own events and are merged in here, so
  *  everything below still reads from one object. */
 let state = {
   status: 'connecting',
@@ -61,7 +81,12 @@ let state = {
   panelSkin: 'classic',
   tint: 1,
   lyricsOffset: 0,
-  upnext: [],
+  corners: { queue: true, lyrics: true, search: true },
+  cornersAutohide: 0,
+  /* The whole queue, text only. Artwork arrives separately, by id, for the rows
+     a surface is actually showing — see `wantArt`. */
+  queue: { items: [], current: null, truncated: false },
+  art: new Map(),
   lyrics: null,
   lyricsState: 'idle',
   song: null,
@@ -176,15 +201,75 @@ const STATUS_COPY = {
   },
 };
 
+/* Auto-hide. The buttons are chrome over someone else's artwork, and on Classic
+   they sit right on top of the title, so they can be asked to fade once the
+   pointer has been still for a while. */
+let cornerIdleTimer = null;
+let cornerWokeAt = 0;
+/** The delay the running timer was armed with, so a state push that did not
+ *  change it leaves the countdown alone. */
+let cornerFadeArmedFor = null;
+
+const armCornerFade = () => {
+  clearTimeout(cornerIdleTimer);
+  cornerIdleTimer = null;
+  const after = state.cornersAutohide || 0;
+  cornerFadeArmedFor = after;
+  // Never while a panel is open — its lit button is the way back out of it.
+  if (!after || openPanel) return;
+  cornerIdleTimer = setTimeout(() => el.cornerBar.classList.add('idle'), after * 1000);
+};
+
+/** The pointer moved, so start the countdown over. */
+const wakeCorners = () => {
+  const now = performance.now();
+  const asleep = el.cornerBar.classList.contains('idle');
+  // A mousemove fires far faster than this needs to run, and re-arming a
+  // timeout per event is pure churn while the pointer is travelling.
+  if (!asleep && now - cornerWokeAt < 200) return;
+  cornerWokeAt = now;
+  el.cornerBar.classList.remove('idle');
+  armCornerFade();
+};
+
+/* Four signals, because a widget is meant to be used without focusing it first
+   and pointer *position* is the one thing a background window cannot count on:
+   AppKit delivers `mouseMoved` to the key window alone, and this one is usually
+   not it. `mouseover` covers hover, which tracking areas still fire in the
+   background; `wheel` and `mousedown` cover the interactions that always
+   arrive, and are the guaranteed way back to a faded bar. */
+for (const signal of ['mousemove', 'mouseover', 'mousedown', 'wheel']) {
+  document.addEventListener(signal, wakeCorners, { passive: true });
+}
+
 const renderStatus = () => {
   const showSetup = state.status !== 'connected' || !state.song;
 
-  // Nothing to search against unless the API server is answering.
+  // Nothing to search, read along with or queue against unless the API server
+  // is answering — and each button can also be turned off from the menu.
   const offline = state.status !== 'connected';
-  el.cornerSearch.hidden = offline;
-  el.cornerLyrics.hidden = offline;
-  if (offline && searching) closeSearch();
-  if (offline && openPanel === 'lyrics') setPanel(null);
+  const corners = state.corners || {};
+  for (const panel of PANELS) {
+    el[panel.corner].hidden = offline || corners[panel.key] === false;
+  }
+  // The gutter the titles reserve follows the buttons that are actually there.
+  document.body.style.setProperty(
+    '--corner-count',
+    String(offline ? 0 : PANELS.filter((panel) => corners[panel.key] !== false).length),
+  );
+
+  // Only when the setting itself moved. `renderStatus` runs on every state
+  // push — about once a second — and re-arming the countdown each time is what
+  // made it never expire at all.
+  if (cornerFadeArmedFor !== (state.cornersAutohide || 0)) {
+    el.cornerBar.classList.remove('idle');
+    armCornerFade();
+  }
+
+  // A panel whose button has just gone is a panel with no way back out of it.
+  const orphaned = openPanel && corners[openPanel] === false;
+  if ((offline || orphaned) && searching) closeSearch();
+  else if ((offline || orphaned) && openPanel) setPanel(null);
 
   if (!showSetup) {
     el.setup.hidden = true;
@@ -242,7 +327,58 @@ const renderSong = () => {
 
 };
 
-/** What is currently drawn in the queue, so an unchanged queue is left alone. */
+// ------------------------------------------------------------------ queue
+
+/* One channel, two readers: Stack's "Next tracks" strip and the queue panel.
+   The event carries text only — artwork is asked for by id, for the rows a
+   surface is actually showing, because resolving every slot would be megabytes
+   for tracks nobody has scrolled to. */
+
+/** Artwork already resolved, keyed by videoId. Survives a queue change: the
+ *  same track scrolled back to is already paid for. */
+const artOf = (videoId) => state.art.get(videoId) || null;
+
+let artPending = null;
+let artTimer = null;
+
+/** Ask for artwork for `ids`, batched across a frame or two of scrolling so a
+ *  drag does not fire a request per row it passes. */
+const wantArt = (ids, size) => {
+  const missing = ids.filter((id) => id && !state.art.has(id));
+  if (!missing.length) return;
+
+  artPending = artPending || { ids: new Set(), size };
+  artPending.size = Math.max(artPending.size, size);
+  for (const id of missing) artPending.ids.add(id);
+
+  clearTimeout(artTimer);
+  artTimer = setTimeout(async () => {
+    const batch = artPending;
+    artPending = null;
+    const reply = await window.widget.queueArt([...batch.ids], batch.size);
+    if (!reply?.ok) return;
+
+    let landed = false;
+    for (const [id, art] of Object.entries(reply.art || {})) {
+      state.art.set(id, art);
+      landed = true;
+    }
+    // Written straight into whatever is on screen rather than re-rendering: a
+    // reply usually lands mid-scroll, and rebuilding would fight the drag that
+    // asked for it.
+    if (landed) paintArt();
+  }, 120);
+};
+
+/** Fill in any `<img data-art>` whose artwork has since arrived. */
+const paintArt = () => {
+  for (const img of document.querySelectorAll('img[data-art]')) {
+    const art = artOf(img.dataset.art);
+    if (art && img.src !== art) img.src = art;
+  }
+};
+
+/** What is currently drawn, so an unchanged queue is left alone. */
 let upnextRendered = null;
 
 const renderUpNext = () => {
@@ -252,23 +388,36 @@ const renderUpNext = () => {
   el.upnext.hidden = !playerShowing || skinOf(state) !== 'stack';
   if (el.upnext.hidden) return;
 
-  // The queue changes about once a track. Tearing four rows down and building
+  const { items, current } = state.queue;
+
+  // The queue changes about once a track. Tearing the cards down and building
   // them again — images and all — on every position tick was most of what this
   // surface cost while a track played.
-  const identity = state.upnext.map((item) => item.videoId).join('\n');
-  if (identity === upnextRendered) return;
+  const identity = `${current}\n${items.map((item) => item.videoId).join('\n')}`;
+  if (identity === upnextRendered) {
+    paintArt();
+    return;
+  }
   upnextRendered = identity;
 
   el.upnextGrid.replaceChildren();
-  for (const item of state.upnext) {
-    const row = document.createElement('button');
-    row.className = 'upnext-item';
-    row.type = 'button';
-    row.dataset.videoId = item.videoId;
+  items.forEach((item, at) => {
+    const card = document.createElement('button');
+    card.className = 'upnext-item';
+    if (current !== null && current !== undefined) {
+      if (at < current) card.className += ' past';
+      else if (at === current) card.className += ' now';
+    }
+    card.type = 'button';
+    // Both: the slot index is what a jump takes, the id is what verifies it.
+    card.dataset.slot = String(item.index);
+    card.dataset.videoId = item.videoId;
 
     const img = document.createElement('img');
     img.alt = '';
-    if (item.thumbnail) img.src = item.thumbnail;
+    img.dataset.art = item.videoId;
+    const art = artOf(item.videoId);
+    if (art) img.src = art;
 
     const text = document.createElement('span');
     text.className = 'upnext-text';
@@ -282,10 +431,156 @@ const renderUpNext = () => {
     artist.textContent = item.artist;
 
     text.append(name, artist);
-    row.append(img, text);
-    el.upnextGrid.append(row);
-  }
+    card.append(img, text);
+    el.upnextGrid.append(card);
+  });
+
+  // Park on the playing track, so the default view is what is coming next and
+  // the history is a scroll to the left. Measured off the card rather than
+  // computed from a column width: the column is a percentage of the content box
+  // less the gap, and guessing at that drifts further with every column.
+  const now = el.upnextGrid.children[current ?? 0];
+  if (now) el.upnextGrid.scrollLeft = now.offsetLeft - UPNEXT_PAD;
+  upnextArtInView();
 };
+
+/** The strip's own left padding, matching `.upnext-grid` in the stylesheet. */
+const UPNEXT_PAD = 14;
+
+/** Artwork for the cards on screen, plus a screenful either side. */
+const upnextArtInView = () => {
+  const cards = [...el.upnextGrid.children];
+  if (!cards.length) return;
+  // Two cards to a column, so a screenful is four and the step is one card's
+  // width plus the gap.
+  const step = (cards[0].offsetWidth || 140) + 8;
+  const first = Math.floor(el.upnextGrid.scrollLeft / step) * 2;
+  wantArt(
+    cards.slice(Math.max(0, first - 4), first + 12).map((card) => card.dataset.videoId),
+    128,
+  );
+};
+
+el.upnextGrid.addEventListener('scroll', upnextArtInView, { passive: true });
+
+/* The strip only overflows sideways, so a plain wheel would do nothing to it
+   and everything to the volume — the card's own handler owns the wheel.
+   Claiming the event here stops it reaching that handler at all, which is what
+   makes scrolling the queue never touch the sound, and maps a vertical wheel
+   onto the axis that actually moves. */
+el.upnext.addEventListener(
+  'wheel',
+  (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    el.upnextGrid.scrollLeft += event.deltaX || event.deltaY;
+  },
+  { passive: false },
+);
+
+/** What the panel has drawn, so scrolling it does not rebuild it. */
+let queueRendered = null;
+
+const renderQueue = () => {
+  if (el.queue.hidden) return;
+
+  const { items, current } = state.queue;
+  el.queueCount.textContent = items.length
+    ? `${(current ?? -1) + 1 || '–'} of ${items.length}${state.queue.truncated ? '+' : ''}`
+    : '';
+  el.queueNote.textContent = items.length ? '' : 'Nothing queued.';
+  el.queueNote.hidden = !!items.length;
+
+  const identity = `${current}\n${items.map((item) => item.videoId).join('\n')}`;
+  if (identity === queueRendered) {
+    paintArt();
+    return;
+  }
+  const first = queueRendered === null;
+  queueRendered = identity;
+
+  el.queueList.replaceChildren();
+  items.forEach((item, at) => {
+    const row = document.createElement('button');
+    row.className = 'queue-item';
+    if (current !== null && current !== undefined) {
+      if (at < current) row.className += ' past';
+      else if (at === current) row.className += ' now';
+    }
+    row.type = 'button';
+    // Both: the slot index is what the jump takes, the id is what verifies it.
+    row.dataset.slot = String(item.index);
+    row.dataset.videoId = item.videoId;
+
+    const img = document.createElement('img');
+    img.alt = '';
+    img.dataset.art = item.videoId;
+    const art = artOf(item.videoId);
+    if (art) img.src = art;
+
+    const text = document.createElement('span');
+    text.className = 'queue-text';
+
+    const name = document.createElement('span');
+    name.className = 'queue-name';
+    name.textContent = item.title;
+
+    const artist = document.createElement('span');
+    artist.className = 'queue-artist';
+    artist.textContent = item.artist;
+
+    text.append(name, artist);
+    row.append(img, text);
+
+    if (at === current) {
+      const eq = document.createElement('span');
+      eq.className = 'queue-eq';
+      eq.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+      row.append(eq);
+    } else if (item.duration) {
+      const dur = document.createElement('span');
+      dur.className = 'queue-dur';
+      dur.textContent = item.duration;
+      row.append(dur);
+    }
+
+    el.queueList.append(row);
+  });
+
+  // Centre the playing track. On the first draw only — after that the user's
+  // scroll position is theirs, and a track change should not yank the list out
+  // from under a browse.
+  const now = el.queueList.querySelector('.queue-item.now');
+  if (now && first) {
+    el.queueList.scrollTop = now.offsetTop - el.queueList.clientHeight / 2 + now.offsetHeight / 2;
+  }
+  queueArtInView();
+};
+
+/** Artwork for the rows on screen, plus a screenful either side. */
+const queueArtInView = () => {
+  const rows = [...el.queueList.children];
+  if (!rows.length) return;
+  const row = rows[0].offsetHeight || 40;
+  const first = Math.floor(el.queueList.scrollTop / row);
+  const visible = Math.ceil(el.queueList.clientHeight / row);
+  wantArt(
+    rows
+      .slice(Math.max(0, first - visible), first + visible * 2)
+      .map((node) => node.dataset.videoId),
+    128,
+  );
+};
+
+el.queueList.addEventListener('scroll', queueArtInView, { passive: true });
+
+el.queueList.addEventListener('click', (event) => {
+  const row = event.target.closest('.queue-item');
+  if (!row) return;
+  // By slot index, not just by id: the panel shows already-played rows, and a
+  // forward-only search by id cannot reach those — it would queue a duplicate.
+  jumpTo(Number(row.dataset.slot), row.dataset.videoId);
+});
 
 /* Written on every push, but almost never actually different. `classList.toggle`
    is already a no-op when the class is where it should be; `setAttribute` on a
@@ -412,7 +707,10 @@ const applyState = (next) => {
   // Tracked separately from `state` so the very first push applies the class too.
   if (skin !== skinApplied) {
     skinApplied = skin;
-    document.body.classList.remove('skin-classic', 'skin-stack');
+    // Removed from a list rather than by name: a skin added to the table in
+    // window.rs and not here leaves both classes on the body, which reads as a
+    // stuck skin with no error anywhere.
+    document.body.classList.remove(...SKINS.map((name) => `skin-${name}`));
     document.body.classList.add(`skin-${skin}`);
     // Column widths and font sizes both changed, so the drift maths is stale.
     requestAnimationFrame(() => {
@@ -437,6 +735,7 @@ const applyState = (next) => {
   renderSong();
   renderControls();
   renderUpNext();
+  renderQueue();
   bumpProgress();
 };
 
@@ -446,9 +745,10 @@ const applyCover = (cover) => {
   renderCover();
 };
 
-const applyUpNext = (items) => {
-  state.upnext = items || [];
+const applyQueue = (view) => {
+  state.queue = view || { items: [], current: null, truncated: false };
   renderUpNext();
+  renderQueue();
 };
 
 const applyLyrics = (view) => {
@@ -459,10 +759,29 @@ const applyLyrics = (view) => {
 };
 
 el.upnextGrid.addEventListener('click', (event) => {
-  // Already in the queue — jump to it rather than queueing another copy.
-  const row = event.target.closest('.upnext-item');
-  if (row?.dataset.videoId) window.widget.playQueued(row.dataset.videoId);
+  // The strip reaches behind the playing track now, and `play_queued`'s
+  // forward-only search cannot serve a card from there — it would queue a
+  // duplicate. Same slot-index jump the queue panel uses.
+  const card = event.target.closest('.upnext-item');
+  if (card) jumpTo(Number(card.dataset.slot), card.dataset.videoId);
 });
+
+/** Jump to a slot, moving our own idea of where the playhead is first.
+ *
+ *  The jump waits for the player to actually land before the queue is re-read,
+ *  which can take a couple of seconds. With four upcoming rows that was
+ *  invisible; with the whole list on screen, the wrong row wearing the playing
+ *  mark for that long is not. Same bargain the transport already makes: move
+ *  optimistically, and let the push correct us either way. */
+const jumpTo = (slot, videoId) => {
+  const at = state.queue.items.findIndex((item) => item.index === slot);
+  if (at >= 0) {
+    state.queue = { ...state.queue, current: at };
+    renderUpNext();
+    renderQueue();
+  }
+  window.widget.playQueueIndex(slot, videoId);
+};
 
 // ------------------------------------------------------------------ lyrics
 
@@ -695,6 +1014,24 @@ el.cornerLyrics.addEventListener('click', (event) => {
   toggleLyrics();
 });
 
+const toggleQueue = () => {
+  if (openPanel === 'queue') {
+    setPanel(null);
+    return;
+  }
+  if (searching) resetSearch(false);
+  // Re-centred on the playing track each time it is opened, rather than coming
+  // back wherever the last browse left it.
+  queueRendered = null;
+  setPanel('queue');
+  renderQueue();
+};
+
+el.cornerQueue.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleQueue();
+});
+
 // Clicking a line seeks to it — the timestamps are right there. `dataset.index`
 // is not tested for truthiness: the first line's is the string "0", which is
 // falsy, and guarding on it is what used to make the opening line unclickable.
@@ -718,15 +1055,24 @@ el.lyricsLines.addEventListener('click', (event) => {
 
 // ------------------------------------------------------------------ search
 
-let openPanel = null; // 'search' | 'lyrics' | null
+let openPanel = null; // 'queue' | 'lyrics' | 'search' | null
+
+/** Write the open panel to the DOM. Shared by `setPanel` and the teardown the
+ *  dropdown's blur pushes at us, so the two can never drift apart. */
+const paintPanel = (which) => {
+  document.body.classList.toggle('panel-open', !!which);
+  for (const panel of PANELS) {
+    el[panel.section].hidden = which !== panel.key;
+    el[panel.corner].classList.toggle('on', which === panel.key);
+  }
+};
 
 const setPanel = (which) => {
   openPanel = which;
-  document.body.classList.toggle('panel-open', !!which);
-  el.search.hidden = which !== 'search';
-  el.lyrics.hidden = which !== 'lyrics';
-  el.cornerLyrics.classList.toggle('on', which === 'lyrics');
-  el.cornerSearch.classList.toggle('on', which === 'search');
+  paintPanel(which);
+  // Opening one parks the fade; closing one starts it counting again.
+  el.cornerBar.classList.remove('idle');
+  armCornerFade();
   return window.widget.setPanel(which);
 };
 
@@ -840,11 +1186,7 @@ const resetSearch = (pushed) => {
   el.results.replaceChildren();
   if (pushed) {
     openPanel = null;
-    document.body.classList.remove('panel-open');
-    el.search.hidden = true;
-    el.lyrics.hidden = true;
-    el.cornerLyrics.classList.remove('on');
-    el.cornerSearch.classList.remove('on');
+    paintPanel(null);
   } else {
     setPanel(null);
   }
@@ -886,10 +1228,7 @@ window.widget.onPanelCollapsed(() => {
   if (searching) resetSearch(true);
   else if (openPanel) {
     openPanel = null;
-    document.body.classList.remove('panel-open');
-    el.lyrics.hidden = true;
-    el.cornerLyrics.classList.remove('on');
-    el.cornerSearch.classList.remove('on');
+    paintPanel(null);
   }
 });
 
@@ -897,7 +1236,8 @@ window.widget.onPanelCollapsed(() => {
 // target because it opts out of the drag region; the document-level listener
 // covers the rest of the card for the case where the events do get through.
 // Controls are excluded — a double click on one would fire it twice as well.
-const INTERACTIVE = 'button, input, .seek, .vol-hit, .result, .upnext-item';
+const INTERACTIVE =
+  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item';
 
 const openMusicApp = () => window.widget.openApp();
 
@@ -1102,6 +1442,8 @@ el.card.addEventListener(
       scrollLyrics(event.deltaY);
       return;
     }
+    // These scroll on their own; the wheel belongs to them, not to volume.
+    if (event.target.closest('#queue, #upnext')) return;
     if (state.status !== 'connected') return;
     // With macOS natural scrolling, swiping up reports a positive deltaY, so
     // adding it is what makes "scroll up" raise the volume.
@@ -1200,14 +1542,14 @@ window.widget.onZoom((zoom) => {
 
 window.widget.onState(applyState);
 window.widget.onCover(applyCover);
-window.widget.onUpNext(applyUpNext);
+window.widget.onQueue(applyQueue);
 window.widget.onLyrics(applyLyrics);
 
 // One reply carries all four channels: a window loading from cold cannot wait a
 // track for the artwork to change.
 window.widget.getState().then((boot) => {
   applyCover(boot.cover);
-  applyUpNext(boot.upnext);
+  applyQueue(boot.queue);
   applyLyrics(boot.lyrics);
   applyState(boot.state);
 
@@ -1215,6 +1557,7 @@ window.widget.getState().then((boot) => {
   // already sized the window for it; this is what tells the page to draw it and
   // the main process that somebody is watching, so the lyrics get fetched.
   if (!IS_PANEL && boot.panel === 'lyrics') toggleLyrics();
+  else if (!IS_PANEL && boot.panel === 'queue') toggleQueue();
 });
 
 window.addEventListener('resize', () => {
@@ -1223,3 +1566,4 @@ window.addEventListener('resize', () => {
 });
 
 bumpProgress();
+

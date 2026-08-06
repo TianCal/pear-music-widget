@@ -23,13 +23,54 @@ pub struct SearchResult {
     pub thumbnail: Option<Arc<str>>,
 }
 
+/// A pathological queue is capped the way the search tree is by `MAX_ITEMS`.
+pub const QUEUE_MAX: usize = 500;
+
+/// One queue slot, as the renderer draws it.
 #[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct UpNextItem {
-    #[serde(rename = "videoId")]
+#[serde(rename_all = "camelCase")]
+pub struct QueueTrack {
+    /// Index of the **raw** queue slot, which is what `PATCH /queue` takes. Not
+    /// the position in `QueueView::items`: slots naming no video are dropped
+    /// from the list, and must not shift the indices a jump sends back.
+    pub index: usize,
     pub video_id: String,
     pub title: String,
     pub artist: String,
-    pub thumbnail: Option<Arc<str>>,
+    /// `lengthText`, already formatted by the player. Empty when absent.
+    pub duration: String,
+    /// The artwork **source** URL, deliberately not serialised. Resolving one
+    /// `data:` URL per slot would be megabytes on an event Tauri formats once
+    /// per webview, and the two surfaces want different sizes anyway — the
+    /// renderer asks for the rows it is actually showing. See `queue_art`.
+    #[serde(skip)]
+    pub art: Option<Arc<str>>,
+}
+
+/// The whole queue: every slot that names a track, and which of them is playing.
+///
+/// Text only — around 110 bytes a track, so even a capped 500-track queue is in
+/// the same class as one cover, and it is pushed at the same rate: once a track,
+/// never on the position tick.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueView {
+    pub items: Arc<[QueueTrack]>,
+    /// Index into `items` of the playing track — for drawing only. A row is
+    /// *played* by slot index and video id, never by this.
+    pub current: Option<usize>,
+    /// Set when the parse stopped at `QUEUE_MAX`.
+    pub truncated: bool,
+}
+
+impl QueueView {
+    pub fn empty() -> Self {
+        Self {
+            items: Arc::from([]),
+            current: None,
+            truncated: false,
+        }
+    }
 }
 
 /// One entry per queue slot, with the playing one marked.
@@ -203,52 +244,88 @@ pub fn queue_entries(queue: Option<&Value>) -> Vec<QueueEntry> {
         .collect()
 }
 
-/// The tracks queued after the one playing, for the stack skin's "Next tracks".
-/// `selected` marks the current item; anything before it has already played.
-pub fn parse_queue_upcoming(queue: &Value, limit: usize) -> Vec<UpNextItem> {
+/// The **largest** artwork the payload offers for a slot, not the first.
+///
+/// The list runs smallest-first, and `at_most` only ever shrinks a URL — so
+/// taking `thumbnails[0]` and asking for anything larger would leave a 60px
+/// JPEG drawn at several times its size. Rows shrink it back down for free;
+/// there is no cost to starting from the biggest one on offer.
+fn queue_art_of(renderer: &Value) -> Option<Arc<str>> {
+    dig(renderer, &["thumbnail", "thumbnails"])
+        .and_then(Value::as_array)?
+        .last()
+        .and_then(|last| last.get("url"))
+        .and_then(Value::as_str)
+        .map(Arc::from)
+}
+
+/// One queue slot's metadata. `None` for a slot that names no track — a divider,
+/// or a renderer shape we do not know.
+fn queue_track(index: usize, renderer: Option<&Value>) -> Option<QueueTrack> {
+    let renderer = renderer?;
+    let video_id = renderer.get("videoId").and_then(Value::as_str)?;
+
+    // The byline is "Artist • Album • Year"; only the first part is the artist.
+    let byline = renderer
+        .get("longBylineText")
+        .or_else(|| renderer.get("shortBylineText"));
+    let artist = runs_text(byline)
+        .split('•')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Some(QueueTrack {
+        index,
+        video_id: video_id.to_string(),
+        title: runs_text(renderer.get("title")).trim().to_string(),
+        artist,
+        duration: runs_text(renderer.get("lengthText")).trim().to_string(),
+        art: queue_art_of(renderer),
+    })
+}
+
+/// The whole queue, played tracks and all. `selected` marks the current item;
+/// anything before it has already played.
+///
+/// This and `queue_entries` are deliberately two projections rather than one
+/// function: this one drops slots that name no track, so its list positions are
+/// its own, while `queue_entries` keeps every slot because *its* positions are
+/// the ones `set_queue_index` takes. `QueueTrack::index` is the bridge.
+pub fn parse_queue(queue: Option<&Value>, limit: usize) -> QueueView {
+    let Some(queue) = queue else {
+        return QueueView::empty();
+    };
+
     let renderers = queue_renderers(queue);
+    let mut items: Vec<QueueTrack> = Vec::new();
+    let mut current = None;
+    let mut truncated = false;
 
-    let current = renderers.iter().position(|renderer| {
-        renderer
-            .and_then(|r| r.get("selected"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    });
-    let start = current.map(|index| index + 1).unwrap_or(0);
-
-    let mut out = Vec::new();
-    for renderer in renderers.iter().skip(start) {
-        if out.len() >= limit {
+    for (slot, renderer) in renderers.iter().enumerate() {
+        if items.len() >= limit {
+            truncated = true;
             break;
         }
-        let Some(renderer) = renderer else { continue };
-        let Some(video_id) = renderer.get("videoId").and_then(Value::as_str) else {
+        let selected = renderer
+            .and_then(|r| r.get("selected"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let Some(track) = queue_track(slot, *renderer) else {
             continue;
         };
-
-        let byline = renderer
-            .get("longBylineText")
-            .or_else(|| renderer.get("shortBylineText"));
-        let artist = runs_text(byline)
-            .split('•')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        out.push(UpNextItem {
-            video_id: video_id.to_string(),
-            title: runs_text(renderer.get("title")).trim().to_string(),
-            artist,
-            thumbnail: dig(renderer, &["thumbnail", "thumbnails"])
-                .and_then(Value::as_array)
-                .and_then(|list| list.first())
-                .and_then(|first| first.get("url"))
-                .and_then(Value::as_str)
-                .map(Arc::from),
-        });
+        if selected {
+            current = Some(items.len());
+        }
+        items.push(track);
     }
-    out
+
+    QueueView {
+        items: Arc::from(items),
+        current,
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -292,28 +369,70 @@ mod tests {
         assert_eq!(parse_search_results(&payload)[0].video_id, "overlaid");
     }
 
-    #[test]
-    fn upcoming_starts_after_the_selected_track() {
-        let queue = json!({ "items": [
+    fn sample_queue() -> Value {
+        json!({ "items": [
             { "playlistPanelVideoRenderer": { "videoId": "played", "title": { "runs": [{ "text": "Played" }] } } },
             { "playlistPanelVideoRenderer": { "videoId": "now", "selected": true, "title": { "runs": [{ "text": "Now" }] } } },
             { "playlistPanelVideoWrapperRenderer": { "primaryRenderer": { "playlistPanelVideoRenderer": {
                 "videoId": "next",
                 "title": { "runs": [{ "text": "Next" }] },
                 "longBylineText": { "runs": [{ "text": "Band • Album" }] },
-                "thumbnail": { "thumbnails": [{ "url": "http://thumb" }] }
+                "lengthText": { "runs": [{ "text": "3:21" }] },
+                "thumbnail": { "thumbnails": [{ "url": "http://small" }, { "url": "http://large" }] }
             }}}}
-        ]});
+        ]})
+    }
 
-        let upcoming = parse_queue_upcoming(&queue, 4);
-        assert_eq!(upcoming.len(), 1);
-        assert_eq!(upcoming[0].video_id, "next");
-        assert_eq!(upcoming[0].artist, "Band");
-        assert_eq!(upcoming[0].thumbnail.as_deref(), Some("http://thumb"));
+    #[test]
+    fn the_queue_keeps_played_tracks_and_marks_the_playing_one() {
+        let queue = sample_queue();
+        let view = parse_queue(Some(&queue), QUEUE_MAX);
 
+        assert_eq!(view.items.len(), 3, "already-played tracks are kept");
+        assert_eq!(view.current, Some(1));
+        assert!(!view.truncated);
+
+        assert_eq!(view.items[2].video_id, "next");
+        assert_eq!(view.items[2].index, 2);
+        assert_eq!(view.items[2].artist, "Band", "the album is stripped");
+        assert_eq!(view.items[2].duration, "3:21");
+        // The largest offered, not the first — see `queue_art_of`.
+        assert_eq!(view.items[2].art.as_deref(), Some("http://large"));
+
+        // The raw slot view is unchanged: it is what `set_queue_index` takes.
         let entries = queue_entries(Some(&queue));
         assert_eq!(entries.len(), 3);
         assert!(entries[1].selected);
         assert_eq!(entries[2].video_id.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn a_slot_naming_no_video_is_dropped_without_shifting_the_rest() {
+        let queue = json!({ "items": [
+            { "playlistPanelVideoRenderer": { "title": { "runs": [{ "text": "No id" }] } } },
+            { "playlistPanelVideoRenderer": { "videoId": "real", "selected": true, "title": { "runs": [{ "text": "Real" }] } } }
+        ]});
+
+        let view = parse_queue(Some(&queue), QUEUE_MAX);
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(view.current, Some(0), "current indexes the drawn list");
+        assert_eq!(view.items[0].index, 1, "but the slot index is the raw one");
+    }
+
+    #[test]
+    fn nothing_selected_leaves_current_unset() {
+        let queue = json!({ "items": [
+            { "playlistPanelVideoRenderer": { "videoId": "a", "title": { "runs": [{ "text": "A" }] } } }
+        ]});
+        assert_eq!(parse_queue(Some(&queue), QUEUE_MAX).current, None);
+        assert!(parse_queue(None, QUEUE_MAX).items.is_empty());
+    }
+
+    #[test]
+    fn a_long_queue_is_capped_and_says_so() {
+        let queue = sample_queue();
+        let view = parse_queue(Some(&queue), 2);
+        assert_eq!(view.items.len(), 2);
+        assert!(view.truncated);
     }
 }

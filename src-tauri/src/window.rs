@@ -32,6 +32,16 @@ pub const BASE: [(&str, f64, f64); 2] = [("classic", 300.0, 110.0), ("stack", 33
 
 pub const SKINS: [&str; 2] = ["classic", "stack"];
 
+/// Whether a skin draws the queue as part of its own layout — Stack does, under
+/// the transport. Declared here beside `BASE` so a new skin states its appetite
+/// in one place; `refresh_queue` used to ask `skin == "stack"` in two spots.
+///
+/// This is about the *skin*. The queue panel is orthogonal: it can be open over
+/// any skin, and it makes the queue wanted on its own.
+pub fn skin_shows_queue(skin: &str) -> bool {
+    matches!(skin, "stack")
+}
+
 const MIN_WIDTH: f64 = 240.0;
 const MAX_WIDTH: f64 = 760.0;
 
@@ -39,15 +49,24 @@ const MAX_WIDTH: f64 = 760.0;
 /// in the stylesheet.
 const CORNER_RADIUS: f64 = 12.0;
 
-/// Height each expanding panel adds, in CSS pixels. Must match `.search` and
-/// `.lyrics` in styles.css — the window grows by exactly what the panel
-/// occupies. Only one can be open at a time, which keeps the arithmetic trivial.
+/// Height each expanding panel adds, in CSS pixels. Must match `.search`,
+/// `.lyrics` and `.queue` in styles.css — the window grows by exactly what the
+/// panel occupies. Only one can be open at a time, which keeps the arithmetic
+/// trivial. `Some(_)` is also what makes a name a panel at all: every caller
+/// filters through this.
 pub fn panel_height(which: &str) -> Option<f64> {
     match which {
         "search" => Some(216.0),
         "lyrics" => Some(240.0),
+        "queue" => Some(260.0),
         _ => None,
     }
+}
+
+/// Panels worth reopening on the next launch. A search is a query you have
+/// finished with; a queue or a lyric sheet is a mode you left open.
+pub fn panel_is_restorable(which: &str) -> bool {
+    matches!(which, "lyrics" | "queue")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -410,6 +429,7 @@ pub fn dress(
         macos::set_level(window, level);
     }
     macos::follow_everywhere(window, follow_everywhere);
+    macos::accept_mouse_moved(window);
 }
 
 // ------------------------------------------------------------------ create
@@ -849,7 +869,7 @@ mod tests {
     fn an_open_panel_scales_with_the_card() {
         for skin in SKINS {
             let (base_width, base_height) = base_for(skin);
-            for panel in ["search", "lyrics"] {
+            for panel in ["search", "lyrics", "queue"] {
                 let extra = panel_height(panel).expect("a known panel");
                 let shape = shape_of(skin, Some(panel));
                 assert_eq!(shape, (base_width, base_height + extra));

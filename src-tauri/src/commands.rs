@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-use crate::api::THUMB_PX;
+use crate::api::{COVER_PX, THUMB_PX};
 use crate::search;
 use crate::state::{Bootstrap, Core};
 use crate::window::{self, PANEL};
@@ -17,6 +17,11 @@ use crate::window::{self, PANEL};
 /// Polling budget for a queued track to show up (see `play_result`).
 const PLAY_POLL_ATTEMPTS: usize = 20;
 const PLAY_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Ceiling on one `queue_art` request. A surface asks for what it is showing
+/// plus a screenful either side; anything past that is a runaway loop, not a
+/// viewport.
+const QUEUE_ART_MAX: usize = 48;
 
 /// Pressing play when YouTube Music is not up should start it, not fail silently.
 const PLAYBACK_COMMANDS: [&str; 3] = ["togglePlay", "next", "previous"];
@@ -42,7 +47,7 @@ fn refresh_queue_after_jump(core: Arc<Core>, index: usize) {
                 break;
             }
         }
-        core.refresh_upnext().await;
+        core.refresh_queue().await;
     });
 }
 
@@ -253,11 +258,14 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     let which = which.filter(|which| !which.is_empty());
     let core = core(&app);
 
-    // The widget comes back up showing whatever it was left showing. Only the
-    // lyrics: a search is a query you have finished with, and the dropdown is a
-    // menu that collapses on blur, so neither is worth restoring.
+    // The widget comes back up showing whatever it was left showing — the lyrics
+    // or the queue, both modes you left open. Not a search: that is a query you
+    // have finished with. Not the dropdown either: it is a menu that collapses
+    // on blur by design.
     if window.label() != PANEL {
-        let remembered = which.clone().filter(|which| which == "lyrics");
+        let remembered = which
+            .clone()
+            .filter(|which| window::panel_is_restorable(which));
         if core.store.get(|s| s.panel.clone()) != remembered {
             core.store.update(|s| s.panel = remembered);
         }
@@ -274,11 +282,94 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     });
 
     core.set_lyrics_wanted(window.label(), which.as_deref() == Some("lyrics"));
+    core.set_queue_wanted(window.label(), which.as_deref() == Some("queue"));
 
     let spawned = Arc::clone(&core);
-    tauri::async_runtime::spawn(async move { spawned.refresh_lyrics().await });
+    tauri::async_runtime::spawn(async move {
+        spawned.refresh_lyrics().await;
+        spawned.refresh_queue().await;
+    });
 
     json!({ "ok": true })
+}
+
+/// Artwork for the queue rows a surface is actually showing.
+///
+/// A command rather than an event, for the reason `search_tracks` is one:
+/// `emit` formats a JS source string *per webview*, and two surfaces looking at
+/// different parts of the same queue want different bytes. Resolving every slot
+/// up front would be megabytes for rows nobody has scrolled to.
+///
+/// Keyed by video id, which makes it stale-proof without a token: a reply that
+/// lands after the queue moved is applied to whatever row now holds that id, or
+/// to none at all.
+#[tauri::command]
+pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> Value {
+    let core = core(&app);
+    let size = size.unwrap_or(THUMB_PX).clamp(THUMB_PX, COVER_PX);
+
+    let mut wanted: Vec<String> = Vec::new();
+    for id in ids {
+        if wanted.len() >= QUEUE_ART_MAX {
+            break;
+        }
+        if !id.is_empty() && !wanted.contains(&id) {
+            wanted.push(id);
+        }
+    }
+
+    // One pass against the same keep-alive connection, the way the four-item
+    // queue already resolved its thumbnails; most of these are cache hits.
+    let resolved = future::join_all(wanted.into_iter().map(|id| {
+        let core = Arc::clone(&core);
+        async move {
+            let src = core.queue_art_src(&id)?;
+            let art = core.api.fetch_cover(Some(&src), size).await?;
+            Some((id, art))
+        }
+    }))
+    .await;
+
+    let art: Map<String, Value> = resolved
+        .into_iter()
+        .flatten()
+        .map(|(id, art)| (id, Value::String(art.to_string())))
+        .collect();
+
+    json!({ "ok": true, "art": art })
+}
+
+/// Jump to a queue slot the caller can see.
+///
+/// `play_queued` searches *forward* from the playing track, deliberately, so a
+/// duplicate id earlier in the queue cannot rewind you. The queue panel shows
+/// already-played rows, which that search can never reach: it would fall through
+/// to `play_result` and queue a second copy, leaving the list looking unchanged
+/// with the track still in it — exactly the failure `play_queued` exists to
+/// avoid. So the panel sends the slot index it drew.
+///
+/// The id travels with it and is checked against the live queue, so a list drawn
+/// a moment ago cannot jump you to whatever has since moved into that slot.
+#[tauri::command]
+pub async fn play_queue_index(app: AppHandle, index: usize, video_id: String) -> Value {
+    let core = core(&app);
+    let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
+
+    let matches = entries
+        .get(index)
+        .is_some_and(|entry| entry.video_id.as_deref() == Some(video_id.as_str()));
+    if !matches {
+        // The queue moved under the drawn list; find the track by id instead.
+        return play_queued(app, video_id).await;
+    }
+
+    match core.api.set_queue_index(index).await {
+        Ok(()) => {
+            refresh_queue_after_jump(Arc::clone(&core), index);
+            json!({ "ok": true, "index": index })
+        }
+        Err(err) => json!({ "ok": false, "error": err.message }),
+    }
 }
 
 /// Right-clicking either surface gets a focused subset of the tray menu — the

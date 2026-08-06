@@ -22,6 +22,7 @@
         <symbol id="i-search" viewBox="0 0 24 24"><path d="M10.5 3a7.5 7.5 0 0 1 5.92 12.11l4.24 4.24a1 1 0 0 1-1.42 1.42l-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/></symbol>
         <symbol id="i-lyrics" viewBox="0 0 24 24"><path d="M4 5.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1ZM4 19a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Z"/></symbol>
         <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5a1 1 0 0 0-.7 1.7l5.3 5.3-5.3 5.3a1 1 0 1 0 1.4 1.4l5.3-5.3 5.3 5.3a1 1 0 0 0 1.4-1.4L13.8 12l5.3-5.3a1 1 0 0 0-1.4-1.4L12.4 10.6 7.1 5.3A1 1 0 0 0 6.4 5Z"/></symbol>
+        <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6.5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14.3-9.2a1 1 0 0 1 1.7.7v8a1 1 0 0 1-.6.9l-2.5 1.1a1.6 1.6 0 1 1-.8-1.8l1.9-.8V9.9l-2 .6a1 1 0 0 1-.6-1.9Z"/></symbol>
         <symbol id="i-note" viewBox="0 0 24 24"><path d="M20 3.6a1 1 0 0 0-1.2-1L9.5 4.7a1 1 0 0 0-.8 1v9.2A3.6 3.6 0 1 0 10.7 18V9.5l7.3-1.6v4.6a3.6 3.6 0 1 0 2 3.2Z"/></symbol>
       </defs>
     </svg>
@@ -37,7 +38,12 @@
           <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
         </div>
 
+        <!-- DOM order is left-to-right, and each of the three can be turned off
+             from the Corner buttons submenu. -->
         <div class="corner-bar">
+          <button class="corner" id="btn-queue" title="Queue" aria-label="Queue">
+            <svg><use href="#i-queue" /></svg>
+          </button>
           <button class="corner" id="btn-lyrics" title="Lyrics" aria-label="Lyrics">
             <svg><use href="#i-lyrics" /></svg>
           </button>
@@ -100,6 +106,15 @@
         <section class="upnext" id="upnext" hidden>
           <p class="upnext-title">Next tracks</p>
           <div class="upnext-grid" id="upnext-grid"></div>
+        </section>
+
+        <section class="queue" id="queue" hidden>
+          <div class="queue-head">
+            <b>Queue</b>
+            <span id="queue-count"></span>
+          </div>
+          <div class="queue-list" id="queue-list"></div>
+          <p class="queue-note" id="queue-note" hidden></p>
         </section>
 
         <section class="lyrics" id="lyrics" hidden>

@@ -246,6 +246,8 @@ fn main() {
             commands::search_tracks,
             commands::play_result,
             commands::play_queued,
+            commands::play_queue_index,
+            commands::queue_art,
             commands::set_panel,
             commands::context_menu,
             commands::set_skin,

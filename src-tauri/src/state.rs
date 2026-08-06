@@ -12,23 +12,26 @@
 //! second. Tauri's `emit` serialises the payload and then formats *a separate
 //! JS source string per webview* to eval, so a cover riding along on the
 //! position tick was being copied five times a second and parsed twice as
-//! JavaScript — for a number that moved by one. Hence `cover`, `upnext` and
+//! JavaScript — for a number that moved by one. Hence `cover`, `queue` and
 //! `lyrics` are separate events, pushed only when they actually change.
+//!
+//! The queue goes one step further: it carries **text only**. Artwork for its
+//! rows is asked for by id, for the rows a surface is actually showing, and
+//! comes back in a command reply — see `commands::queue_art`.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures_util::future;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
-use crate::api::{Api, ErrorCode, COVER_PX, THUMB_PX};
+use crate::api::{Api, ErrorCode, COVER_PX};
 use crate::lyrics::{self, LyricLine, Lyrics};
-use crate::search::{self, UpNextItem};
-use crate::store::Store;
+use crate::search::{self, QueueView, QUEUE_MAX};
+use crate::store::{CornerButtons, Store};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +103,13 @@ pub struct PlayerState {
     /// earlier. The roll is driven in the renderer, so — like `tint` — the
     /// setting has to reach it as state rather than staying in the store.
     pub lyrics_offset: f64,
+    /// Which top-right toggles to draw. Three booleans on a payload this size
+    /// is nothing, and the alternative — the renderer asking — would leave the
+    /// buttons a frame behind the menu that turned them off.
+    pub corners: CornerButtons,
+    /// Seconds of stillness before they fade; 0 keeps them up. Driven in the
+    /// renderer, so — like `tint` — it travels as state.
+    pub corners_autohide: f64,
     pub song: Option<Song>,
     pub is_playing: bool,
     pub position: f64,
@@ -110,7 +120,14 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(skin: String, panel_skin: String, tint: f64, lyrics_offset: f64) -> Self {
+    fn new(
+        skin: String,
+        panel_skin: String,
+        tint: f64,
+        lyrics_offset: f64,
+        corners: CornerButtons,
+        corners_autohide: f64,
+    ) -> Self {
         Self {
             status: "connecting".into(),
             status_message: String::new(),
@@ -118,6 +135,8 @@ impl PlayerState {
             panel_skin,
             tint,
             lyrics_offset,
+            corners,
+            corners_autohide,
             song: None,
             is_playing: false,
             position: 0.0,
@@ -184,7 +203,7 @@ pub struct Bootstrap {
     pub state: PlayerState,
     /// Artwork as a `data:` URL — see `api::fetch_cover`.
     pub cover: Option<Arc<str>>,
-    pub upnext: Arc<[UpNextItem]>,
+    pub queue: QueueView,
     pub lyrics: LyricsView,
     /// The panel the widget was last left showing, for the renderer to reopen.
     pub panel: Option<String>,
@@ -282,7 +301,7 @@ pub struct Core {
     /// The three heavy channels. Separate locks as well as separate events:
     /// resolving artwork must not block a position tick behind it.
     cover: Mutex<Option<Arc<str>>>,
-    upnext: Mutex<Arc<[UpNextItem]>>,
+    queue: Mutex<QueueView>,
     /// What the renderers are showing, script conversion already applied.
     lyrics: Mutex<LyricsView>,
     /// The same words as they were fetched. Kept because the conversion is
@@ -294,8 +313,11 @@ pub struct Core {
     /// Window labels with a lyrics panel open. No point reaching out to the
     /// network for a panel nobody is looking at.
     lyrics_wanted_by: Mutex<HashSet<String>>,
+    /// The same, for the queue panel. The skin half of "is anyone looking" is
+    /// answered from the store instead — see `queue_wanted`.
+    queue_wanted_by: Mutex<HashSet<String>>,
     cover_token: AtomicU64,
-    upnext_token: AtomicU64,
+    queue_token: AtomicU64,
     lyrics_token: AtomicU64,
 }
 
@@ -307,19 +329,32 @@ impl Core {
         // wider nudge typed in by hand is honoured — just not one that would
         // park the roll a whole verse away from the music.
         let lyrics_offset = store.get(|s| s.lyrics_offset.clamp(-10.0, 10.0));
+        let corners = store.get(|s| s.corners);
+        // Hand-editable file, so clamp rather than trust.
+        let corners_autohide = store.get(|s| s.corners_autohide.clamp(0.0, 60.0));
+        let queue_wanted_by = match store.get(|s| s.panel.clone()).as_deref() {
+            Some("queue") => HashSet::from([crate::window::WIDGET.to_string()]),
+            _ => HashSet::new(),
+        };
         Self {
             app,
             store,
             api,
-            player: Mutex::new(PlayerState::new(skin, panel_skin, tint, lyrics_offset)),
+            player: Mutex::new(PlayerState::new(skin, panel_skin, tint, lyrics_offset, corners, corners_autohide)),
             cover: Mutex::new(None),
-            upnext: Mutex::new(Arc::from([])),
+            queue: Mutex::new(QueueView::empty()),
             lyrics: Mutex::new(LyricsView::idle()),
             lyrics_source: Mutex::new(LyricsView::idle()),
             volume: Mutex::new(VolumeCalibration::default()),
             lyrics_wanted_by: Mutex::new(HashSet::new()),
+            // `window::create` restores the stored panel before the window is
+            // ever on screen, so the widget can come up with a queue panel open
+            // and ask for its state before the renderer has told us it is open.
+            // Seeding from the same store entry is what stops that first paint
+            // being an empty list corrected a round trip later.
+            queue_wanted_by: Mutex::new(queue_wanted_by),
             cover_token: AtomicU64::new(0),
-            upnext_token: AtomicU64::new(0),
+            queue_token: AtomicU64::new(0),
             lyrics_token: AtomicU64::new(0),
         }
     }
@@ -333,7 +368,7 @@ impl Core {
         Bootstrap {
             state: self.snapshot(),
             cover: self.cover.lock().expect("cover lock").clone(),
-            upnext: Arc::clone(&self.upnext.lock().expect("upnext lock")),
+            queue: self.queue.lock().expect("queue lock").clone(),
             lyrics: self.lyrics.lock().expect("lyrics lock").clone(),
             panel: self.store.get(|s| s.panel.clone()),
         }
@@ -374,15 +409,28 @@ impl Core {
         let _ = self.app.emit("cover", &cover);
     }
 
-    fn set_upnext(&self, items: Arc<[UpNextItem]>) {
+    fn set_queue(&self, view: QueueView) {
         {
-            let mut held = self.upnext.lock().expect("upnext lock");
-            if *held == items {
+            let mut held = self.queue.lock().expect("queue lock");
+            if *held == view {
                 return;
             }
-            *held = Arc::clone(&items);
+            *held = view.clone();
         }
-        let _ = self.app.emit("upnext", &items);
+        let _ = self.app.emit("queue", &view);
+    }
+
+    /// The artwork source URL a row was parsed with, for `queue_art` to resolve.
+    /// Looked up by video id rather than by index so a request that crosses a
+    /// queue change is applied to the right track or to none.
+    pub fn queue_art_src(&self, video_id: &str) -> Option<Arc<str>> {
+        self.queue
+            .lock()
+            .expect("queue lock")
+            .items
+            .iter()
+            .find(|track| track.video_id == video_id)
+            .and_then(|track| track.art.clone())
     }
 
     fn set_lyrics(&self, view: LyricsView) {
@@ -460,47 +508,58 @@ impl Core {
 
         let core = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            core.refresh_upnext().await;
+            core.refresh_queue().await;
             core.refresh_lyrics().await;
         });
     }
 
-    /// "Next tracks" for the stack skin. Only fetched when that skin is showing
-    /// on *either* surface — it is an extra request plus artwork on every track
-    /// change.
-    pub async fn refresh_upnext(self: &Arc<Self>) {
-        let wanted = crate::window::skin_of(&self.store) == "stack"
-            || crate::window::panel_skin_of(&self.store) == "stack";
-        if !wanted {
-            self.set_upnext(Arc::from([]));
+    /// Whether any surface is looking at the queue — a skin whose layout draws
+    /// it, or a queue panel open on that surface. The same bargain as the
+    /// lyrics: a request on every track change is not work to do for nobody.
+    ///
+    /// The skin half is answered from the store, because a skin is a property of
+    /// the surface rather than something the renderer has to report.
+    fn queue_wanted(&self) -> bool {
+        if crate::window::skin_shows_queue(&crate::window::skin_of(&self.store))
+            || crate::window::skin_shows_queue(&crate::window::panel_skin_of(&self.store))
+        {
+            return true;
+        }
+        !self.queue_wanted_by.lock().expect("queue lock").is_empty()
+    }
+
+    pub fn set_queue_wanted(&self, label: &str, wanted: bool) {
+        let mut open = self.queue_wanted_by.lock().expect("queue lock");
+        if wanted {
+            open.insert(label.to_string());
+        } else {
+            open.remove(label);
+        }
+    }
+
+    /// The whole queue, for the queue panel and Stack's "Next tracks" strip
+    /// alike — one fetch, one channel, two readers.
+    ///
+    /// No artwork is resolved here. That is the difference from the four-item
+    /// version this replaced: a full queue's worth of `data:` URLs would be
+    /// megabytes on an event, and the two surfaces want different sizes anyway.
+    pub async fn refresh_queue(self: &Arc<Self>) {
+        if !self.queue_wanted() {
+            self.set_queue(QueueView::empty());
             return;
         }
 
-        let token = self.upnext_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = self.queue_token.fetch_add(1, Ordering::SeqCst) + 1;
         let Ok(Some(queue)) = self.api.queue().await else {
             return;
         };
-        if token != self.upnext_token.load(Ordering::SeqCst) {
+        // One await inside the guarded region, so one check: if a newer refresh
+        // started while this response was in flight, its result is the truth.
+        if token != self.queue_token.load(Ordering::SeqCst) {
             return;
         }
 
-        // Four independent fetches against the same keep-alive connection:
-        // waiting for each in turn made the queue take four round trips to
-        // appear when it only ever needed one.
-        let resolved = future::join_all(search::parse_queue_upcoming(&queue, 4).into_iter().map(
-            |item| async move {
-                UpNextItem {
-                    thumbnail: self.api.fetch_cover(item.thumbnail.as_deref(), THUMB_PX).await,
-                    ..item
-                }
-            },
-        ))
-        .await;
-        if token != self.upnext_token.load(Ordering::SeqCst) {
-            return;
-        }
-
-        self.set_upnext(Arc::from(resolved));
+        self.set_queue(search::parse_queue(Some(&queue), QUEUE_MAX));
     }
 
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
@@ -572,7 +631,7 @@ impl Core {
         // "Next tracks" empty until the song ended.
         {
             let core = Arc::clone(self);
-            tauri::async_runtime::spawn(async move { core.refresh_upnext().await });
+            tauri::async_runtime::spawn(async move { core.refresh_queue().await });
         }
 
         let shuffle = shuffle
@@ -629,7 +688,7 @@ impl Core {
         } else if status != "connecting" {
             // Drop the queue too: it belongs to a player we can no longer see.
             self.update(|state| state.is_playing = false);
-            self.set_upnext(Arc::from([]));
+            self.set_queue(QueueView::empty());
         }
 
         crate::tray::refresh(&self.app);

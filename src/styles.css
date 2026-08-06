@@ -283,12 +283,15 @@ body.panel .resize-edges {
 
 /* --------------------------------------------------------------- titles */
 
+/* The gutter clears however many corner buttons are actually showing —
+   `--corner-count` is written on <body> by renderStatus. Turning them off gives
+   the title the column back, which is most of the point on the smallest skin. */
 .titles {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  padding-right: 46px; /* clears both corner buttons */
+  padding-right: calc(var(--corner-count, 3) * 22px + 2px);
 }
 
 .marquee {
@@ -593,7 +596,7 @@ body.panel .resize-edges {
 
 /* --------------------------------------------------------------- lyrics */
 
-/* Height must match PANEL_HEIGHT.lyrics in src/main/window.js. */
+/* Height must match `panel_height` in src-tauri/src/window.rs. */
 .lyrics {
   position: relative;
   flex: 0 0 240px;
@@ -792,6 +795,33 @@ body.skin-stack .lyric.active {
   display: none;
 }
 
+/* Faded out after a spell of stillness, when the Corner buttons submenu asks
+   for it. `pointer-events: none` so a hidden button cannot be clicked blind —
+   moving the mouse brings them back first. Never while a panel is open: the lit
+   button is the only way to close one.
+
+   **No transition here, deliberately.** `document.hidden` is true for this
+   webview — the widget is a non-activating panel that never becomes key — and
+   WebKit does not advance CSS transitions in a hidden document. An opacity
+   transition stays pinned at its start value, so the buttons simply never
+   faded. Note `.corner` carries an opacity transition of its own, which is why
+   the fade is applied to the bar rather than to each button. */
+.corner-bar.idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* A second way back, needing no JavaScript event at all. The renderer wakes the
+   bar on move, hover, wheel and press, but pointer *position* is the one signal
+   a background window cannot rely on — AppKit sends `mouseMoved` to the key
+   window alone, and this one is meant never to take focus. Where hover does
+   reach the page this reveals the bar on its own; where it does not, a click or
+   the wheel still brings it back. */
+.card:hover .corner-bar.idle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* The corner buttons stay visible while a panel is open: lit, and clicking
    again closes it. The lyrics panel has no close control of its own. */
 .corner.on {
@@ -799,8 +829,8 @@ body.skin-stack .lyric.active {
   background: var(--hover);
 }
 
-/* Height must match SEARCH_PANEL_CSS in src/main/window.js and panel.js — the
-   window grows by exactly this much. */
+/* Height must match `panel_height` in src-tauri/src/window.rs — the window
+   grows by exactly this much. */
 .search {
   position: relative;
   flex: 0 0 216px;
@@ -933,6 +963,187 @@ body.skin-stack .lyric.active {
   display: none;
 }
 
+/* ---------------------------------------------------------------- queue */
+
+/* The third panel in the same slot as search and lyrics. Height must match
+   `panel_height` in src-tauri/src/window.rs — the window grows by exactly this
+   much. `position: relative` for the same reason `.upnext` needs it: `.ambient`
+   and `.scrim` are absolutely positioned siblings that would paint over it. */
+.queue {
+  position: relative;
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--well);
+}
+
+.queue[hidden] {
+  display: none;
+}
+
+.queue-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  padding: 9px 14px 5px;
+}
+
+.queue-head b {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.queue-head span {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 8px 8px;
+  scrollbar-width: thin;
+}
+
+.queue-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.queue-list::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: var(--rail);
+}
+
+/* Same metrics as a search result: the two lists sit one panel apart and should
+   not disagree about how dense a track row is. */
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.queue-item:hover {
+  background: var(--hover);
+}
+
+/* Everything above the playing track is history — still reachable, but it must
+   not compete with what is coming. */
+.queue-item.past {
+  opacity: 0.42;
+}
+
+.queue-item.now {
+  background: var(--hover);
+}
+
+.queue-item.now .queue-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.queue-item img {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--hover);
+}
+
+.queue-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.queue-name,
+.queue-artist {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.queue-artist {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  line-height: 1.35;
+}
+
+.queue-dur {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Three bars for the row that is playing, in place of its duration. */
+.queue-eq {
+  display: flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 11px;
+  flex: 0 0 auto;
+}
+
+.queue-eq i {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: queue-bounce 900ms ease-in-out infinite alternate;
+}
+
+.queue-eq i:nth-child(2) {
+  animation-duration: 620ms;
+}
+
+.queue-eq i:nth-child(3) {
+  animation-duration: 1080ms;
+}
+
+@keyframes queue-bounce {
+  from {
+    height: 3px;
+  }
+  to {
+    height: 11px;
+  }
+}
+
+.queue-note {
+  flex: 0 0 auto;
+  padding: 10px 6px 2px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+.queue-note[hidden] {
+  display: none;
+}
+
 /* ----------------------------------------------------------- menu-bar panel */
 
 /* The dropdown is anchored to the tray icon, so it is never draggable — the
@@ -965,7 +1176,7 @@ body.skin-stack .meta {
 }
 
 body.skin-stack .titles {
-  padding-right: 44px; /* clears both corner buttons */
+  padding-right: calc(var(--corner-count, 3) * 21px + 2px);
   gap: 1px;
 }
 
@@ -1038,6 +1249,17 @@ body.skin-stack .upnext:not([hidden]) {
   display: none;
 }
 
+/* The strip runs the whole queue, so the padding lives on the scroller rather
+   than the section — otherwise the first and last cards sit against a hard edge
+   while everything between them scrolls under it. */
+.upnext {
+  padding: 10px 0 14px;
+}
+
+.upnext-title {
+  padding-left: 14px;
+}
+
 .upnext-title {
   font-size: 11px;
   font-weight: 600;
@@ -1045,13 +1267,49 @@ body.skin-stack .upnext:not([hidden]) {
   padding-bottom: 8px;
 }
 
+/* Two rows that flow into columns and scroll sideways: same density as the old
+   fixed 2×2, but the whole queue is reachable rather than the next four. Column
+   flow is what makes scrolling right mean "later" — with row flow the second
+   card would be the third track. */
 .upnext-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-auto-rows: 40px;
+  grid-template-rows: 40px 40px;
+  grid-auto-flow: column;
+  grid-auto-columns: calc(50% - 11px);
   align-content: start;
+  /* Positioned so a card's `offsetLeft` is measured against the strip, which is
+     what parks the playing track at the left edge. */
+  position: relative;
   gap: 8px;
   min-height: 0;
+  padding: 0 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.upnext-grid::-webkit-scrollbar {
+  display: none;
+}
+
+.upnext-item {
+  scroll-snap-align: start;
+}
+
+/* Already played. Still there to scroll back to, but it should never compete
+   with what is coming. */
+.upnext-item.past {
+  opacity: 0.42;
+}
+
+.upnext-item.now {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+.upnext-item.now .upnext-name {
+  color: var(--accent);
 }
 
 .upnext-item {
@@ -1131,8 +1389,9 @@ body.skin-classic .corner {
   height: 18px;
 }
 
+/* 18px buttons in this skin, so a narrower step. */
 body.skin-classic .titles {
-  padding-right: 42px;
+  padding-right: calc(var(--corner-count, 3) * 20px + 2px);
 }
 
 body.skin-classic .search {
@@ -1340,3 +1599,4 @@ body.skin-classic .setup p {
 .pill[hidden] {
   display: none;
 }
+

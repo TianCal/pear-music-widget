@@ -1,0 +1,1083 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PROTOTYPE — full queue</title>
+
+    <!--
+      THROWAWAY PROTOTYPE. Not shipped, not loaded by the app, no tests.
+
+      Plan: three variants of a "show me the whole playlist" surface, switchable
+      via `?variant=`, drawn inside the real card at the stack skin's width.
+
+      Why a standalone page rather than the real window: the backend caps the
+      queue at four items (`parse_queue_upcoming(&queue, 4)` in state.rs) and
+      only fetches it for the stack skin, so the real app cannot show a full
+      queue without production changes — which is the thing this prototype is
+      supposed to justify. So the card, the stylesheet and the palette are the
+      real ones; only the queue is fabricated and nothing mutates anything.
+
+      Outcome: variant A shipped as the queue panel, variant C as the Filmstrip
+      skin. Kept out of `src/` because `frontendDist` points there and
+      `generate_context!` embeds the whole directory — a prototype left in it
+      ships inside the binary.
+
+      Run it:  open docs/queue-prototype.html
+    -->
+
+    <link rel="stylesheet" href="../src/styles.css" />
+    <style>
+      /* ------------------------------------------------- prototype shell */
+
+      body {
+        display: grid;
+        place-items: center;
+        /* Something for the translucent card to sit on, standing in for the
+           macOS vibrancy layer and a desktop behind it. */
+        background:
+          radial-gradient(80% 70% at 20% 10%, #3a3350, transparent 70%),
+          radial-gradient(70% 70% at 90% 80%, #16323c, transparent 70%),
+          #14141a;
+      }
+
+      @media (prefers-color-scheme: light) {
+        body {
+          background:
+            radial-gradient(80% 70% at 20% 10%, #e9e2f6, transparent 70%),
+            radial-gradient(70% 70% at 90% 80%, #dbeef2, transparent 70%),
+            #eceaf0;
+        }
+      }
+
+      /* The window. Each variant declares its own height — that height is the
+         thing being judged as much as the layout is, since the widget grows the
+         real window by exactly the panel's flex-basis. */
+      .frame {
+        width: 330px;
+        height: var(--pt-height, 370px);
+        margin-bottom: 84px;
+        filter: drop-shadow(0 22px 46px rgba(0, 0, 0, 0.45));
+        transition: height 0.22s ease;
+      }
+
+      /* -------------------------------------------------- switcher bar */
+
+      .pt-bar {
+        position: fixed;
+        left: 50%;
+        bottom: 18px;
+        transform: translateX(-50%);
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .pt-pill {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px;
+        border-radius: 99px;
+        background: #0b0b10;
+        color: #fff;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+      }
+
+      .pt-pill button {
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      .pt-pill button:hover {
+        background: rgba(255, 255, 255, 0.22);
+      }
+
+      .pt-label {
+        min-width: 200px;
+        padding: 0 10px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
+      .pt-readout {
+        padding: 3px 10px;
+        border-radius: 99px;
+        background: rgba(0, 0, 0, 0.6);
+        color: rgba(255, 255, 255, 0.72);
+        font: 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        max-width: min(90vw, 640px);
+        text-align: center;
+      }
+
+      /* Shared by every variant: a queue row's artwork, text and states. */
+      .pt-art {
+        flex: 0 0 auto;
+        border-radius: 5px;
+        object-fit: cover;
+        background: var(--hover);
+      }
+
+      .pt-text {
+        min-width: 0;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .pt-name,
+      .pt-sub {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: left;
+      }
+
+      .pt-name {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--fg);
+        line-height: 1.35;
+      }
+
+      .pt-sub {
+        font-size: 10.5px;
+        color: var(--fg-dim);
+        line-height: 1.35;
+      }
+
+      .pt-dur {
+        flex: 0 0 auto;
+        font-size: 10px;
+        color: var(--fg-faint);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Three bars, for the row that is playing. */
+      .pt-eq {
+        display: flex;
+        align-items: flex-end;
+        gap: 1.5px;
+        height: 11px;
+        flex: 0 0 auto;
+      }
+
+      .pt-eq i {
+        width: 2px;
+        border-radius: 1px;
+        background: var(--accent);
+        animation: pt-bounce 900ms ease-in-out infinite alternate;
+      }
+
+      .pt-eq i:nth-child(2) {
+        animation-duration: 620ms;
+      }
+
+      .pt-eq i:nth-child(3) {
+        animation-duration: 1080ms;
+      }
+
+      @keyframes pt-bounce {
+        from {
+          height: 3px;
+        }
+        to {
+          height: 11px;
+        }
+      }
+
+      /* Positioned, so `offsetTop` on a row is measured against the list rather
+         than against the card — otherwise centring the playing track
+         over-scrolls by the height of everything above the list. */
+      .pt-scroll,
+      .pt-c-strip {
+        position: relative;
+      }
+
+      .pt-scroll {
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+      }
+
+      .pt-scroll::-webkit-scrollbar {
+        width: 5px;
+      }
+
+      .pt-scroll::-webkit-scrollbar-thumb {
+        border-radius: 99px;
+        background: var(--rail);
+      }
+
+      /* ============================================ A — panel under player */
+
+      /* Fixed basis, like `.lyrics` and `.search`: the player keeps the card's
+         natural height and this is exactly what the window grew by. */
+      .pt-a {
+        /* Positioned for the same reason `.player`, `.search` and `.lyrics` are:
+           `.ambient` and `.scrim` are absolute, so anything left in normal flow
+           paints underneath them and comes out washed. */
+        position: relative;
+        flex: 0 0 260px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: var(--well);
+      }
+
+      .pt-a-head {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 9px 14px 5px;
+      }
+
+      .pt-a-head b {
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--fg-dim);
+      }
+
+      .pt-a-head span {
+        margin-left: auto;
+        font-size: 10px;
+        color: var(--fg-faint);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .pt-a-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 0 8px 8px;
+      }
+
+      .pt-a-row {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 5px 6px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+        transition: background 0.12s ease;
+      }
+
+      .pt-a-row:hover {
+        background: var(--hover);
+      }
+
+      .pt-a-row .pt-art {
+        width: 30px;
+        height: 30px;
+      }
+
+      /* Everything above the playing track is history — still reachable, but it
+         should never compete with what is coming. */
+      .pt-a-row.past {
+        opacity: 0.42;
+      }
+
+      .pt-a-row.now {
+        background: var(--hover);
+      }
+
+      .pt-a-row.now .pt-name {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      /* ================================================= B — list takeover */
+
+      .pt-b {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+
+      /* The playhead, as a hairline across the top of the whole card. */
+      .pt-b-prog {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 2px;
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent-soft);
+        z-index: 5;
+      }
+
+      .pt-b-head {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 12px 8px 14px;
+      }
+
+      .pt-b-head b {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--fg);
+      }
+
+      .pt-b-head span {
+        font-size: 10.5px;
+        color: var(--fg-faint);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .pt-b-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 0 8px 10px;
+      }
+
+      .pt-b-fold {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 4px 8px 6px;
+        border: 0;
+        background: transparent;
+        color: var(--fg-faint);
+        font: inherit;
+        font-size: 10.5px;
+        cursor: pointer;
+      }
+
+      .pt-b-fold::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: var(--hairline);
+      }
+
+      .pt-b-fold:hover {
+        color: var(--fg-dim);
+      }
+
+      .pt-b-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 5px 6px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .pt-b-row:hover {
+        background: var(--hover);
+      }
+
+      .pt-b-row.past {
+        opacity: 0.42;
+      }
+
+      .pt-b-row .pt-art {
+        width: 28px;
+        height: 28px;
+      }
+
+      .pt-b-num {
+        flex: 0 0 15px;
+        font-size: 10px;
+        color: var(--fg-faint);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      /* The transport is not a bar at the bottom of the card — it is the row of
+         the track that happens to be playing. */
+      .pt-b-now {
+        display: flex;
+        gap: 10px;
+        margin: 3px 0 5px;
+        padding: 9px;
+        border-radius: 11px;
+        background: var(--well-item);
+        box-shadow: inset 0 0 0 0.5px var(--hairline);
+      }
+
+      .pt-b-now img {
+        width: 54px;
+        height: 54px;
+        border-radius: 8px;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+
+      .pt-b-side {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 5px;
+      }
+
+      .pt-b-now .pt-name {
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .pt-b-transport {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        margin-left: -4px;
+      }
+
+      .pt-b-time {
+        margin-left: auto;
+        font-size: 9.5px;
+        color: var(--fg-faint);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* =================================================== C — filmstrip */
+
+      .pt-c {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 10px 0;
+      }
+
+      /* Tall enough for the focused cover's 1.5× scale: a transform does not
+         reserve layout, and `overflow-x: auto` clips vertically too. */
+      .pt-c-strip {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        height: 96px;
+        gap: 12px;
+        /* Half the card either side, so the first and last cover can still
+           reach the middle. */
+        padding: 0 137px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-x: contain;
+        scroll-snap-type: x mandatory;
+        scrollbar-width: none;
+      }
+
+      .pt-c-strip::-webkit-scrollbar {
+        display: none;
+      }
+
+      .pt-c-cover {
+        flex: 0 0 auto;
+        width: 56px;
+        height: 56px;
+        padding: 0;
+        border: 0;
+        border-radius: 9px;
+        overflow: hidden;
+        background: transparent;
+        scroll-snap-align: center;
+        cursor: pointer;
+        opacity: 0.5;
+        transform: scale(1);
+        transition: opacity 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      .pt-c-cover img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .pt-c-cover.focus {
+        opacity: 1;
+        transform: scale(1.5);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+      }
+
+      /* The one that is playing keeps a mark even when you have browsed away. */
+      .pt-c-cover.now::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        box-shadow: inset 0 0 0 2px var(--accent);
+        border-radius: 9px;
+      }
+
+      .pt-c-cover.now {
+        position: relative;
+        opacity: 1;
+      }
+
+      .pt-c-meta {
+        flex: 0 0 auto;
+        margin-top: 8px;
+        padding: 0 16px;
+        text-align: center;
+      }
+
+      .pt-c-meta .pt-name,
+      .pt-c-meta .pt-sub {
+        text-align: center;
+      }
+
+      .pt-c-meta .pt-name {
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+
+      .pt-c-act {
+        flex: 0 0 auto;
+        display: flex;
+        justify-content: center;
+        margin-top: 7px;
+        min-height: 22px;
+      }
+
+      .pt-c-act button {
+        padding: 3px 11px;
+        border: 0;
+        border-radius: 99px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-size: 10.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .pt-c-act .pt-c-here {
+        background: transparent;
+        color: var(--fg-faint);
+        font-weight: 500;
+        cursor: default;
+      }
+
+      /* Where you are in the queue, at a glance: one tick per track. */
+      .pt-c-ticks {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        margin-top: auto;
+        padding: 8px 16px 0;
+      }
+
+      .pt-c-ticks i {
+        width: 3px;
+        height: 3px;
+        border-radius: 99px;
+        background: var(--rail);
+        transition: height 0.18s ease, background 0.18s ease;
+      }
+
+      .pt-c-ticks i.past {
+        background: var(--fg-faint);
+      }
+
+      .pt-c-ticks i.now {
+        height: 10px;
+        background: var(--accent);
+      }
+
+      .pt-c-ticks i.focus {
+        height: 7px;
+        background: var(--fg);
+      }
+
+      .pt-c-transport {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding-top: 4px;
+      }
+    </style>
+  </head>
+
+  <body class="skin-classic">
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5Z"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.9" y="4.6" width="4.2" height="14.8" rx="1.5"/><rect x="12.9" y="4.6" width="4.2" height="14.8" rx="1.5"/></symbol>
+        <symbol id="i-prev" viewBox="0 0 24 24"><path d="M7 5.5a1 1 0 0 1 2 0v4.9l8.4-5.3A1 1 0 0 1 19 6v12a1 1 0 0 1-1.6.8L9 13.6v4.9a1 1 0 0 1-2 0Z"/></symbol>
+        <symbol id="i-next" viewBox="0 0 24 24"><path d="M17 5.5a1 1 0 0 0-2 0v4.9L6.6 5.1A1 1 0 0 0 5 6v12a1 1 0 0 0 1.6.8L15 13.6v4.9a1 1 0 0 0 2 0Z"/></symbol>
+        <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3s-7.9-4.6-7.9-9.9A4.6 4.6 0 0 1 12 7.4a4.6 4.6 0 0 1 7.9 3c0 5.3-7.9 9.9-7.9 9.9Z"/></symbol>
+        <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11.4 4.2a1 1 0 0 1 1.6.8v14a1 1 0 0 1-1.6.8L6.8 16H4.5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4.5 8h2.3ZM16 8.8a1 1 0 0 1 1.4.2 5 5 0 0 1 0 6 1 1 0 1 1-1.6-1.2 3 3 0 0 0 0-3.6 1 1 0 0 1 .2-1.4Z"/></symbol>
+        <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 6.5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14.3-9.2a1 1 0 0 1 1.7.7v8a1 1 0 0 1-.6.9l-2.5 1.1a1.6 1.6 0 1 1-.8-1.8l1.9-.8V9.9l-2 .6a1 1 0 0 1-.6-1.9Z"/></symbol>
+        <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5a1 1 0 0 0-.7 1.7l5.3 5.3-5.3 5.3a1 1 0 1 0 1.4 1.4l5.3-5.3 5.3 5.3a1 1 0 0 0 1.4-1.4L13.8 12l5.3-5.3a1 1 0 0 0-1.4-1.4L12.4 10.6 7.1 5.3A1 1 0 0 0 6.4 5Z"/></symbol>
+      </defs>
+    </svg>
+
+    <div class="frame" id="frame">
+      <div class="card has-art" id="card">
+        <div class="ambient"></div>
+        <div class="scrim"></div>
+        <div class="corner-bar">
+          <button class="corner on" title="Queue"><svg><use href="#i-list" /></svg></button>
+        </div>
+        <div id="mount" style="display: contents"></div>
+      </div>
+    </div>
+
+    <div class="pt-bar">
+      <div class="pt-pill">
+        <button id="pt-prev" title="Previous variant (←)">‹</button>
+        <div class="pt-label" id="pt-label"></div>
+        <button id="pt-next" title="Next variant (→)">›</button>
+      </div>
+      <div class="pt-readout" id="pt-readout"></div>
+    </div>
+
+    <script src="palette.js"></script>
+    <script>
+      'use strict';
+
+      // ------------------------------------------------------- fake queue
+
+      const TRACKS = [
+        ['Ceremony', 'New Order', 264],
+        ['Blue Monday', 'New Order', 448],
+        ['A Forest', 'The Cure', 355],
+        ['海阔天空', 'Beyond', 326],
+        ['Teardrop', 'Massive Attack', 331],
+        ['This Must Be the Place (Naive Melody)', 'Talking Heads', 296],
+        ['Age of Consent', 'New Order', 305],
+        ['Boys Don’t Cry', 'The Cure', 155],
+        ['Nightcall', 'Kavinsky', 258],
+        ['光辉岁月', 'Beyond', 314],
+        ['Untrue', 'Burial', 288],
+        ['Digital Bath', 'Deftones', 264],
+        ['夜空中最亮的星', '逃跑计划', 252],
+        ['Fade Into You', 'Mazzy Star', 294],
+        ['Space Song', 'Beach House', 319],
+        ['Only Shallow', 'My Bloody Valentine', 249],
+        ['Svefn-g-englar', 'Sigur Rós', 602],
+        ['浮夸', '陈奕迅', 282],
+        ['Redbone', 'Childish Gambino', 326],
+        ['An Ending (Ascent)', 'Brian Eno', 265],
+        ['Weird Fishes / Arpeggi', 'Radiohead', 318],
+        ['Motion Picture Soundtrack', 'Radiohead', 210],
+        ['Avril 14th', 'Aphex Twin', 125],
+      ].map(([title, artist, duration], i) => ({
+        videoId: `q${String(i).padStart(2, '0')}`,
+        title,
+        artist,
+        duration,
+      }));
+
+      /** Covers, drawn rather than fetched: the renderer's CSP allows no network,
+       *  and palette.js needs an untainted canvas to sample. */
+      const cover = (seed) => {
+        const c = document.createElement('canvas');
+        c.width = c.height = 120;
+        const g = c.getContext('2d');
+        const hue = (seed * 47) % 360;
+        const grad = g.createLinearGradient(0, 0, 120, 120);
+        grad.addColorStop(0, `hsl(${hue} 68% 58%)`);
+        grad.addColorStop(1, `hsl(${(hue + 58) % 360} 62% 32%)`);
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 120, 120);
+        g.fillStyle = `hsl(${(hue + 180) % 360} 70% ${seed % 2 ? 78 : 22}%)`;
+        g.beginPath();
+        g.arc(seed % 3 ? 34 : 92, seed % 5 ? 88 : 30, 30 + (seed % 4) * 7, 0, Math.PI * 2);
+        g.fill();
+        return c.toDataURL();
+      };
+
+      TRACKS.forEach((track, i) => {
+        track.thumbnail = cover(i + 1);
+      });
+
+      // ------------------------------------------------------------ state
+
+      const state = {
+        queue: TRACKS,
+        playing: 6, // 7th of 23 — enough history above to be a real problem
+        focus: 6, // filmstrip only: what you are browsing, vs what is playing
+        position: 78,
+        isPlaying: true,
+        foldPlayed: true,
+        lastAction: '—',
+      };
+
+      const VARIANTS = [
+        { key: 'A', name: 'Panel under player', height: 370 },
+        { key: 'B', name: 'List takeover', height: 380 },
+        { key: 'C', name: 'Cover filmstrip', height: 228 },
+      ];
+
+      const el = {
+        frame: document.getElementById('frame'),
+        card: document.getElementById('card'),
+        mount: document.getElementById('mount'),
+        label: document.getElementById('pt-label'),
+        readout: document.getElementById('pt-readout'),
+      };
+
+      const current = () => state.queue[state.playing];
+      const time = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+      let variant =
+        (new URLSearchParams(location.search).get('variant') || 'A').toUpperCase();
+      if (!VARIANTS.some((v) => v.key === variant)) variant = 'A';
+
+      // Read-only prototype: a row click moves the local playhead and says what
+      // the real call would have been. Nothing is wired to a mutation.
+      const stub = (call) => {
+        state.lastAction = call;
+      };
+
+      // --------------------------------------------------------- fragments
+
+      const icon = (name) => `<svg><use href="#i-${name}" /></svg>`;
+      const eq = '<span class="pt-eq"><i></i><i></i><i></i></span>';
+
+      const rowText = (track) =>
+        `<span class="pt-text"><span class="pt-name">${track.title}</span>` +
+        `<span class="pt-sub">${track.artist}</span></span>`;
+
+      // --------------------------------------------------------- variant A
+
+      /* The existing panel idiom, extended: the player keeps the card's natural
+         height and the queue is the extra the window grew by — exactly how
+         search and lyrics already work, so it costs one more `panel_height`
+         arm and nothing else moves. */
+      const variantA = () => `
+        <main class="player">
+          <div class="art"><img src="${current().thumbnail}" alt="" /></div>
+          <div class="meta">
+            <div class="titles">
+              <div class="marquee"><span class="title">${current().title}</span></div>
+              <div class="marquee"><span class="subtitle">${current().artist}</span></div>
+            </div>
+            <div class="controls">
+              <div class="seek" id="pt-seek">
+                <div class="rail"><div class="fill"></div></div>
+                <div class="knob"></div>
+              </div>
+              <button class="btn">${icon('prev')}</button>
+              <button class="btn play">${icon(state.isPlaying ? 'pause' : 'play')}</button>
+              <button class="btn">${icon('next')}</button>
+              <button class="btn sm">${icon('heart')}</button>
+              <button class="btn sm">${icon('volume')}</button>
+            </div>
+          </div>
+        </main>
+        <section class="pt-a">
+          <div class="pt-a-head">
+            <b>Queue</b>
+            <span>${state.playing + 1} of ${state.queue.length}</span>
+          </div>
+          <div class="pt-a-list pt-scroll" id="pt-list">
+            ${state.queue
+              .map((track, i) => {
+                const cls = i < state.playing ? 'past' : i === state.playing ? 'now' : '';
+                return `<button class="pt-a-row ${cls}" data-index="${i}">
+                  <img class="pt-art" src="${track.thumbnail}" alt="" />
+                  ${rowText(track)}
+                  ${i === state.playing ? eq : `<span class="pt-dur">${time(track.duration)}</span>`}
+                </button>`;
+              })
+              .join('')}
+          </div>
+        </section>`;
+
+      // --------------------------------------------------------- variant B
+
+      /* The opposite bet: the queue *is* the card, and the player is one row
+         inside it. History folds away behind a count, the playhead becomes a
+         hairline across the top, and the transport lives in the now-playing
+         row rather than in a bar of its own. */
+      const variantB = () => {
+        const rows = state.queue
+          .map((track, i) => {
+            if (i === state.playing) {
+              return `<div class="pt-b-now">
+                <img src="${track.thumbnail}" alt="" />
+                <div class="pt-b-side">
+                  <span class="pt-text">
+                    <span class="pt-name">${track.title}</span>
+                    <span class="pt-sub">${track.artist}</span>
+                  </span>
+                  <div class="pt-b-transport">
+                    <button class="btn sm">${icon('prev')}</button>
+                    <button class="btn play">${icon(state.isPlaying ? 'pause' : 'play')}</button>
+                    <button class="btn sm">${icon('next')}</button>
+                    <span class="pt-b-time">${time(state.position)} / ${time(track.duration)}</span>
+                  </div>
+                </div>
+              </div>`;
+            }
+            if (i < state.playing && state.foldPlayed) return '';
+            return `<button class="pt-b-row ${i < state.playing ? 'past' : ''}" data-index="${i}">
+              <span class="pt-b-num">${i + 1}</span>
+              <img class="pt-art" src="${track.thumbnail}" alt="" />
+              ${rowText(track)}
+              <span class="pt-dur">${time(track.duration)}</span>
+            </button>`;
+          })
+          .join('');
+
+        return `
+          <div class="pt-b">
+            <div class="pt-b-prog" id="pt-bprog"></div>
+            <div class="pt-b-head">
+              <b>Up next</b>
+              <span>${state.queue.length - state.playing - 1} tracks left</span>
+            </div>
+            <div class="pt-b-list pt-scroll" id="pt-list">
+              <button class="pt-b-fold" id="pt-fold">
+                ${state.foldPlayed ? `${state.playing} played` : 'Hide played'}
+              </button>
+              ${rows}
+            </div>
+          </div>`;
+      };
+
+      // --------------------------------------------------------- variant C
+
+      /* No list at all. Covers are the index, browsing is decoupled from
+         playing, and the queue's shape is a row of ticks. Reads at a glance
+         and needs the least height — but the titles only exist for whatever
+         you have scrolled onto. */
+      const variantC = () => {
+        const focused = state.queue[state.focus];
+        const isHere = state.focus === state.playing;
+        return `
+          <div class="pt-c">
+            <div class="pt-c-strip" id="pt-strip">
+              ${state.queue
+                .map(
+                  (track, i) => `<button class="pt-c-cover ${
+                    i === state.focus ? 'focus' : ''
+                  } ${i === state.playing ? 'now' : ''}" data-index="${i}">
+                    <img src="${track.thumbnail}" alt="" />
+                  </button>`,
+                )
+                .join('')}
+            </div>
+            <div class="pt-c-meta">
+              <span class="pt-name">${focused.title}</span>
+              <span class="pt-sub">${focused.artist} · ${time(focused.duration)}</span>
+            </div>
+            <div class="pt-c-act">
+              ${
+                isHere
+                  ? '<button class="pt-c-here" disabled>Playing now</button>'
+                  : `<button data-jump="${state.focus}">Jump to ${state.focus + 1} of ${state.queue.length}</button>`
+              }
+            </div>
+            <div class="pt-c-ticks">
+              ${state.queue
+                .map(
+                  (_, i) =>
+                    `<i class="${i < state.playing ? 'past' : ''} ${
+                      i === state.playing ? 'now' : ''
+                    } ${i === state.focus && i !== state.playing ? 'focus' : ''}"></i>`,
+                )
+                .join('')}
+            </div>
+            <div class="pt-c-transport">
+              <button class="btn sm">${icon('prev')}</button>
+              <button class="btn play">${icon(state.isPlaying ? 'pause' : 'play')}</button>
+              <button class="btn sm">${icon('next')}</button>
+            </div>
+          </div>`;
+      };
+
+      const RENDER = { A: variantA, B: variantB, C: variantC };
+
+      // ----------------------------------------------------------- render
+
+      let seekRail = 0;
+
+      const readout = () => {
+        const meta = VARIANTS.find((v) => v.key === variant);
+        el.readout.textContent =
+          `variant=${variant} · window 330×${meta.height} · queue ${state.queue.length}` +
+          ` · playing ${state.playing + 1} · focus ${state.focus + 1}` +
+          ` · at ${time(state.position)} · last: ${state.lastAction}`;
+      };
+
+      const render = () => {
+        const meta = VARIANTS.find((v) => v.key === variant);
+        el.frame.style.setProperty('--pt-height', `${meta.height}px`);
+        el.label.textContent = `${meta.key} — ${meta.name}`;
+        el.mount.innerHTML = RENDER[variant]();
+
+        // Bring the playing track into view, which is the whole point of the
+        // surface and the first thing that looks wrong if it is missed.
+        const list = document.getElementById('pt-list');
+        const now = list?.querySelector('.pt-a-row.now, .pt-b-now');
+        if (now) list.scrollTop = now.offsetTop - list.clientHeight / 2 + now.offsetHeight / 2;
+
+        const strip = document.getElementById('pt-strip');
+        if (strip) {
+          const focus = strip.children[state.focus];
+          strip.scrollLeft = focus.offsetLeft - strip.clientWidth / 2 + focus.offsetWidth / 2;
+        }
+
+        seekRail = document.querySelector('#pt-seek .rail')?.clientWidth || 0;
+        paint();
+        readout();
+      };
+
+      /** Per-frame writes only: the playhead, in whatever form this variant
+       *  gives it. Everything else is rebuilt by `render`. */
+      const paint = () => {
+        const ratio = Math.min(1, state.position / current().duration);
+        const seek = document.getElementById('pt-seek');
+        if (seek) seek.style.setProperty('--seek-x', `${(ratio * seekRail).toFixed(1)}px`);
+        const bar = document.getElementById('pt-bprog');
+        if (bar) bar.style.width = `${(ratio * 100).toFixed(2)}%`;
+      };
+
+      // ---------------------------------------------------------- actions
+
+      el.mount.addEventListener('click', (event) => {
+        const fold = event.target.closest('#pt-fold');
+        if (fold) {
+          state.foldPlayed = !state.foldPlayed;
+          render();
+          return;
+        }
+
+        const jump = event.target.closest('[data-jump]');
+        if (jump) {
+          state.playing = Number(jump.dataset.jump);
+          state.position = 0;
+          stub(`playQueued("${current().videoId}")`);
+          render();
+          return;
+        }
+
+        const row = event.target.closest('[data-index]');
+        if (!row) return;
+        const index = Number(row.dataset.index);
+
+        // In the filmstrip a cover click only moves the focus — playing it is a
+        // second, deliberate press. In the two lists a row click plays it.
+        if (variant === 'C') {
+          state.focus = index;
+          stub(`focus → ${index + 1}`);
+        } else {
+          state.playing = index;
+          state.focus = index;
+          state.position = 0;
+          stub(`playQueued("${current().videoId}")`);
+        }
+        render();
+      });
+
+      // Dragging the strip re-focuses on whatever ends up nearest the middle.
+      el.mount.addEventListener(
+        'scroll',
+        (event) => {
+          const strip = event.target.closest('#pt-strip');
+          if (!strip) return;
+          const middle = strip.scrollLeft + strip.clientWidth / 2;
+          let best = 0;
+          let bestGap = Infinity;
+          [...strip.children].forEach((child, i) => {
+            const gap = Math.abs(child.offsetLeft + child.offsetWidth / 2 - middle);
+            if (gap < bestGap) {
+              bestGap = gap;
+              best = i;
+            }
+          });
+          if (best === state.focus) return;
+          state.focus = best;
+          // Not a re-render: that would fight the scroll it is reacting to.
+          [...strip.children].forEach((child, i) => child.classList.toggle('focus', i === best));
+          const meta = document.querySelector('.pt-c-meta');
+          meta.querySelector('.pt-name').textContent = state.queue[best].title;
+          meta.querySelector('.pt-sub').textContent =
+            `${state.queue[best].artist} · ${time(state.queue[best].duration)}`;
+          document.querySelectorAll('.pt-c-ticks i').forEach((tick, i) => {
+            tick.classList.toggle('focus', i === best && i !== state.playing);
+          });
+          const act = document.querySelector('.pt-c-act');
+          act.innerHTML =
+            best === state.playing
+              ? '<button class="pt-c-here" disabled>Playing now</button>'
+              : `<button data-jump="${best}">Jump to ${best + 1} of ${state.queue.length}</button>`;
+          readout();
+        },
+        true,
+      );
+
+      // -------------------------------------------------------- switcher
+
+      const go = (step) => {
+        const at = VARIANTS.findIndex((v) => v.key === variant);
+        variant = VARIANTS[(at + step + VARIANTS.length) % VARIANTS.length].key;
+        history.replaceState(null, '', `?variant=${variant}`);
+        render();
+      };
+
+      document.getElementById('pt-prev').addEventListener('click', () => go(-1));
+      document.getElementById('pt-next').addEventListener('click', () => go(1));
+
+      document.addEventListener('keydown', (event) => {
+        if (event.target.closest('input, textarea, [contenteditable]')) return;
+        if (event.key === 'ArrowLeft') go(-1);
+        if (event.key === 'ArrowRight') go(1);
+      });
+
+      // ------------------------------------------------------------ boot
+
+      // The real thing: the card is tinted from the playing track's artwork.
+      const tint = async () => {
+        const p = await window.palette.extract(current().thumbnail, 1);
+        const root = document.documentElement.style;
+        root.setProperty('--accent', p.accent);
+        root.setProperty('--accent-soft', p.accentSoft);
+        root.setProperty('--wash-1', p.wash1);
+        root.setProperty('--wash-2', p.wash2);
+        root.setProperty('--wash-3', p.wash3);
+        root.setProperty('--wash-base', p.washBase);
+      };
+
+      let lastTinted = -1;
+      setInterval(() => {
+        if (state.isPlaying) state.position += 0.25;
+        if (state.position >= current().duration) state.position = 0;
+        if (lastTinted !== state.playing) {
+          lastTinted = state.playing;
+          tint();
+        }
+        paint();
+        readout();
+      }, 250);
+
+      render();
+    </script>
+  </body>
+</html>

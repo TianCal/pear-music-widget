@@ -40,7 +40,11 @@ pub const THUMB_PX: u32 = 128;
 /// Ceiling on the artwork cache, counted in the bytes it actually holds rather
 /// than in entries — an entry is worth whatever the host sent back.
 const IMAGE_CACHE_BYTES: usize = 4 * 1024 * 1024;
-const IMAGE_CACHE_MAX: usize = 40;
+/// Deliberately loose, so the byte ceiling above is the one that binds — which
+/// is what this cache is meant to be measured in. Scrolling a queue walks past
+/// far more artwork than a four-item "Next tracks" ever did, and a count of 40
+/// meant a queue could evict the playing track's own 320px cover.
+const IMAGE_CACHE_MAX: usize = 256;
 
 /// Error codes surfaced to the renderer so it can render the right setup hint.
 ///   Offline      - nothing listening; YouTube Music closed or API Server plugin disabled
@@ -156,8 +160,18 @@ impl ImageCache {
         }
     }
 
-    fn get(&self, key: &str) -> Option<Arc<str>> {
-        self.entries.get(key).cloned()
+    /// A hit is promoted, so eviction is least-recently-*used* rather than
+    /// least-recently-inserted. Insertion order was fine when the only readers
+    /// were the playing cover and four upcoming rows; scrolling a queue is not
+    /// — it walks past far more artwork than the cache holds, and without this
+    /// the rows you are about to scroll back to are the first ones dropped.
+    fn get(&mut self, key: &str) -> Option<Arc<str>> {
+        let hit = self.entries.get(key).cloned()?;
+        if let Some(at) = self.order.iter().position(|held| held == key) {
+            self.order.remove(at);
+            self.order.push_back(key.to_string());
+        }
+        Some(hit)
     }
 
     fn insert(&mut self, key: String, value: Arc<str>) {
