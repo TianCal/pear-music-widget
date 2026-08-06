@@ -103,6 +103,9 @@ fn default_opacity() -> f64 {
 fn default_tint() -> f64 {
     1.0
 }
+fn default_lyrics_cache_mb() -> f64 {
+    crate::lyrics_cache::DEFAULT_MB
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -143,6 +146,11 @@ pub struct Settings {
     /// to the words only — everything else on the card is the player's.
     #[serde(rename = "simplifyLyrics", default)]
     pub simplify_lyrics: bool,
+    /// How much disk the lyrics cache may use, in megabytes. 0 turns it off —
+    /// what is already on disk stays until it is emptied from the menu. See
+    /// `lyrics_cache`.
+    #[serde(rename = "lyricsCacheMb", default = "default_lyrics_cache_mb")]
+    pub lyrics_cache_mb: f64,
     /// The panel the floating widget was last left showing, restored on the
     /// next launch — see `window::panel_is_restorable`. A search is never
     /// stored: it is a query you have finished with. Nor is the dropdown's
@@ -179,6 +187,7 @@ impl Default for Settings {
             tint: default_tint(),
             lyrics_offset: 0.0,
             simplify_lyrics: false,
+            lyrics_cache_mb: default_lyrics_cache_mb(),
             panel: None,
             corners: SkinCorners::new(),
             corners_autohide: 0.0,

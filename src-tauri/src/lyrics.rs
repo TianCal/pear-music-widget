@@ -13,9 +13,10 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::lyrics_cache;
 use crate::state::Song;
 
 const ENDPOINT: &str = "https://lrclib.net/api";
@@ -24,7 +25,9 @@ pub const USER_AGENT: &str = "pear-music-widget (https://github.com/TianCal/pear
 const TIMEOUT: Duration = Duration::from_secs(9);
 const CACHE_MAX: usize = 60;
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+/// `Deserialize` for `lyrics_cache`, which reads these back off disk. Nothing
+/// from the network is deserialised into this — both sources are parsed by hand.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LyricLine {
     /// `None` on an unsynced block — those do not follow along.
     pub time: Option<f64>,
@@ -38,6 +41,19 @@ pub struct Lyrics {
     /// Which of the matching tiers found it; useful when a track comes back
     /// with someone else's words.
     pub how: &'static str,
+}
+
+/// The four tiers, by name, for a record read back off disk — `how` is a
+/// `&'static str` and stays one. Anything else came from a file someone edited,
+/// and says so.
+pub fn how_from(name: &str) -> &'static str {
+    match name {
+        "exact" => "exact",
+        "cleaned" => "cleaned",
+        "search" => "search",
+        "ytmusic" => "ytmusic",
+        _ => "cached",
+    }
 }
 
 /// Cache misses too (`None`), so a track with no lyrics is not looked up again
@@ -380,12 +396,22 @@ async fn fetch_ytmusic(http: &reqwest::Client, video_id: &str) -> Option<Lyrics>
 
 // ------------------------------------------------------------------ lookup
 
-/// Four-tier match. The first three ask LRCLib, which needs help because
-/// YouTube Music titles carry soundtrack credits and 《…》 wrappers it will not
-/// match on: exact with everything we know, exact on a cleaned title, then
-/// free-text search picking the hit whose duration is closest. Whatever that
-/// leaves — smaller labels, most of the Chinese-language catalogue — YouTube
-/// Music is asked for directly.
+/// Four-tier match, and only two sources.
+///
+/// YouTube Music goes first, because it is asked by **video id** — it is the one
+/// tier that cannot answer with a different song's words, and it covers what
+/// LRCLib has never heard of, which is smaller labels and much of the Mandarin
+/// and Cantonese catalogue. It costs two requests where LRCLib's first tier
+/// costs one, which the disk cache turns into a one-off per track.
+///
+/// The other three ask LRCLib, which needs help because YouTube Music titles
+/// carry soundtrack credits and 《…》 wrappers it will not match on: exact with
+/// everything we know, exact on a cleaned title, then free-text search picking
+/// the hit whose duration is closest.
+///
+/// They also run when YouTube answered with an *unsynced* block, since LRCLib
+/// may have the same song with timings. Only a synced result displaces the
+/// block; nothing at all leaves the block in place.
 pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
     if song.video_id.is_empty() {
         return None;
@@ -400,14 +426,33 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         return hit;
     }
 
+    // Disk before network, and a disk hit is promoted into memory so the panel
+    // being reopened does not go back to the filesystem for it either.
+    if let Some(hit) = lyrics_cache::load(&song.video_id) {
+        remember(&song.video_id, &hit);
+        return hit;
+    }
+
     let title = song.title.clone();
     let artist = lead_artist(&song.artist);
     let duration = song.song_duration.round();
 
-    let mut result = None;
+    // 1. YouTube Music's own lyrics, for the track the player is actually
+    //    playing. Being keyed by the video id, this is the only tier that
+    //    cannot come back with a different song's words, so it goes first.
+    let mut result = fetch_ytmusic(http, &song.video_id).await;
 
-    // 1. Exact, with everything we know.
-    if !title.is_empty() && !artist.is_empty() {
+    // Unless they are unsynced. YouTube serves a plain block for a good part of
+    // the catalogue, and LRCLib often has the same song *with* timings — a roll
+    // is worth another three requests. Held as a floor rather than discarded:
+    // if LRCLib has nothing, the block is still better than no words at all.
+    let unsynced = match &result {
+        Some(words) if !words.synced => result.take(),
+        _ => None,
+    };
+
+    // 2. Exact, with everything we know.
+    if result.is_none() && !title.is_empty() && !artist.is_empty() {
         let mut params = vec![
             ("track_name", title.clone()),
             ("artist_name", artist.clone()),
@@ -422,7 +467,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         result = shape(payload.as_ref(), "exact");
     }
 
-    // 2. Exact again on a cleaned title, without album or duration to pin it.
+    // 3. Exact again on a cleaned title, without album or duration to pin it.
     let simple = clean_title(&title);
     if result.is_none() && !simple.is_empty() && simple != title && !artist.is_empty() {
         let params = [
@@ -433,7 +478,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         result = shape(payload.as_ref(), "cleaned");
     }
 
-    // 3. Free-text search — this is what rescues soundtrack and 《…》 titles.
+    // 4. Free-text search — this is what rescues soundtrack and 《…》 titles.
     if result.is_none() && !simple.is_empty() {
         let q = format!("{simple} {artist}").trim().to_string();
         let payload = request(http, &format!("/search?{}", query_string(&[("q", q)]))).await;
@@ -443,22 +488,26 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
             .and_then(|hit| shape(Some(hit), "search"));
     }
 
-    // 4. YouTube Music's own timed lyrics.
-    if result.is_none() {
-        result = fetch_ytmusic(http, &song.video_id).await;
-    }
+    // Nothing timed anywhere, so the block YouTube had all along wins.
+    let result = result.or(unsynced);
 
+    remember(&song.video_id, &result);
+    lyrics_cache::store(&song.video_id, &result);
+
+    result
+}
+
+/// The in-memory half: the last `CACHE_MAX` lookups, misses included.
+fn remember(video_id: &str, result: &Option<Lyrics>) {
     let mut cache = CACHE.lock().expect("lyrics cache");
     let (order, entries) = &mut *cache;
-    if entries.insert(song.video_id.clone(), result.clone()).is_none() {
-        order.push(song.video_id.clone());
+    if entries.insert(video_id.to_string(), result.clone()).is_none() {
+        order.push(video_id.to_string());
     }
     while order.len() > CACHE_MAX {
         let oldest = order.remove(0);
         entries.remove(&oldest);
     }
-
-    result
 }
 
 #[cfg(test)]

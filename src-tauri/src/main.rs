@@ -6,6 +6,7 @@ mod api;
 mod commands;
 mod doctor;
 mod lyrics;
+mod lyrics_cache;
 mod macos;
 mod panel;
 mod search;
@@ -194,6 +195,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     ws::spawn(Arc::clone(&core), realtime);
     spawn_pollers(core);
+
+    // Off the setup path: taking stock of the cache means a directory listing,
+    // and it may evict — neither belongs in front of the first paint.
+    let cap = store.get(|s| s.lyrics_cache_mb);
+    tauri::async_runtime::spawn(async move { lyrics_cache::configure(cap) });
 
     Ok(())
 }

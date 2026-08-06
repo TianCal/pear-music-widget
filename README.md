@@ -101,11 +101,20 @@ It is phrase-aware rather than a character swap, so 乾淨 becomes 干净 while 
 stays 乾坤. Turning it back off restores the original words without refetching
 them, and anything already simplified — or not Chinese — is left alone.
 
-Lyrics come from [LRCLib](https://lrclib.net) first, and from YouTube Music's own
-timed lyrics when LRCLib has never heard of the track. **This is the only time
-the widget talks to anything other than localhost**: it sends the title and
-artist to LRCLib, and the video id to YouTube. Tracks with no synced lyrics fall
-back to a plain block, and tracks with none say so.
+Lyrics come from YouTube Music's own timed lyrics first — they are looked up by
+video id, so they are always the track that is playing — and from
+[LRCLib](https://lrclib.net) when YouTube has none, or has them without timings
+and LRCLib has them with. **This is the only time the widget talks to anything
+other than localhost**: it sends the video id to YouTube, and the title and
+artist to LRCLib. Tracks with no synced lyrics fall back to a plain block, and
+tracks with none say so.
+
+Whatever is found is kept on disk, so the same track costs nothing the next time
+— or the next launch. **Lyrics cache** in the menu-bar menu sets how much room
+that may take (50MB by default, which is thousands of songs; the oldest go first
+once it is full), opens the folder, and empties it. Tracks that came back with no
+lyrics are remembered too, but only for a week, since LRCLib may have them by
+then.
 
 ## Search
 
@@ -180,8 +189,12 @@ rather than leaving the widget silently blank.
 
 `~/Library/Application Support/pear-music-widget/settings.json` — `host`, `port`,
 `clientId`, cached `token`, window `bounds`, `sizes` (width per skin), `skin`,
-`panelSkin`, `alwaysOnTop`, `opacity`, `tint`, `panel` and `corners` (the corner
-buttons, keyed by skin). Quit the app before editing.
+`panelSkin`, `alwaysOnTop`, `opacity`, `tint`, `panel`, `corners` (the corner
+buttons, keyed by skin) and `lyricsCacheMb`. Quit the app before editing.
+
+The lyrics themselves are not in there: they live in
+`~/Library/Caches/pear-music-widget/lyrics`, one JSON file per track, and
+deleting that folder costs nothing but a refetch.
 
 ## Assets
 

@@ -262,6 +262,48 @@ fn simplify_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMe
     )
 }
 
+/// How much disk the words may keep, plus the two things you want next to that
+/// number: where they are, and a way to be rid of them.
+///
+/// Tray menu only. It is app-level plumbing in the same way "Open at login" is —
+/// the card's own menus are for what you are looking at.
+fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<tauri::Wry>> {
+    let selected = cap_mb.round() as u32;
+    let sizes: Vec<CheckMenuItem<tauri::Wry>> = crate::lyrics_cache::SIZES
+        .iter()
+        .map(|(mb, text)| {
+            CheckMenuItem::with_id(
+                app,
+                format!("lyricsCache:{mb}"),
+                text,
+                true,
+                *mb == selected,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<_>>()?;
+
+    let held = crate::lyrics_cache::size_bytes();
+    let separator = PredefinedMenuItem::separator(app)?;
+    let open = MenuItem::with_id(app, "lyricsCacheOpen", "Open cache folder", true, None::<&str>)?;
+    let empty = MenuItem::with_id(
+        app,
+        "lyricsCacheClear",
+        format!("Empty now ({})", crate::lyrics_cache::human(held)),
+        held > 0,
+        None::<&str>,
+    )?;
+
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = sizes
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    refs.push(&separator);
+    refs.push(&open);
+    refs.push(&empty);
+    Submenu::with_items(app, "Lyrics cache", true, &refs)
+}
+
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
     CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
 }
@@ -391,6 +433,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &opacity_submenu(app, opacity)?,
             &lyric_offset_submenu(app, lyrics_offset)?,
             &simplify_lyrics_item(app, simplify_lyrics)?,
+            &lyrics_cache_submenu(app, store.get(|s| s.lyrics_cache_mb))?,
             &corner_submenu(app, &widget_skin, corners, corners_autohide)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -540,6 +583,14 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             // panel you turned this on from is the one you want it to change.
             app.state::<Arc<Core>>().restyle_lyrics();
         }
+        // Finder rather than a reveal: the point of the item is to look through
+        // the folder, and `open` on a missing directory just fails.
+        "lyricsCacheOpen" => {
+            let dir = crate::lyrics_cache::dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = Command::new("open").arg(dir).spawn();
+        }
+        "lyricsCacheClear" => crate::lyrics_cache::clear(),
         "reconnect" => crate::ws::retry(app),
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
@@ -576,6 +627,15 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                         app.state::<Arc<Core>>()
                             .update(|state| state.corners = all.clone());
                     }
+                }
+            } else if let Some(mb) = other.strip_prefix("lyricsCache:") {
+                if let Ok(mb) = mb.parse::<f64>() {
+                    store.update(|s| s.lyrics_cache_mb = mb);
+                    // Shrinking the cap evicts, which is a directory listing and
+                    // a run of deletes — not work for the menu's own thread.
+                    tauri::async_runtime::spawn(async move {
+                        crate::lyrics_cache::configure(mb)
+                    });
                 }
             } else if let Some(secs) = other.strip_prefix("cornerFade:") {
                 if let Ok(secs) = secs.parse::<f64>() {

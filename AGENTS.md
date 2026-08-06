@@ -27,6 +27,7 @@ src-tauri/src/api.rs                                        src/palette.js
 | `src-tauri/src/macos.rs` | The AppKit calls Tauri does not wrap |
 | `src-tauri/src/search.rs` | innertube search + queue parsing |
 | `src-tauri/src/lyrics.rs` | LRCLib matching and LRC parsing |
+| `src-tauri/src/lyrics_cache.rs` | The words on disk, under a size cap |
 | `src-tauri/src/store.rs` | `settings.json` |
 | `src-tauri/build.rs` | Generates the app and menu-bar icons from scratch |
 | `src/bridge.js` | `window.widget` on top of Tauri IPC, plus window dragging |
@@ -253,16 +254,41 @@ the `expanded_by` guard.
 `lyrics.rs` is **the only code that talks to a non-localhost host**. Keep it that
 way: the renderer's CSP allows no network at all.
 
-Matching is four-tier. The first three ask LRCLib, which needs help because
-YouTube Music titles carry soundtrack credits and 《…》 wrappers it will not match
-on: exact with everything known, exact on a cleaned title, then free-text search
-picking the closest duration. The fourth asks YouTube Music for its own timed
-lyrics, covering what LRCLib has never heard of — smaller labels and much of the
-Mandarin and Cantonese catalogue. That is `/next` to name the lyrics tab and
-`/browse` to read it, and only the iOS Music client (`clientName: "26"`) is
-served timings. Being keyed by video id, it can never return another song's
-words. Empty LRC lines are kept — they are the instrumental gaps. Misses are
-cached as well as hits.
+Matching is four-tier over two sources, **YouTube Music first**. That is `/next`
+to name the lyrics tab and `/browse` to read it, and only the iOS Music client
+(`clientName: "26"`) is served timings. It leads because it is keyed by video id
+and so can never return another song's words, and because it covers what LRCLib
+has never heard of — smaller labels and much of the Mandarin and Cantonese
+catalogue. The cost is two requests where LRCLib's first tier is one, which the
+disk cache turns into a one-off per track.
+
+The other three ask LRCLib, which needs help because YouTube Music titles carry
+soundtrack credits and 《…》 wrappers it will not match on: exact with everything
+known, exact on a cleaned title, then free-text search picking the closest
+duration.
+
+**An unsynced YouTube answer does not stop the search.** YouTube serves a plain
+block for a good part of the catalogue and LRCLib often has the same song with
+timings, so a block is held back as a floor: only a *synced* LRCLib hit displaces
+it, and finding nothing leaves it in place. Getting this wrong turns a rolling
+lyric into a wall of text, which is the whole reason the order is not simply
+"first answer wins".
+
+Empty LRC lines are kept — they are the instrumental gaps. Misses are cached as
+well as hits.
+
+`lyrics_cache.rs` is the second half of that: the last 60 lookups live in memory,
+and everything is also written to `~/Library/Caches/pear-music-widget/lyrics` as
+one JSON record per video id, under a cap the **Lyrics cache** submenu sets (50MB
+by default, `lyricsCacheMb`). Caches rather than Application Support, because
+this is derived data macOS may throw away. Reads go memory → disk → network, and
+a disk hit is promoted back into memory. Eviction is oldest-written first, down
+to 90% of the cap so a full cache does not sweep on every write. **Stored misses
+expire after a week** and stored hits never do: lyrics do not change, but a track
+LRCLib has not heard of yet may be there next month. `how` is a `&'static str`
+and stays one — `how_from` maps a record's string back onto the four known
+values. A torn or unreadable record reads as "not cached", so the failure mode
+of every write is one extra fetch.
 
 The roll is a `transform` on `.lyrics-lines`, not `scrollTop`, and the active
 index comes from the same interpolated playhead the progress bar uses. Three
@@ -518,6 +544,10 @@ snapshot carries the **whole map** rather than one skin's set, since the widget
 and the dropdown can be on different skins and share one snapshot — `cornersOf`
 in `app.js` is where each surface picks its own. Menu item ids are
 `corner:<skin>:<button>` for the same reason.
+
+`lyricsCacheMb` is the lyrics cache's ceiling; `0` turns it off without deleting
+what is there, since "stop caching" and "throw away what you have" are different
+requests and the menu has an item for each.
 
 `cornersAutohide` fades the corner buttons after that many seconds of stillness,
 0 to keep them up. Driven in the renderer off `mousemove`, which fires far faster
