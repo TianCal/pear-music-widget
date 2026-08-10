@@ -14,8 +14,8 @@
 //! Posting keeps everything in FIFO order with the resize, at the cost of these
 //! being fire-and-forget. Nothing here needs a return value.
 
-use objc2::msg_send;
 use objc2::runtime::AnyObject;
+use objc2::{class, msg_send};
 use objc2_foundation::NSSize;
 use tauri::WebviewWindow;
 
@@ -67,6 +67,23 @@ pub fn accept_mouse_moved(window: &WebviewWindow) {
     with_ns_window(window, move |handle| unsafe {
         let _: () = msg_send![handle, setAcceptsMouseMovedEvents: true];
     });
+}
+
+/// How long after a click a second one still counts as a double click, in
+/// seconds — the interval set in Mouse settings, which is an accessibility
+/// control as much as a preference and so is not ours to hardcode.
+///
+/// Read rather than posted, unlike everything else in this file: there is a
+/// value to return, and `NSEvent` is being asked a question rather than a
+/// window being told something, so nothing is queued behind a resize.
+///
+/// Clamped because the setting reaches 1s at its slowest, and the tray icon
+/// cannot afford a window that long — the first click of a pair opens the
+/// dropdown, so every unclosed second of it is a second in which an ordinary
+/// open-then-close would be read as a double click.
+pub fn double_click_interval() -> f64 {
+    let interval: f64 = unsafe { msg_send![class!(NSEvent), doubleClickInterval] };
+    interval.clamp(0.2, 0.6)
 }
 
 pub fn set_alpha(window: &WebviewWindow, alpha: f64) {

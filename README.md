@@ -25,6 +25,7 @@ Both are the same renderer on the same state, so they never disagree.
 | Tray icon | |
 | --- | --- |
 | **Left click** | Open/close the player dropdown |
+| **Double click** | Bring the floating widget back |
 | **Right click** | Settings — widget visibility, skin, dropdown skin, cover tint, opacity, lyrics timing, corner buttons, always on top, reset size and position, open at login, reconnect, quit |
 | **Solid glyph** | Connected |
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
@@ -37,8 +38,11 @@ widget.
 The floating widget has a **close button** in its top-left corner, mirroring the
 corner buttons on the right. It is invisible until you move the pointer over the
 card and goes again a couple of seconds later, so a widget nobody is pointing at
-carries no chrome. It does what **Hide widget** in the menu does: the tray's
-**Show floating widget** brings it back.
+carries no chrome. It does what **Hide widget** in the menu does — and
+**double-clicking the tray icon** brings it straight back, without going through
+the menu. The dropdown flashes open and shut on the way, because the first click
+of the pair cannot know a second is coming and opening the dropdown instantly is
+worth more than a tidy double click.
 
 ## Skins
 

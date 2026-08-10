@@ -171,6 +171,19 @@ fn collapse(app: &AppHandle, panel: &WebviewWindow) {
     let _ = app.emit_to(PANEL, "panel-collapsed", ());
 }
 
+/// Put the dropdown away wherever it happens to be, without the toggle's second
+/// half. The tray's double click needs one end state — dropdown gone, widget
+/// up — from either starting point, and `toggle` would reopen it from the one
+/// where the first click had just closed it.
+pub fn dismiss(app: &AppHandle) {
+    let Some(panel) = app.get_webview_window(PANEL) else {
+        return;
+    };
+    if state(app).visible.load(Ordering::SeqCst) || panel.is_visible().unwrap_or(false) {
+        hide(app, &panel);
+    }
+}
+
 pub fn hide(app: &AppHandle, panel: &WebviewWindow) {
     let _ = panel.hide();
     collapse(app, panel);

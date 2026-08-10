@@ -472,7 +472,26 @@ items, and silently cancelling every toggle.
 macOS renders whatever menu was last handed to the status item, so the menu is
 rebuilt on every state change *and* on `TrayIconEvent::Enter`, the last moment
 before a click can open it. `show_menu_on_left_click(false)` splits the gestures:
-left toggles the dropdown, right opens settings.
+left toggles the dropdown, right opens settings, and a left *double* click brings
+the floating widget back.
+
+**The double click is counted here, and the first click is not held.**
+`tray-icon` has a `DoubleClick` event, it is documented Windows Only, and the
+macOS backend never emits one — so `is_double_click` pairs the `Click`s against
+`NSEvent.doubleClickInterval`, read live rather than hardcoded because that
+setting is an accessibility control (clamped to 0.2–0.6s: the tray cannot afford
+a one-second window). The first click of a pair therefore opens the dropdown as
+it always did, and a double click is seen flashing it open and shut. That is the
+deliberate half of the trade — the alternative is holding *every* single click
+for the interval, taxing the gesture used constantly to spare the one used
+rarely. The visible cost of that choice is that deliberately opening and closing
+the dropdown inside the interval also reads as a double click.
+
+The second click calls `panel::dismiss` rather than `toggle`, so the pair lands
+on one end state from either starting point; `toggle` would reopen the dropdown
+for a double click that began with it already up. And `show_widget` rather than
+the `showWidget` menu arm, which is a checkbox and toggles: a gesture that put
+the widget away again every second use is a different feature.
 
 The tray rect arrives as an untagged `Position`/`Size` that may be either scale,
 so `icon_rect` resolves it twice — guess with the primary monitor's scale, then

@@ -6,8 +6,8 @@
 //! before a click can open it.
 
 use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -30,6 +30,27 @@ const HOLLOW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray-hollow@2x.p
 // The bundle differs between th-ch and pear builds, so the launcher tries each
 // name in turn.
 const MUSIC_APPS: [&str; 3] = ["YouTube Music", "Pear", "Pear Desktop"];
+
+/// When the last left click on the icon went up, for spotting the second of a
+/// pair. `tray-icon` has a `DoubleClick` event and it is Windows only — the
+/// macOS backend never emits one — so the pair is counted here.
+///
+/// A bare static rather than a field on any of the app's state structs: it is
+/// read and written in one closure, means nothing outside it, and threading it
+/// through `WindowState` would be plumbing for a timestamp.
+static LAST_TRAY_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Whether this click closes a pair, and arm the next one either way.
+fn is_double_click() -> bool {
+    let interval = Duration::from_secs_f64(crate::macos::double_click_interval());
+    let now = Instant::now();
+    let mut last = LAST_TRAY_CLICK.lock().expect("tray click lock");
+    let doubled = last.map(|at| now.duration_since(at) < interval).unwrap_or(false);
+    // Cleared rather than re-armed on a hit, so three clicks are a double and a
+    // single rather than two overlapping doubles.
+    *last = if doubled { None } else { Some(now) };
+    doubled
+}
 
 /// pear-desktop and th-ch's build ship the same appId, so one id covers both.
 const MUSIC_APP_ID: &str = "com.github.th-ch.youtube-music";
@@ -531,6 +552,25 @@ pub fn set_panel_skin(app: &AppHandle, skin: &str) {
     refresh(app);
 }
 
+/// Bring the floating widget back — without the menu item's other half.
+///
+/// "Show floating widget" is a checkbox and toggles; the tray's double click
+/// asks for the widget, and a gesture that put it away again every second time
+/// would be a different feature wearing the same shape.
+pub fn show_widget(app: &AppHandle) {
+    let Some(widget) = app.get_webview_window(WIDGET) else {
+        return;
+    };
+    if widget.is_visible().unwrap_or(false) {
+        return;
+    }
+    // Showing it must not steal focus from whatever you were doing.
+    let _ = widget.show();
+    // The pollers stand down while nothing is on screen, so a widget coming
+    // back could be showing a stale glyph.
+    crate::resync(app);
+}
+
 pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
     let id = event.id().0.as_str();
     let store = app.state::<Arc<Store>>().inner().clone();
@@ -542,11 +582,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 if widget.is_visible().unwrap_or(false) {
                     let _ = widget.hide();
                 } else {
-                    // Showing it must not steal focus from whatever you were doing.
-                    let _ = widget.show();
-                    // The pollers stand down while nothing is on screen, so a
-                    // widget coming back could be showing a stale glyph.
-                    crate::resync(app);
+                    show_widget(app);
                 }
             }
         }
@@ -729,13 +765,31 @@ pub fn create(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
             match event {
+                // One click drops the player down; two bring the floating
+                // widget back, which otherwise needs the right-click menu.
+                //
+                // The first click cannot know a second is coming, so it opens
+                // the dropdown as it always did and a double click is seen
+                // flashing it open and shut. That is the deliberate half of the
+                // trade: the alternative is holding *every* single click for
+                // the double-click interval, and taxing the gesture used
+                // constantly to spare the one used rarely is the wrong way
+                // round. `dismiss` rather than a second `toggle` so the pair
+                // lands in one place from either starting point — a double
+                // click that began with the dropdown already open would
+                // otherwise reopen it.
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
                     rect,
                     ..
                 } => {
-                    crate::panel::toggle(app, icon_rect(app, rect.position, rect.size));
+                    if is_double_click() {
+                        crate::panel::dismiss(app);
+                        show_widget(app);
+                    } else {
+                        crate::panel::toggle(app, icon_rect(app, rect.position, rect.size));
+                    }
                 }
                 // The last moment before a right click can open the menu: make
                 // sure the checkboxes describe the world as it is now.
