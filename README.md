@@ -188,6 +188,22 @@ If the widget sits on a setup screen, run the connectivity check with
 `cargo run -- --doctor`. To build the DMG: `cargo tauri build` (`cargo install
 tauri-cli` first).
 
+Rebuild and reinstall locally:
+
+```bash
+./scripts/reinstall-local.sh
+```
+
+Publish a release from a clean, up-to-date `main` branch:
+
+```bash
+./scripts/publish-release.sh small
+./scripts/publish-release.sh minor
+./scripts/publish-release.sh major
+```
+
+`small` is a patch release. Publishing requires an authenticated GitHub CLI.
+
 ## Compatibility
 
 The `api-server` plugin is versioned independently of the host app and can change

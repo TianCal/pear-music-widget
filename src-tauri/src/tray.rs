@@ -473,25 +473,43 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// Deliberately no "Dropdown skin" — every item here acts on the window you
 /// right-clicked, and the dropdown has its own menu for its own layout.
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let snapshot = app.state::<Arc<Core>>().snapshot();
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
     let skin = window::skin_of(&store);
+    let can_rate = snapshot.status == "connected" && snapshot.song.is_some();
+    let rating = snapshot.like.as_deref().unwrap_or_default();
 
     Menu::with_items(
         app,
         &[
+            &CheckMenuItem::with_id(
+                app,
+                "like",
+                "Like",
+                can_rate,
+                rating.eq_ignore_ascii_case("LIKE"),
+                None::<&str>,
+            )?,
+            &CheckMenuItem::with_id(
+                app,
+                "dislike",
+                "Dislike",
+                can_rate,
+                rating.eq_ignore_ascii_case("DISLIKE"),
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
             &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
             &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
-            &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
             &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
             &MenuItem::with_id(app, "hideWidget", "Hide widget", alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
         ],
     )
@@ -577,6 +595,15 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
     let widget = app.get_webview_window(WIDGET);
 
     match id {
+        "like" | "dislike" => {
+            // Keep menu ratings on the renderer's command path: it owns the
+            // API call, error reporting, read-back and shared state update.
+            let handle = app.clone();
+            let command = id.to_string();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::commands::command(handle, command, None).await;
+            });
+        }
         "showWidget" => {
             if let Some(widget) = &widget {
                 if widget.is_visible().unwrap_or(false) {

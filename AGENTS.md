@@ -644,3 +644,7 @@ build opens the Web Inspector when `PMW_DEVTOOLS` is set — **console errors ar
 the first thing to check**, since a renderer showing static markup and never
 updating is almost always a script error rather than a broken IPC channel.
 `pear-music-widget --doctor` is the connectivity check.
+
+Use `scripts/reinstall-local.sh` to rebuild and reinstall the app. Publish from
+a clean, up-to-date `main` with `scripts/publish-release.sh small|minor|major`;
+`small` means a patch release.
