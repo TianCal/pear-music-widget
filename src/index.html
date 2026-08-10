@@ -22,6 +22,14 @@
         <symbol id="i-search" viewBox="0 0 24 24"><path d="M10.5 3a7.5 7.5 0 0 1 5.92 12.11l4.24 4.24a1 1 0 0 1-1.42 1.42l-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/></symbol>
         <symbol id="i-lyrics" viewBox="0 0 24 24"><path d="M4 5.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 4.5a1 1 0 0 1 1-1h9a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1ZM4 19a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Z"/></symbol>
         <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5a1 1 0 0 0-.7 1.7l5.3 5.3-5.3 5.3a1 1 0 1 0 1.4 1.4l5.3-5.3 5.3 5.3a1 1 0 0 0 1.4-1.4L13.8 12l5.3-5.3a1 1 0 0 0-1.4-1.4L12.4 10.6 7.1 5.3A1 1 0 0 0 6.4 5Z"/></symbol>
+        <!-- The widget's close button, which wants a lighter mark than the one
+             above: geometry only, painted entirely from CSS, because the filled
+             outline the search bar uses turns to mush at this size. Its own
+             symbol rather than a restyle of `#i-close` — that one is still the
+             search bar's, where a filled glyph is right. -->
+        <symbol id="i-close-thin" viewBox="0 0 24 24">
+          <path d="M7.6 7.6 16.4 16.4" /><path d="M16.4 7.6 7.6 16.4" />
+        </symbol>
         <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6.5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm0 5a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14.3-9.2a1 1 0 0 1 1.7.7v8a1 1 0 0 1-.6.9l-2.5 1.1a1.6 1.6 0 1 1-.8-1.8l1.9-.8V9.9l-2 .6a1 1 0 0 1-.6-1.9Z"/></symbol>
         <!-- The two repeat modes the corner button cycles between. Stroked
              rather than filled — a 13px loop drawn as a filled outline turns to
@@ -67,7 +75,7 @@
              what lets the widget carry a dismissal without carrying chrome.
              The dropdown has no use for it; the stylesheet drops it there. -->
         <button class="close-widget" id="btn-close" title="Hide widget" aria-label="Hide widget">
-          <svg><use href="#i-close" /></svg>
+          <svg><use href="#i-close-thin" /></svg>
         </button>
 
         <!-- DOM order is left-to-right, and each of the four can be turned off
