@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use crate::api::{COVER_PX, THUMB_PX};
 use crate::search;
 use crate::state::{Bootstrap, Core};
-use crate::window::{self, PANEL};
+use crate::window::{self, PANEL, WIDGET};
 
 /// Polling budget for a queued track to show up (see `play_result`).
 const PLAY_POLL_ATTEMPTS: usize = 20;
@@ -444,6 +444,17 @@ pub fn set_panel_skin(app: AppHandle, skin: String) -> Value {
     }
     crate::tray::set_panel_skin(&app, &skin);
     json!({ "ok": true })
+}
+
+/// The widget's own close button. Exactly what "Hide widget" in the menu does —
+/// the window goes away and "Show floating widget" in the tray brings it back —
+/// so the button is a shortcut to a dismissal that already existed rather than a
+/// second, differently-behaved way out.
+#[tauri::command]
+pub fn hide_widget(app: AppHandle) {
+    if let Some(widget) = app.get_webview_window(WIDGET) {
+        let _ = widget.hide();
+    }
 }
 
 /// Escape inside the dropdown closes it, like a real menu.

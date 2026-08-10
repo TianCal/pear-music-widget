@@ -917,6 +917,66 @@ body.skin-stack .lyric.active {
    is the whole difference between them, a 1 through the loop for a single
    track. It keeps the ordinary hover, so it is plainly still a button. */
 
+/* ------------------------------------------------------------ close button */
+
+/* Mirrors the corner bar across the card, at the offsets that skin uses, so the
+   two read as one band of chrome rather than a button that wandered in.
+   Absolute, so it costs the layout nothing: no gutter, no `--corner-count`, no
+   slot the titles have to clear.
+   Unlike the corner bar this is hidden by *default* rather than after a delay,
+   and stays hidden whatever the auto-hide is set to — the point of it is to be
+   absent from the resting card and one wake away when wanted.
+   It lands on the artwork's rounded corner, where a bright cover would swallow
+   a bare glyph, hence the disc: the same translucent surface the card is made
+   of, so it separates from any sleeve without introducing a colour.
+   **No opacity transition**, for the reason spelled out at `.corner-bar.idle`:
+   this document is permanently `hidden` to WebKit and its transitions never
+   advance, so a faded-in button would simply never arrive. */
+.close-widget {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 21;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+  color: var(--fg-dim);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.close-widget svg {
+  width: 11px;
+  height: 11px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.close-widget.awake {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.close-widget:hover {
+  color: var(--fg);
+}
+
+.close-widget:active {
+  transform: scale(0.9);
+}
+
+/* The dropdown is dismissed by clicking away from it, which is what a menu is;
+   a close button in the corner of one would be furniture with nothing to do. */
+body.panel .close-widget {
+  display: none;
+}
+
 /* Height must match `panel_height` in src-tauri/src/window.rs — the window
    grows by exactly this much. */
 .search {
@@ -1433,6 +1493,20 @@ body.skin-classic .corner-bar {
 body.skin-classic .corner {
   width: 18px;
   height: 18px;
+}
+
+/* Tucked in and shrunk to match, so it stays the corner bar's reflection on the
+   tighter skin rather than the one oversized thing on the card. */
+body.skin-classic .close-widget {
+  top: 6px;
+  left: 6px;
+  width: 18px;
+  height: 18px;
+}
+
+body.skin-classic .close-widget svg {
+  width: 10px;
+  height: 10px;
 }
 
 /* 18px buttons in this skin, so a narrower step. */

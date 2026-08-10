@@ -30,8 +30,15 @@ Both are the same renderer on the same state, so they never disagree.
 | **Hollow glyph** | YouTube Music not running, or its API server is off |
 
 If YouTube Music is not running, pressing play launches it. **Double-clicking the
-card** brings it to the front. Every menu carries **Quit with App**, which closes
-YouTube Music before quitting the widget.
+card** brings it to the front — in the dropdown, double-click the cover. Every
+menu carries **Quit with App**, which closes YouTube Music before quitting the
+widget.
+
+The floating widget has a **close button** in its top-left corner, mirroring the
+corner buttons on the right. It is invisible until you move the pointer over the
+card and goes again a couple of seconds later, so a widget nobody is pointing at
+carries no chrome. It does what **Hide widget** in the menu does: the tray's
+**Show floating widget** brings it back.
 
 ## Skins
 

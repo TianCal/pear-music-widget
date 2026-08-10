@@ -59,6 +59,7 @@ window.widget = {
   queueArt: (ids, size) => invoke('queue_art', { ids, size }),
   setPanel: (which) => invoke('set_panel', { which }),
   contextMenu: () => invoke('context_menu'),
+  hideWidget: () => invoke('hide_widget'),
   onPanelCollapsed: (handler) => on('panel-collapsed', handler),
   onZoom: (handler) => on('zoom', handler),
   retry: () => invoke('retry'),

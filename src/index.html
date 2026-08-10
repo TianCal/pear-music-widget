@@ -61,6 +61,15 @@
           <i class="edge n"></i><i class="edge s"></i><i class="edge w"></i><i class="edge e"></i>
         </div>
 
+        <!-- The corner bar's counterpart, in the place macOS puts a close
+             button. Never part of the resting look: it is invisible and
+             unclickable until the card is woken — see `wakeChrome` — which is
+             what lets the widget carry a dismissal without carrying chrome.
+             The dropdown has no use for it; the stylesheet drops it there. -->
+        <button class="close-widget" id="btn-close" title="Hide widget" aria-label="Hide widget">
+          <svg><use href="#i-close" /></svg>
+        </button>
+
         <!-- DOM order is left-to-right, and each of the four can be turned off
              from the Corner buttons submenu, per skin. Repeat leads and is set
              slightly apart: the other three open a panel, it changes what the

@@ -69,6 +69,7 @@ const el = {
   cornerRepeat: $('btn-repeat'),
   repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
+  closeWidget: $('btn-close'),
   queue: $('queue'),
   queueList: $('queue-list'),
   queueNote: $('queue-note'),
@@ -245,16 +246,37 @@ const armCornerFade = () => {
   cornerIdleTimer = setTimeout(() => el.cornerBar.classList.add('idle'), after * 1000);
 };
 
-/** The pointer moved, so start the countdown over. */
-const wakeCorners = () => {
+/* The close button rides the same wake, on its own countdown. Two differences
+   from the corner bar, both deliberate: it starts hidden rather than shown, and
+   its delay is fixed rather than taken from the Corner buttons submenu — the
+   whole reason it can exist at all is that a card nobody is pointing at carries
+   no dismissal furniture, and that has to hold with auto-hide switched off.
+   Long enough to travel to the corner and click, short enough that a card you
+   are only listening to goes clean again. */
+const CLOSE_IDLE_MS = 2200;
+let closeIdleTimer = null;
+
+const wakeClose = () => {
+  el.closeWidget.classList.add('awake');
+  clearTimeout(closeIdleTimer);
+  closeIdleTimer = setTimeout(() => el.closeWidget.classList.remove('awake'), CLOSE_IDLE_MS);
+};
+
+/** The pointer moved, so start the countdowns over. */
+const wakeChrome = () => {
   const now = performance.now();
-  const asleep = el.cornerBar.classList.contains('idle');
+  // Asleep if *either* is, so the button coming back does not depend on the bar
+  // having faded — with auto-hide off the bar never does.
+  const asleep =
+    el.cornerBar.classList.contains('idle') ||
+    (!IS_PANEL && !el.closeWidget.classList.contains('awake'));
   // A mousemove fires far faster than this needs to run, and re-arming a
   // timeout per event is pure churn while the pointer is travelling.
   if (!asleep && now - cornerWokeAt < 200) return;
   cornerWokeAt = now;
   el.cornerBar.classList.remove('idle');
   armCornerFade();
+  if (!IS_PANEL) wakeClose();
 };
 
 /* Four signals, because a widget is meant to be used without focusing it first
@@ -264,7 +286,16 @@ const wakeCorners = () => {
    background; `wheel` and `mousedown` cover the interactions that always
    arrive, and are the guaranteed way back to a faded bar. */
 for (const signal of ['mousemove', 'mouseover', 'mousedown', 'wheel']) {
-  document.addEventListener(signal, wakeCorners, { passive: true });
+  document.addEventListener(signal, wakeChrome, { passive: true });
+}
+
+/* Same dismissal as "Hide widget" in the menu — the tray's "Show floating
+   widget" is the way back, and nothing else about the app changes. */
+if (!IS_PANEL) {
+  el.closeWidget.addEventListener('click', (event) => {
+    event.stopPropagation();
+    window.widget.hideWidget();
+  });
 }
 
 const renderStatus = () => {
@@ -1308,7 +1339,12 @@ const INTERACTIVE =
 const openMusicApp = () => window.widget.openApp();
 
 document.addEventListener('dblclick', (event) => {
-  if (IS_PANEL || event.target.closest(INTERACTIVE)) return;
+  if (event.target.closest(INTERACTIVE)) return;
+  // The dropdown gets the gesture on the artwork alone. It is a menu, and a
+  // double click on any old part of a menu launching an app would be a
+  // surprise — but the cover carries the tooltip that promises it on both
+  // surfaces, so on the dropdown it was promising nothing.
+  if (IS_PANEL && !event.target.closest('.art')) return;
   openMusicApp();
 });
 

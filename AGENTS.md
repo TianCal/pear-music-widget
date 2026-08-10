@@ -165,7 +165,11 @@ replaces Electron's `roundedCorners`. Widget: `UnderWindowBackground`. Dropdown:
 AppKit's drag loop, which swallows everything after it — arming immediately would
 eat the double-click that raises YouTube Music. Resizing needs no JavaScript; a
 borderless-but-resizable `NSWindow` resizes from its edges, and `.resize-edges`
-is the ring the drag handler ignores. The aspect lock is
+is the ring the drag handler ignores. The dropdown has no drag at all, and takes
+the gesture on the artwork alone rather than anywhere on the card: it is a menu,
+where a double click on any old part of it launching an app would be a surprise —
+but the cover carries the tooltip promising it on both surfaces, so leaving the
+dropdown out entirely had it promising nothing. The aspect lock is
 `NSWindow.contentAspectRatio`; AppKit has no call to clear it, so
 `contentResizeIncrements` is the documented way.
 
@@ -551,11 +555,23 @@ requests and the menu has an item for each.
 
 `cornersAutohide` fades the corner buttons after that many seconds of stillness,
 0 to keep them up. Driven in the renderer off `mousemove`, which fires far faster
-than the timer needs re-arming — hence the 200ms guard in `wakeCorners`. It runs
+than the timer needs re-arming — hence the 200ms guard in `wakeChrome`. It runs
 with a panel open as well as without. A faded button cannot be clicked, but
 `mousedown` is one of the wake signals, so a press on the card brings the bar
 back before the click lands and the panel's own button is never unreachable —
 which is what makes the old "never while a panel is open" guard unnecessary.
+
+**The close button rides the same wake and is not a corner button.** It is the
+widget's only piece of chrome that is hidden by *default* rather than after a
+delay, and its delay is a constant rather than the setting — a dismissal in the
+corner has to be absent from a resting card even with auto-hide switched off,
+which is the whole reason it can be there at all. So `wakeChrome` treats either
+one being asleep as asleep, or with auto-hide off the bar would never be idle and
+the 200ms guard would swallow the wake. It is absolute and outside `CORNERS`, so
+it costs no gutter and no `--corner-count`; the dropdown drops it in CSS, being a
+menu that is dismissed by clicking away from it. `hide_widget` is the same
+`widget.hide()` the tray's "Hide widget" runs, so there is one dismissal with two
+doors and "Show floating widget" is the way back from both.
 
 ## Prototyping a look
 
