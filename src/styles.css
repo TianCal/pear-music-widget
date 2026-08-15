@@ -721,7 +721,9 @@ body.skin-stack .seek.showing-volume .knob {
 }
 
 .lyric {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   width: 100%;
   padding: 5px 0;
   border: 0;
@@ -732,6 +734,21 @@ body.skin-stack .seek.showing-volume .knob {
   line-height: 1.35;
   color: var(--fg-faint);
   transition: color 0.25s ease, opacity 0.25s ease, scale 0.25s ease;
+}
+
+.lyric-text,
+.lyric-jyutping {
+  display: block;
+}
+
+.lyric-jyutping {
+  margin-top: 1px;
+  font-size: 0.78em;
+  font-style: italic;
+  font-weight: 450;
+  line-height: 1.2;
+  color: currentColor;
+  opacity: 0.68;
 }
 
 /* Clicking a line seeks to it — but a full-width hit target on a panel you also
@@ -790,6 +807,7 @@ button.lyric::after {
 }
 
 .lyrics.plain .lyric {
+  align-items: flex-start;
   color: var(--fg-dim);
   font-size: 11.5px;
   text-align: left;
@@ -813,10 +831,6 @@ body.skin-classic .lyric {
   padding: 4px 0;
 }
 
-body.skin-classic .lyric.active {
-  font-size: 13px;
-}
-
 /* Stack is wider and already vertical, so it can carry a larger, airier roll
    that matches the scale of its artwork and titles. */
 body.skin-stack .lyrics-lines {
@@ -826,10 +840,6 @@ body.skin-stack .lyrics-lines {
 body.skin-stack .lyric {
   font-size: 13px;
   padding: 7px 0;
-}
-
-body.skin-stack .lyric.active {
-  font-size: 15px;
 }
 
 /* --------------------------------------------------------------- search */
@@ -1734,4 +1744,3 @@ body.skin-classic .setup p {
 .pill[hidden] {
   display: none;
 }
-

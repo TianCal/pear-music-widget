@@ -1,0 +1,16 @@
+[package]
+name = "canto-hk-g2p-core"
+version = "2.6.1"
+edition = "2021"
+rust-version = "1.65"
+description = "Vendored pure-Rust core of canto-hk-g2p"
+license = "Apache-2.0"
+repository = "https://github.com/typangaa/canto-hk-g2p"
+
+[lib]
+name = "canto_g2p"
+path = "src/lib.rs"
+
+[dependencies]
+memmap2 = "0.9"
+rayon = "1.10"

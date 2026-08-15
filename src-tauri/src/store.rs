@@ -146,6 +146,10 @@ pub struct Settings {
     /// to the words only — everything else on the card is the player's.
     #[serde(rename = "simplifyLyrics", default)]
     pub simplify_lyrics: bool,
+    /// Add a numberless Jyutping line under Chinese lyrics. This is derived
+    /// locally from the fetched source text and never changes the cache.
+    #[serde(rename = "jyutpingLyrics", default)]
+    pub jyutping_lyrics: bool,
     /// How much disk the lyrics cache may use, in megabytes. 0 turns it off —
     /// what is already on disk stays until it is emptied from the menu. See
     /// `lyrics_cache`.
@@ -187,6 +191,7 @@ impl Default for Settings {
             tint: default_tint(),
             lyrics_offset: 0.0,
             simplify_lyrics: false,
+            jyutping_lyrics: false,
             lyrics_cache_mb: default_lyrics_cache_mb(),
             panel: None,
             corners: SkinCorners::new(),
@@ -314,10 +319,23 @@ mod tests {
     #[test]
     fn a_file_with_no_corners_key_leaves_every_skin_at_its_default() {
         let settings: Settings = serde_json::from_str("{}").expect("parses");
+        assert!(!settings.jyutping_lyrics);
         assert!(settings.corners.is_empty());
         assert_eq!(
             CornerButtons::default(),
             settings.corners.get("stack").copied().unwrap_or_default()
         );
+    }
+
+    #[test]
+    fn persists_the_jyutping_toggle_and_unknown_keys() {
+        let text = r#"{ "jyutpingLyrics": true, "futureOption": 7 }"#;
+        let settings: Settings = serde_json::from_str(text).expect("parses");
+        assert!(settings.jyutping_lyrics);
+        assert_eq!(settings.extra["futureOption"], 7);
+
+        let encoded = serde_json::to_string(&settings).expect("serialises");
+        assert!(encoded.contains("\"jyutpingLyrics\":true"));
+        assert!(encoded.contains("\"futureOption\":7"));
     }
 }

@@ -5,6 +5,7 @@
 mod api;
 mod commands;
 mod doctor;
+mod jyutping;
 mod lyrics;
 mod lyrics_cache;
 mod macos;
@@ -175,10 +176,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let store = Arc::new(Store::load());
     let api = Arc::new(Api::new(Arc::clone(&store)));
+    let jyutping = Arc::new(jyutping::Jyutping::load(&handle));
     let core = Arc::new(Core::new(
         handle.clone(),
         Arc::clone(&store),
         Arc::clone(&api),
+        jyutping,
     ));
     let realtime = Arc::new(Realtime::new());
 

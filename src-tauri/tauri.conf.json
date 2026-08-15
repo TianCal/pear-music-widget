@@ -17,6 +17,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg"],
+    "resources": ["resources/jyutping/*"],
     "category": "Music",
     "copyright": "",
     "shortDescription": "Floating now-playing widget for YouTube Music",

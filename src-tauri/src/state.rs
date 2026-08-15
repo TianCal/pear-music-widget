@@ -30,6 +30,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use crate::api::{Api, ErrorCode, COVER_PX};
+use crate::jyutping::Jyutping;
 use crate::lyrics::{self, LyricLine, Lyrics};
 use crate::search::{self, QueueView, QUEUE_MAX};
 use crate::store::{SkinCorners, Store};
@@ -176,13 +177,15 @@ impl LyricsView {
         }
     }
 
-    /// The same words in Simplified Chinese. Only the lines are touched — the
-    /// state string and `how` describe the fetch, not the text.
+    /// Derive every display-only lyric treatment from the fetched text. The
+    /// Jyutping lookup deliberately happens before Simplified Chinese is
+    /// assigned to `text`: 心裏 may be shown as 心里, but its reading must
+    /// remain `sam1 leoi5`, not the reading of the different character 里.
     ///
     /// Text that is already simplified, or not Chinese at all, comes back
     /// unchanged, so this is safe to run over every line rather than trying to
     /// guess whether a track needs it.
-    fn simplified(&self) -> Self {
+    fn styled(&self, simplify: bool, jyutping: Option<&Jyutping>) -> Self {
         let Some(lyrics) = &self.lyrics else {
             return self.clone();
         };
@@ -196,11 +199,21 @@ impl LyricsView {
                     .iter()
                     .map(|line| LyricLine {
                         time: line.time,
-                        text: fast2s::convert(&line.text),
+                        text: if simplify {
+                            fast2s::convert(&line.text)
+                        } else {
+                            line.text.clone()
+                        },
+                        jyutping: jyutping.and_then(|engine| engine.annotate(&line.text)),
                     })
                     .collect(),
             })),
         }
+    }
+
+    #[cfg(test)]
+    fn simplified(&self) -> Self {
+        self.styled(true, None)
     }
 }
 
@@ -318,6 +331,7 @@ pub struct Core {
     /// Chinese off has to re-derive from these rather than from what is on
     /// screen, and doing that without a round trip to LRCLib is the point.
     lyrics_source: Mutex<LyricsView>,
+    jyutping: Arc<Jyutping>,
     volume: Mutex<VolumeCalibration>,
     /// Window labels with a lyrics panel open. No point reaching out to the
     /// network for a panel nobody is looking at.
@@ -328,10 +342,18 @@ pub struct Core {
     cover_token: AtomicU64,
     queue_token: AtomicU64,
     lyrics_token: AtomicU64,
+    /// Guards background display conversion independently of network fetches.
+    /// A setting change or new source invalidates work already in flight.
+    lyrics_style_token: AtomicU64,
 }
 
 impl Core {
-    pub fn new(app: AppHandle, store: Arc<Store>, api: Arc<Api>) -> Self {
+    pub fn new(
+        app: AppHandle,
+        store: Arc<Store>,
+        api: Arc<Api>,
+        jyutping: Arc<Jyutping>,
+    ) -> Self {
         let (skin, panel_skin) = (crate::window::skin_of(&store), crate::window::panel_skin_of(&store));
         let tint = store.get(|s| s.tint.clamp(0.0, 1.0));
         // The menu offers ±2s; the file is documented as hand-editable, so a
@@ -354,6 +376,7 @@ impl Core {
             queue: Mutex::new(QueueView::empty()),
             lyrics: Mutex::new(LyricsView::idle()),
             lyrics_source: Mutex::new(LyricsView::idle()),
+            jyutping,
             volume: Mutex::new(VolumeCalibration::default()),
             lyrics_wanted_by: Mutex::new(HashSet::new()),
             // `window::create` restores the stored panel before the window is
@@ -365,6 +388,7 @@ impl Core {
             cover_token: AtomicU64::new(0),
             queue_token: AtomicU64::new(0),
             lyrics_token: AtomicU64::new(0),
+            lyrics_style_token: AtomicU64::new(0),
         }
     }
 
@@ -442,22 +466,13 @@ impl Core {
             .and_then(|track| track.art.clone())
     }
 
-    fn set_lyrics(&self, view: LyricsView) {
+    fn set_lyrics(self: &Arc<Self>, view: LyricsView) {
         *self.lyrics_source.lock().expect("lyrics lock") = view.clone();
-        self.publish_lyrics(view);
+        self.restyle_lyrics();
     }
 
-    /// Convert if the setting asks for it, then push — still only on a real
-    /// change, since a track whose words are already simplified converts to
-    /// itself and must not re-emit for every window on every fetch.
-    ///
-    /// The store is read before the lyrics lock is taken, never inside it.
+    /// Commit a fully styled view, still only on a real change.
     fn publish_lyrics(&self, view: LyricsView) {
-        let view = if self.store.get(|s| s.simplify_lyrics) {
-            view.simplified()
-        } else {
-            view
-        };
         {
             let mut held = self.lyrics.lock().expect("lyrics lock");
             if *held == view {
@@ -468,12 +483,28 @@ impl Core {
         let _ = self.app.emit("lyrics", &view);
     }
 
-    /// Re-derive the shown words from the fetched ones. The Simplified Chinese
-    /// toggle is the only caller: it has to reach the panel that is open now,
-    /// not just the next track's words.
-    pub fn restyle_lyrics(&self) {
+    /// Re-derive the shown words from the fetched ones. Jyutping is dictionary
+    /// work, so keep it off the AppKit/menu thread and reject the result if a
+    /// newer track or toggle superseded it while it was running.
+    pub fn restyle_lyrics(self: &Arc<Self>) {
         let source = self.lyrics_source.lock().expect("lyrics lock").clone();
-        self.publish_lyrics(source);
+        let (simplify, show_jyutping) = self
+            .store
+            .get(|settings| (settings.simplify_lyrics, settings.jyutping_lyrics));
+        let token = self.lyrics_style_token.fetch_add(1, Ordering::SeqCst) + 1;
+
+        if !show_jyutping || source.lyrics.is_none() {
+            self.publish_lyrics(source.styled(simplify, None));
+            return;
+        }
+
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn_blocking(move || {
+            let view = source.styled(simplify, Some(&core.jyutping));
+            if token == core.lyrics_style_token.load(Ordering::SeqCst) {
+                core.publish_lyrics(view);
+            }
+        });
     }
 
     // ---------------------------------------------------------------- tracks
@@ -887,6 +918,7 @@ mod tests {
                     LyricLine {
                         time: Some(0.0),
                         text: "後來我總算學會了如何去愛".into(),
+                        jyutping: None,
                     },
                     // The reason this is not a character table: 乾 is 干 in
                     // 乾淨 and stays 乾 in 乾坤. Any per-character mapping gets
@@ -894,6 +926,7 @@ mod tests {
                     LyricLine {
                         time: Some(1.0),
                         text: "乾淨的乾坤".into(),
+                        jyutping: None,
                     },
                     // Already simplified, and not Chinese at all: both have to
                     // survive untouched, since every line is converted rather
@@ -901,6 +934,7 @@ mod tests {
                     LyricLine {
                         time: Some(2.0),
                         text: "Baby, already 简体 and ASCII".into(),
+                        jyutping: None,
                     },
                 ],
             })),
@@ -925,5 +959,33 @@ mod tests {
     fn a_track_with_no_lyrics_converts_to_itself() {
         let idle = LyricsView::idle();
         assert_eq!(idle.simplified(), idle);
+    }
+
+    #[test]
+    fn jyutping_is_derived_before_simplification() {
+        let view = LyricsView {
+            state: "ready".into(),
+            lyrics: Some(Arc::new(Lyrics {
+                synced: true,
+                how: "exact",
+                lines: vec![LyricLine {
+                    time: Some(1.0),
+                    text: "我心裏".into(),
+                    jyutping: None,
+                }],
+            })),
+        };
+        let engine = Jyutping::from_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/jyutping"),
+        );
+
+        let converted = view.styled(true, Some(&engine));
+        let line = &converted.lyrics.as_ref().expect("lyrics").lines[0];
+        assert_eq!(line.text, "我心里");
+        assert_eq!(line.jyutping.as_deref(), Some("ngo sam leoi"));
+        assert_eq!(
+            view.lyrics.as_ref().expect("source").lines[0].text,
+            "我心裏"
+        );
     }
 }

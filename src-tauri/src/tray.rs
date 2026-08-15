@@ -265,7 +265,7 @@ fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<
 
     let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
         items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
-    Submenu::with_items(app, "Lyrics timing", true, &refs)
+    Submenu::with_items(app, "Timing", true, &refs)
 }
 
 /// Much of the Mandarin and Cantonese catalogue comes back traditional —
@@ -276,11 +276,15 @@ fn simplify_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMe
     CheckMenuItem::with_id(
         app,
         "simplifyLyrics",
-        "Simplified Chinese lyrics",
+        "Simplified Chinese",
         true,
         checked,
         None::<&str>,
     )
+}
+
+fn jyutping_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    CheckMenuItem::with_id(app, "jyutpingLyrics", "Jyutping", true, checked, None::<&str>)
 }
 
 /// How much disk the words may keep, plus the two things you want next to that
@@ -322,7 +326,32 @@ fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<t
     refs.push(&separator);
     refs.push(&open);
     refs.push(&empty);
-    Submenu::with_items(app, "Lyrics cache", true, &refs)
+    Submenu::with_items(app, "Cache", true, &refs)
+}
+
+/// One home for every option that changes lyrics. Cache controls stay in the
+/// tray because they manage application storage rather than the visible card.
+fn lyrics_submenu(
+    app: &AppHandle,
+    offset: f64,
+    simplify: bool,
+    jyutping: bool,
+    cache_mb: Option<f64>,
+) -> tauri::Result<Submenu<tauri::Wry>> {
+    let jyutping = jyutping_lyrics_item(app, jyutping)?;
+    let simplify = simplify_lyrics_item(app, simplify)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let timing = lyric_offset_submenu(app, offset)?;
+    let cache = cache_mb
+        .map(|cap| lyrics_cache_submenu(app, cap))
+        .transpose()?;
+
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&jyutping, &simplify, &separator, &timing];
+    if let Some(cache) = &cache {
+        items.push(cache);
+    }
+    Submenu::with_items(app, "Lyrics", true, &items)
 }
 
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
@@ -424,6 +453,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let tint = store.get(|s| s.tint);
     let lyrics_offset = store.get(|s| s.lyrics_offset);
     let simplify_lyrics = store.get(|s| s.simplify_lyrics);
+    let jyutping_lyrics = store.get(|s| s.jyutping_lyrics);
     // App-level menu, but the corner buttons belong to a card — and the card
     // this one is about is the floating widget, exactly as "Reset size and
     // position" is. The dropdown's own menu carries its own set.
@@ -452,9 +482,13 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity)?,
-            &lyric_offset_submenu(app, lyrics_offset)?,
-            &simplify_lyrics_item(app, simplify_lyrics)?,
-            &lyrics_cache_submenu(app, store.get(|s| s.lyrics_cache_mb))?,
+            &lyrics_submenu(
+                app,
+                lyrics_offset,
+                simplify_lyrics,
+                jyutping_lyrics,
+                Some(store.get(|s| s.lyrics_cache_mb)),
+            )?,
             &corner_submenu(app, &widget_skin, corners, corners_autohide)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -503,7 +537,13 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity))?,
-            &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
+            &lyrics_submenu(
+                app,
+                store.get(|s| s.lyrics_offset),
+                store.get(|s| s.simplify_lyrics),
+                store.get(|s| s.jyutping_lyrics),
+                None,
+            )?,
             &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
@@ -527,8 +567,13 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &skin_submenu(app, "panelSkin", "Dropdown skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
-            &lyric_offset_submenu(app, store.get(|s| s.lyrics_offset))?,
-            &simplify_lyrics_item(app, store.get(|s| s.simplify_lyrics))?,
+            &lyrics_submenu(
+                app,
+                store.get(|s| s.lyrics_offset),
+                store.get(|s| s.simplify_lyrics),
+                store.get(|s| s.jyutping_lyrics),
+                None,
+            )?,
             &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
@@ -644,6 +689,11 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             store.update(|s| s.simplify_lyrics = next);
             // Re-derived rather than refetched, and pushed straight away: the
             // panel you turned this on from is the one you want it to change.
+            app.state::<Arc<Core>>().restyle_lyrics();
+        }
+        "jyutpingLyrics" => {
+            let next = !store.get(|s| s.jyutping_lyrics);
+            store.update(|s| s.jyutping_lyrics = next);
             app.state::<Arc<Core>>().restyle_lyrics();
         }
         // Finder rather than a reveal: the point of the item is to look through

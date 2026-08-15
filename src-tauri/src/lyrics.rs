@@ -32,6 +32,9 @@ pub struct LyricLine {
     /// `None` on an unsynced block — those do not follow along.
     pub time: Option<f64>,
     pub text: String,
+    /// Display-only romanisation. Raw fetched and cached lines leave it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jyutping: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -53,6 +56,20 @@ pub fn how_from(name: &str) -> &'static str {
         "search" => "search",
         "ytmusic" => "ytmusic",
         _ => "cached",
+    }
+}
+
+#[cfg(test)]
+mod line_shape_tests {
+    use super::*;
+
+    #[test]
+    fn old_cached_lines_load_without_display_only_jyutping() {
+        let line: LyricLine = serde_json::from_str(r#"{"time":1.0,"text":"心裏"}"#)
+            .expect("old cache shape still parses");
+        assert_eq!(line.jyutping, None);
+        let encoded = serde_json::to_string(&line).expect("serialises");
+        assert!(!encoded.contains("jyutping"));
     }
 }
 
@@ -119,6 +136,7 @@ pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
                 lines.push(LyricLine {
                     time: Some(minutes * 60.0 + seconds),
                     text: text.clone(),
+                    jyutping: None,
                 });
             }
         }
@@ -154,6 +172,7 @@ fn shape(record: Option<&Value>, how: &'static str) -> Option<Lyrics> {
             .map(|text| LyricLine {
                 time: None,
                 text: text.trim().to_string(),
+                jyutping: None,
             })
             .collect();
         if lines.iter().any(|line| !line.text.is_empty()) {
@@ -321,6 +340,7 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
                 Some(LyricLine {
                     time: Some(start / 1000.0),
                     text: if text == "♪" { "" } else { text }.to_string(),
+                    jyutping: None,
                 })
             })
             .collect();
@@ -334,6 +354,7 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
                     LyricLine {
                         time: Some(0.0),
                         text: String::new(),
+                        jyutping: None,
                     },
                 );
             }
@@ -365,6 +386,7 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
         .map(|text| LyricLine {
             time: None,
             text: text.trim().to_string(),
+            jyutping: None,
         })
         .collect();
 
@@ -637,4 +659,3 @@ mod tests {
         assert_eq!(lead_artist("Solo"), "Solo");
     }
 }
-

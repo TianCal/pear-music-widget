@@ -1017,7 +1017,16 @@ const renderLyrics = () => {
       row.type = 'button';
       row.dataset.index = String(index);
     }
-    row.textContent = line.text;
+    const text = document.createElement('span');
+    text.className = 'lyric-text';
+    text.textContent = line.text;
+    row.append(text);
+    if (line.jyutping) {
+      const jyutping = document.createElement('span');
+      jyutping.className = 'lyric-jyutping';
+      jyutping.textContent = line.jyutping;
+      row.append(jyutping);
+    }
     el.lyricsLines.append(row);
   });
 };
@@ -1684,4 +1693,3 @@ window.addEventListener('resize', () => {
 });
 
 bumpProgress();
-
