@@ -122,7 +122,7 @@ let state = {
 };
 
 // Local playhead: the server only pushes a position roughly once a second, so
-// we extrapolate between updates to keep the bar moving at 60fps.
+// we extrapolate between updates to keep the bar moving between pushes.
 const clock = { position: 0, at: performance.now(), playing: false };
 
 let seeking = false;
@@ -314,9 +314,9 @@ const renderStatus = () => {
     String(offline ? 0 : CORNERS.filter((button) => corners[button.key] !== false).length),
   );
 
-  // Only when the setting itself moved. `renderStatus` runs on every state
-  // push — about once a second — and re-arming the countdown each time is what
-  // made it never expire at all.
+  // Only when the setting itself moved. Other chrome changes can call this
+  // renderer too, and re-arming the countdown for any of them would extend the
+  // fade for reasons unrelated to pointer activity.
   if (cornerFadeArmedFor !== (state.cornersAutohide || 0)) {
     el.cornerBar.classList.remove('idle');
     armCornerFade();
@@ -391,8 +391,42 @@ const renderSong = () => {
    for tracks nobody has scrolled to. */
 
 /** Artwork already resolved, keyed by videoId. Survives a queue change: the
- *  same track scrolled back to is already paid for. */
-const artOf = (videoId) => state.art.get(videoId) || null;
+ *  same track scrolled back to is already paid for. The Rust cache has the same
+ *  byte and entry ceilings; bounding this copy matters because every webview
+ *  owns its own JavaScript heap. Data URLs are ASCII, so a character budget
+ *  mirrors the source-byte budget even if the engine's storage differs. */
+const ART_CACHE_CHARS = 4 * 1024 * 1024;
+const ART_CACHE_MAX = 256;
+let artChars = 0;
+
+const artOf = (videoId) => {
+  const art = state.art.get(videoId) || null;
+  if (art) {
+    // Map iteration order is the eviction order. Reinsert a hit to promote it.
+    state.art.delete(videoId);
+    state.art.set(videoId, art);
+  }
+  return art;
+};
+
+const cacheArt = (videoId, art) => {
+  const replaced = state.art.get(videoId);
+  if (replaced) {
+    artChars -= videoId.length + replaced.length;
+    state.art.delete(videoId);
+  }
+
+  state.art.set(videoId, art);
+  artChars += videoId.length + art.length;
+
+  while (state.art.size > ART_CACHE_MAX || artChars > ART_CACHE_CHARS) {
+    const oldestId = state.art.keys().next().value;
+    if (oldestId === undefined) break;
+    const dropped = state.art.get(oldestId);
+    state.art.delete(oldestId);
+    artChars -= oldestId.length + (dropped?.length || 0);
+  }
+};
 
 let artPending = null;
 let artTimer = null;
@@ -416,7 +450,7 @@ const wantArt = (ids, size) => {
 
     let landed = false;
     for (const [id, art] of Object.entries(reply.art || {})) {
-      state.art.set(id, art);
+      cacheArt(id, art);
       landed = true;
     }
     // Written straight into whatever is on screen rather than re-rendering: a
@@ -641,9 +675,9 @@ el.queueList.addEventListener('click', (event) => {
   jumpTo(Number(row.dataset.slot), row.dataset.videoId);
 });
 
-/* Written on every push, but almost never actually different. `classList.toggle`
-   is already a no-op when the class is where it should be; `setAttribute` on a
-   `<use>` is not — it re-resolves the reference — and neither is a style write. */
+/* Several player fields share this renderer. `classList.toggle` is already a
+   no-op when the class is where it should be; `setAttribute` on a `<use>` is
+   not — it re-resolves the reference — and neither is a style write. */
 const written = { play: null, like: null, volume: null, repeat: null };
 
 /** Only ALL and ONE are reachable from here — see the `repeat` command. The
@@ -740,10 +774,12 @@ new ResizeObserver((entries) => {
   renderProgress();
 }).observe(el.rail);
 
-// The playhead only moves under its own steam while the track is playing, and
-// only matters while the window is on screen. Outside of that the loop is not
-// smoothing anything — it is redrawing a still frame — so it stops, and the
-// events that can move the playhead restart it.
+// The playhead is quantised to whole pixels, so display-refresh cadence spends
+// almost every callback rediscovering the same pixel. Ten updates a second are
+// comfortably faster than the rail can move, while keeping lyric cues within
+// 100 ms. Direct state and pointer changes still render immediately below.
+// The loop stops as soon as playback pauses or the surface is hidden.
+const PROGRESS_TICK_MS = 100;
 let ticking = false;
 
 const shouldTick = () => !document.hidden && (clock.playing || seeking);
@@ -751,31 +787,51 @@ const shouldTick = () => !document.hidden && (clock.playing || seeking);
 const tick = () => {
   renderProgress();
   ticking = shouldTick();
-  if (ticking) requestAnimationFrame(tick);
+  if (ticking) setTimeout(tick, PROGRESS_TICK_MS);
 };
 
 /** Render now, and resume the loop if there is anything left to animate. */
 const bumpProgress = () => {
-  if (ticking) return; // the running loop will pick the change up next frame
-  if (shouldTick()) {
+  renderProgress();
+  if (!ticking && shouldTick()) {
     ticking = true;
-    requestAnimationFrame(tick);
-  } else {
-    renderProgress();
+    setTimeout(tick, PROGRESS_TICK_MS);
   }
 };
 
 // ------------------------------------------------------------------ state
 
 const applyState = (next) => {
+  const firstState = skinApplied === null;
   const positionChanged = next.position !== state.position;
   const playingChanged = next.isPlaying !== state.isPlaying;
   const songChanged = next.song?.videoId !== state.song?.videoId;
+  const songTextChanged =
+    next.song?.title !== state.song?.title ||
+    next.song?.artist !== state.song?.artist ||
+    next.song?.album !== state.song?.album;
   const tintChanged = next.tint !== state.tint;
+  const statusChanged = next.status !== state.status;
   const skin = skinOf(next);
+  const skinChanged = skin !== skinOf(state);
+  const songPresenceChanged = !!next.song !== !!state.song;
+  const previousCorners = cornersOf(state);
+  const nextCorners = cornersOf(next);
+  const chromeChanged =
+    statusChanged ||
+    songPresenceChanged ||
+    skinChanged ||
+    next.cornersAutohide !== state.cornersAutohide ||
+    CORNERS.some(({ key }) => nextCorners[key] !== previousCorners[key]);
 
   // Keep the level the user is actually setting while our own echoes drain.
   const heldVolume = holdingVolume() ? { volume: state.volume, muted: state.muted } : null;
+  const controlsChanged =
+    playingChanged ||
+    next.shuffle !== state.shuffle ||
+    next.repeat !== state.repeat ||
+    next.like !== state.like ||
+    (!heldVolume && (next.volume !== state.volume || next.muted !== state.muted));
 
   // Merged rather than replaced: artwork, the queue and the lyrics live on this
   // same object but arrive on their own events, and this push does not carry them.
@@ -813,11 +869,15 @@ const applyState = (next) => {
   // The cover has not changed, so renderCover will not re-mix the wash.
   if (tintChanged) applyPalette(state.cover);
 
-  renderStatus();
-  renderSong();
-  renderControls();
-  renderUpNext();
-  renderQueue();
+  // A position push is by far the common case. Leave every unrelated DOM tree
+  // alone: queue data has its own event, and the remaining renderers name the
+  // small slice of player state they actually depend on here.
+  if (firstState || chromeChanged) renderStatus();
+  if (firstState || songTextChanged) renderSong();
+  if (firstState || controlsChanged) renderControls();
+  if (firstState || statusChanged || songPresenceChanged || skinChanged) {
+    renderUpNext();
+  }
   bumpProgress();
 };
 
