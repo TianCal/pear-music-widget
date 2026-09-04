@@ -129,6 +129,22 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
+    fn apply_position(&mut self, position: f64) {
+        // Play/pause events can carry the media timeline's currentTime rather
+        // than song-relative progress. REST and PLAYER_INFO cache that value
+        // too. Keep the last valid playhead instead of clamping to the end,
+        // which would select the final lyric on every pause.
+        if !position.is_finite() || position < 0.0 {
+            return;
+        }
+        if let Some(song) = &self.song {
+            if song.song_duration > 0.0 && position > song.song_duration {
+                return;
+            }
+        }
+        self.position = position;
+    }
+
     fn new(
         skin: String,
         panel_skin: String,
@@ -524,6 +540,7 @@ impl Core {
 
         self.update(|state| {
             state.song = song.clone();
+            state.position = 0.0;
             state.like = None;
         });
         self.set_cover(None);
@@ -721,7 +738,7 @@ impl Core {
                     state.is_playing = !paused;
                 }
                 if let Some(elapsed) = song.get("elapsedSeconds").and_then(Value::as_f64) {
-                    state.position = elapsed;
+                    state.apply_position(elapsed);
                 }
             }
         });
@@ -758,7 +775,7 @@ impl Core {
                 let volume = number("volume");
                 self.update(|state| {
                     state.is_playing = flag("isPlaying");
-                    state.position = number("position").unwrap_or(0.0);
+                    state.apply_position(number("position").unwrap_or(0.0));
                     if let Some(volume) = volume {
                         state.volume = volume;
                     }
@@ -775,7 +792,7 @@ impl Core {
                     .and_then(|song| song.get("isPaused"))
                     .and_then(Value::as_bool);
                 self.update(|state| {
-                    state.position = number("position").unwrap_or(0.0);
+                    state.apply_position(number("position").unwrap_or(0.0));
                     if let Some(paused) = paused {
                         state.is_playing = !paused;
                     }
@@ -786,13 +803,13 @@ impl Core {
                 self.update(|state| {
                     state.is_playing = flag("isPlaying");
                     if let Some(position) = position {
-                        state.position = position;
+                        state.apply_position(position);
                     }
                 });
             }
             "POSITION_CHANGED" => {
                 let position = number("position").unwrap_or(0.0);
-                self.update(|state| state.position = position);
+                self.update(|state| state.apply_position(position));
             }
             "VOLUME_CHANGED" => {
                 let reported = number("volume");
@@ -874,6 +891,70 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn playback_state() -> PlayerState {
+        let mut state = PlayerState::new(
+            "classic".into(),
+            "classic".into(),
+            1.0,
+            0.0,
+            SkinCorners::default(),
+            0.0,
+        );
+        state.song = Some(Song {
+            song_duration: 241.0,
+            ..Song::default()
+        });
+        state
+    }
+
+    #[test]
+    fn pause_keeps_the_lyric_playhead_at_the_last_valid_position() {
+        let mut state = playback_state();
+        // Captured from the local player: progress ticks are song-relative,
+        // but the pause event reports a media timestamp beyond the song's end.
+        state.is_playing = true;
+        state.apply_position(211.0);
+        state.is_playing = false;
+        state.apply_position(3445.0);
+        assert_eq!(state.position, 211.0, "pause must not jump lyrics to the end");
+        // A cached REST/PLAYER_INFO response can repeat the same bad timestamp.
+        state.apply_position(3445.0);
+        assert_eq!(state.position, 211.0);
+        state.apply_position(212.0);
+        assert_eq!(state.position, 212.0);
+    }
+
+    #[test]
+    fn valid_seeks_and_resume_still_update_the_lyric_playhead() {
+        let mut state = playback_state();
+        for position in [120.0, 30.0, 0.0, 241.0] {
+            state.apply_position(position);
+            assert_eq!(state.position, position);
+        }
+        state.apply_position(120.0);
+        state.is_playing = true;
+        state.apply_position(3445.0);
+        assert_eq!(state.position, 120.0);
+        state.apply_position(121.0);
+        assert_eq!(state.position, 121.0);
+    }
+
+    #[test]
+    fn position_validation_handles_invalid_values_and_unknown_duration() {
+        let mut state = playback_state();
+        state.apply_position(120.0);
+        for position in [-1.0, f64::NAN, f64::INFINITY] {
+            state.apply_position(position);
+            assert_eq!(state.position, 120.0);
+        }
+        state.song.as_mut().unwrap().song_duration = 0.0;
+        state.apply_position(300.0);
+        assert_eq!(state.position, 300.0);
+        state.song = None;
+        state.apply_position(301.0);
+        assert_eq!(state.position, 301.0);
+    }
 
     #[test]
     fn learns_the_players_curve_from_one_pair() {
