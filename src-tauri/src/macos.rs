@@ -14,10 +14,12 @@
 //! Posting keeps everything in FIFO order with the resize, at the cost of these
 //! being fire-and-forget. Nothing here needs a return value.
 
+use std::ffi::CString;
+
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{class, msg_send};
-use objc2_foundation::{NSRect, NSSize};
-use tauri::WebviewWindow;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+use tauri::{AppHandle, WebviewWindow};
 
 /// Above everything, including other apps' floating windows: a dropdown from
 /// the menu bar has to sit over whatever it drops onto.
@@ -96,6 +98,54 @@ pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
     let alpha = alpha.clamp(0.0, 1.0);
     with_ns_window(window, move |handle| unsafe {
         let _: () = msg_send![handle, setAlphaValue: alpha];
+    });
+}
+
+/// Ask for an exact widget opacity without turning the menu into a long list of
+/// percentages. The alert is dispatched onto AppKit's thread and returns its
+/// result through the callback, so menu handling never reaches across threads.
+pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
+    let current = (current.clamp(0.01, 1.0) * 100.0).round() as isize;
+    let _ = app.run_on_main_thread(move || unsafe {
+        let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
+        let field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
+        let field: *mut AnyObject = msg_send![field, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(220.0, 24.0),
+        )];
+
+        let message: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"Custom Widget Opacity".as_ptr()
+        ];
+        let detail: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"Enter a whole number from 1 to 100%.".as_ptr()
+        ];
+        let apply_title: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Apply".as_ptr()];
+        let cancel_title: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Cancel".as_ptr()];
+        let value = CString::new(current.to_string()).expect("opacity contains no NUL");
+        let value: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: value.as_ptr()];
+
+        let _: () = msg_send![alert, setMessageText: message];
+        let _: () = msg_send![alert, setInformativeText: detail];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: apply_title];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: cancel_title];
+        let _: () = msg_send![field, setStringValue: value];
+        let _: () = msg_send![alert, setAccessoryView: field];
+        let _: () = msg_send![field, release];
+
+        // NSAlertFirstButtonReturn. Keep the current value when the text is not
+        // a valid percentage instead of turning an accidental zero invisible.
+        let response: isize = msg_send![alert, runModal];
+        let percent: isize = msg_send![field, integerValue];
+        let _: () = msg_send![alert, release];
+        if response == 1000 && (1..=100).contains(&percent) {
+            apply(percent as f64 / 100.0);
+        }
     });
 }
 

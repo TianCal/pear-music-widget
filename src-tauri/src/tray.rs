@@ -55,9 +55,7 @@ fn is_double_click() -> bool {
 /// pear-desktop and th-ch's build ship the same appId, so one id covers both.
 const MUSIC_APP_ID: &str = "com.github.th-ch.youtube-music";
 
-// Finer steps near the top, because that is the range worth having: below
-// about 80% the text starts fighting whatever is behind the glass.
-const OPACITIES: [u32; 5] = [100, 95, 90, 85, 80];
+const OPACITIES: [u32; 4] = [100, 75, 50, 25];
 
 /// How strongly the cover's colours wash the card. Stored as a fraction, shown
 /// by name — "40%" means nothing to look at, whereas "Subtle" does.
@@ -229,6 +227,15 @@ fn opacity_submenu(
         })
         .collect::<tauri::Result<_>>()?;
 
+    let custom = CheckMenuItem::with_id(
+        app,
+        "opacity:custom",
+        "Custom…",
+        true,
+        !OPACITIES.contains(&selected),
+        None::<&str>,
+    )?;
+
     let separator = PredefinedMenuItem::separator(app)?;
     let glass = CheckMenuItem::with_id(
         app,
@@ -240,6 +247,7 @@ fn opacity_submenu(
     )?;
     let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
         items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    refs.push(&custom);
     refs.push(&separator);
     refs.push(&glass);
     Submenu::with_items(app, "Opacity", true, &refs)
@@ -802,6 +810,16 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     // nudge has to reach it as state.
                     app.state::<Arc<Core>>().update(|state| state.lyrics_offset = offset);
                 }
+            } else if other == "opacity:custom" {
+                let handle = app.clone();
+                crate::macos::prompt_opacity(app, store.get(|s| s.opacity), move |opacity| {
+                    let store = handle.state::<Arc<Store>>().inner().clone();
+                    store.update(|s| s.opacity = opacity);
+                    if let Some(widget) = handle.get_webview_window(WIDGET) {
+                        crate::macos::set_alpha(&widget, opacity);
+                    }
+                    refresh(&handle);
+                });
             } else if let Some(pct) = other.strip_prefix("opacity:") {
                 if let Ok(pct) = pct.parse::<f64>() {
                     let opacity = pct / 100.0;
