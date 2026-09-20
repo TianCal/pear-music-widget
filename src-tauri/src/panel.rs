@@ -82,7 +82,13 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // of the menu bar it hangs from.
     // The dropdown always follows: it drops from the menu bar, which is
     // wherever you are, including over a fullscreen app.
-    window::dress(&panel, NSVisualEffectMaterial::Menu, Some(macos::LEVEL_POPUP_MENU), true);
+    window::dress(
+        &panel,
+        NSVisualEffectMaterial::Menu,
+        Some(macos::LEVEL_POPUP_MENU),
+        true,
+        app.state::<Arc<Store>>().get(|s| s.liquid_glass),
+    );
     window::apply_zoom(app, &panel);
 
     Ok(panel)

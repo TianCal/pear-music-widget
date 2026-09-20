@@ -14,9 +14,9 @@
 //! Posting keeps everything in FIFO order with the resize, at the cost of these
 //! being fire-and-forget. Nothing here needs a return value.
 
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{class, msg_send};
-use objc2_foundation::NSSize;
+use objc2_foundation::{NSRect, NSSize};
 use tauri::WebviewWindow;
 
 /// Above everything, including other apps' floating windows: a dropdown from
@@ -25,6 +25,12 @@ pub const LEVEL_POPUP_MENU: isize = 101;
 
 const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
 const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+const VIEW_WIDTH_SIZABLE: usize = 1 << 1;
+const VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
+
+pub fn supports_liquid_glass() -> bool {
+    AnyClass::get(c"NSGlassEffectView").is_some()
+}
 
 /// Run `edit` against the NSWindow, on the main thread, behind anything already
 /// queued for this window. A no-op once the window is gone.
@@ -124,5 +130,67 @@ pub fn follow_everywhere(window: &WebviewWindow, follow: bool) {
 pub fn set_has_shadow(window: &WebviewWindow, shadow: bool) {
     with_ns_window(window, move |handle| unsafe {
         let _: () = msg_send![handle, setHasShadow: shadow];
+    });
+}
+
+/// Use macOS's native Liquid Glass container when the runtime provides it.
+///
+/// Looking the class up dynamically keeps the existing vibrancy path available
+/// on older macOS releases. The renderer's cover-derived ambient colours remain
+/// above the native material, so the glass does not need its own tint colour.
+pub fn install_liquid_glass(window: &WebviewWindow, corner_radius: f64, enabled: bool) -> bool {
+    let Some(glass_class) = AnyClass::get(c"NSGlassEffectView") else {
+        return false;
+    };
+
+    with_ns_window(window, move |handle| unsafe {
+        let content: *mut AnyObject = msg_send![handle, contentView];
+        if content.is_null() {
+            return;
+        }
+
+        let frame: NSRect = msg_send![content, frame];
+        let root: *mut AnyObject = msg_send![class!(NSView), alloc];
+        let root: *mut AnyObject = msg_send![root, initWithFrame: frame];
+        let glass: *mut AnyObject = msg_send![glass_class, alloc];
+        let glass: *mut AnyObject = msg_send![glass, initWithFrame: frame];
+        let autoresize = VIEW_WIDTH_SIZABLE | VIEW_HEIGHT_SIZABLE;
+
+        // Regular glass keeps substantially more of its tone when the window
+        // resigns key. Clear glass swings from almost transparent to a dense
+        // inactive fill, which is too large a state change for a persistent
+        // desktop widget.
+        let _: () = msg_send![glass, setStyle: 0isize];
+        let _: () = msg_send![glass, setCornerRadius: corner_radius];
+        let _: () = msg_send![glass, setAutoresizingMask: autoresize];
+        let _: () = msg_send![glass, setHidden: !enabled];
+        let _: () = msg_send![content, retain];
+        let _: () = msg_send![content, setFrame: frame];
+        let _: () = msg_send![content, setAutoresizingMask: autoresize];
+        let _: () = msg_send![root, addSubview: glass];
+        let _: () = msg_send![root, addSubview: content];
+        let _: () = msg_send![handle, setContentView: root];
+        let _: () = msg_send![content, release];
+        let _: () = msg_send![glass, release];
+        let _: () = msg_send![root, release];
+    });
+    true
+}
+
+/// Showing or hiding the material is constant work and does not reconstruct the
+/// WKWebView. The glass view was installed once by `install_liquid_glass` and
+/// remains the root container's first subview.
+pub fn set_liquid_glass(window: &WebviewWindow, enabled: bool) {
+    let Some(glass_class) = AnyClass::get(c"NSGlassEffectView") else {
+        return;
+    };
+    with_ns_window(window, move |handle| unsafe {
+        let root: *mut AnyObject = msg_send![handle, contentView];
+        let subviews: *mut AnyObject = msg_send![root, subviews];
+        let glass: *mut AnyObject = msg_send![subviews, firstObject];
+        let is_glass: bool = msg_send![glass, isKindOfClass: glass_class];
+        if is_glass {
+            let _: () = msg_send![glass, setHidden: !enabled];
+        }
     });
 }

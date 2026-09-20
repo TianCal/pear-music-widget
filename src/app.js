@@ -99,6 +99,7 @@ let state = {
   status: 'connecting',
   skin: 'classic',
   panelSkin: 'classic',
+  liquidGlass: true,
   tint: 1,
   lyricsOffset: 0,
   /** Per skin — see `cornersOf`. Empty means every skin is at its defaults. */
@@ -210,6 +211,14 @@ const setupMarquee = (span, { intro = false } = {}) => {
   }
 };
 
+/** Recalculate the resting title width without replaying its intro pass. */
+const refreshMarquees = () => {
+  requestAnimationFrame(() => {
+    setupMarquee(el.title);
+    setupMarquee(el.subtitle);
+  });
+};
+
 // Entering the shared title region switches both lines to hover control. An
 // unfinished intro must not resume after the pointer leaves.
 el.titles.addEventListener('mouseenter', () => {
@@ -255,6 +264,13 @@ let cornerWokeAt = 0;
  *  change it leaves the countdown alone. */
 let cornerFadeArmedFor = null;
 
+/** Give hidden corner controls' gutter back to the titles, and remeasure it. */
+const setCornerIdle = (idle) => {
+  if (el.cornerBar.classList.contains('idle') === idle) return;
+  el.cornerBar.classList.toggle('idle', idle);
+  refreshMarquees();
+};
+
 const armCornerFade = () => {
   clearTimeout(cornerIdleTimer);
   cornerIdleTimer = null;
@@ -266,7 +282,7 @@ const armCornerFade = () => {
   // closes a panel too, but only once the widget has focus, which a widget
   // usually does not.)
   if (!after) return;
-  cornerIdleTimer = setTimeout(() => el.cornerBar.classList.add('idle'), after * 1000);
+  cornerIdleTimer = setTimeout(() => setCornerIdle(true), after * 1000);
 };
 
 /* The close button rides the same wake, on its own countdown. Two differences
@@ -297,7 +313,7 @@ const wakeChrome = () => {
   // timeout per event is pure churn while the pointer is travelling.
   if (!asleep && now - cornerWokeAt < 200) return;
   cornerWokeAt = now;
-  el.cornerBar.classList.remove('idle');
+  setCornerIdle(false);
   armCornerFade();
   if (!IS_PANEL) wakeClose();
 };
@@ -311,6 +327,12 @@ const wakeChrome = () => {
 for (const signal of ['mousemove', 'mouseover', 'mousedown', 'wheel']) {
   document.addEventListener(signal, wakeChrome, { passive: true });
 }
+
+// The idle bar can remain CSS-visible while the pointer rests over the card.
+// Remeasure once it actually leaves and the reclaimed gutter becomes real.
+el.card.addEventListener('mouseleave', () => {
+  if (el.cornerBar.classList.contains('idle')) refreshMarquees();
+});
 
 /* Same dismissal as "Hide widget" in the menu — the tray's "Show floating
    widget" is the way back, and nothing else about the app changes. */
@@ -341,7 +363,7 @@ const renderStatus = () => {
   // renderer too, and re-arming the countdown for any of them would extend the
   // fade for reasons unrelated to pointer activity.
   if (cornerFadeArmedFor !== (state.cornersAutohide || 0)) {
-    el.cornerBar.classList.remove('idle');
+    setCornerIdle(false);
     armCornerFade();
   }
 
@@ -391,7 +413,17 @@ const renderCover = () => {
 const renderSong = ({ restartMarquee = false } = {}) => {
   const song = state.song;
   const title = song?.title || 'Nothing playing';
-  const subtitle = song ? [song.artist, song.album].filter(Boolean).join(' — ') : '';
+  const releaseName = (value) =>
+    (value || '')
+      .trim()
+      .replace(/\s*[-–—]\s*(single|ep)\s*$/i, '')
+      // YouTube Music can spell the same version label in different Chinese
+      // scripts (for example `(粤语版)` on the song and `(粵語版)` on the EP).
+      .replace(/\s*(?:\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】)\s*$/u, '')
+      .trim()
+      .toLocaleLowerCase();
+  const album = song && releaseName(song.album) !== releaseName(song.title) ? song.album : '';
+  const subtitle = song ? [song.artist, album].filter(Boolean).join(' — ') : '';
 
   const titleChanged = title !== lastTitle;
   if (titleChanged) {
@@ -841,6 +873,7 @@ const applyState = (next) => {
     next.song?.artist !== state.song?.artist ||
     next.song?.album !== state.song?.album;
   const tintChanged = next.tint !== state.tint;
+  const liquidGlassChanged = next.liquidGlass !== state.liquidGlass;
   const statusChanged = next.status !== state.status;
   const skin = skinOf(next);
   const skinChanged = skin !== skinOf(state);
@@ -866,6 +899,10 @@ const applyState = (next) => {
   // Merged rather than replaced: artwork, the queue and the lyrics live on this
   // same object but arrive on their own events, and this push does not carry them.
   Object.assign(state, next);
+
+  if (firstState || liquidGlassChanged) {
+    document.body.classList.toggle('liquid-glass', !!state.liquidGlass);
+  }
 
   if (heldVolume) {
     state.volume = heldVolume.volume;

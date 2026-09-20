@@ -100,6 +100,9 @@ fn default_always_on_top() -> bool {
 fn default_opacity() -> f64 {
     1.0
 }
+fn default_liquid_glass() -> bool {
+    true
+}
 fn default_tint() -> f64 {
     1.0
 }
@@ -133,6 +136,9 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(default = "default_opacity")]
     pub opacity: f64,
+    /// Use macOS's native Liquid Glass material when the runtime supports it.
+    #[serde(rename = "liquidGlass", default = "default_liquid_glass")]
+    pub liquid_glass: bool,
     /// How strongly the cover's colours wash the card, 0..=1.
     #[serde(default = "default_tint")]
     pub tint: f64,
@@ -188,6 +194,7 @@ impl Default for Settings {
             panel_skin: default_skin(),
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
+            liquid_glass: default_liquid_glass(),
             tint: default_tint(),
             lyrics_offset: 0.0,
             simplify_lyrics: false,
@@ -319,6 +326,7 @@ mod tests {
     #[test]
     fn a_file_with_no_corners_key_leaves_every_skin_at_its_default() {
         let settings: Settings = serde_json::from_str("{}").expect("parses");
+        assert!(settings.liquid_glass);
         assert!(!settings.jyutping_lyrics);
         assert!(settings.corners.is_empty());
         assert_eq!(
@@ -329,12 +337,14 @@ mod tests {
 
     #[test]
     fn persists_the_jyutping_toggle_and_unknown_keys() {
-        let text = r#"{ "jyutpingLyrics": true, "futureOption": 7 }"#;
+        let text = r#"{ "liquidGlass": false, "jyutpingLyrics": true, "futureOption": 7 }"#;
         let settings: Settings = serde_json::from_str(text).expect("parses");
+        assert!(!settings.liquid_glass);
         assert!(settings.jyutping_lyrics);
         assert_eq!(settings.extra["futureOption"], 7);
 
         let encoded = serde_json::to_string(&settings).expect("serialises");
+        assert!(encoded.contains("\"liquidGlass\":false"));
         assert!(encoded.contains("\"jyutpingLyrics\":true"));
         assert!(encoded.contains("\"futureOption\":7"));
     }

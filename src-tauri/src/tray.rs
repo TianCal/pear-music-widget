@@ -209,7 +209,11 @@ fn skin_submenu(
     Submenu::with_items(app, label, true, &refs)
 }
 
-fn opacity_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
+fn opacity_submenu(
+    app: &AppHandle,
+    current: f64,
+    liquid_glass: bool,
+) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 100.0).round() as u32;
     let items: Vec<CheckMenuItem<tauri::Wry>> = OPACITIES
         .iter()
@@ -225,8 +229,19 @@ fn opacity_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri
         })
         .collect::<tauri::Result<_>>()?;
 
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+    let separator = PredefinedMenuItem::separator(app)?;
+    let glass = CheckMenuItem::with_id(
+        app,
+        "liquidGlass",
+        "Liquid Glass",
+        crate::macos::supports_liquid_glass(),
+        liquid_glass,
+        None::<&str>,
+    )?;
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
         items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    refs.push(&separator);
+    refs.push(&glass);
     Submenu::with_items(app, "Opacity", true, &refs)
 }
 
@@ -481,7 +496,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &skin_submenu(app, "skin", "Skin", &widget_skin)?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
-            &opacity_submenu(app, opacity)?,
+            &opacity_submenu(app, opacity, store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
                 app,
                 lyrics_offset,
@@ -536,7 +551,11 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
-            &opacity_submenu(app, store.get(|s| s.opacity))?,
+            &opacity_submenu(
+                app,
+                store.get(|s| s.opacity),
+                store.get(|s| s.liquid_glass),
+            )?,
             &lyrics_submenu(
                 app,
                 store.get(|s| s.lyrics_offset),
@@ -670,6 +689,17 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 let _ = widget.set_always_on_top(next);
                 crate::macos::follow_everywhere(widget, next);
             }
+        }
+        "liquidGlass" => {
+            let next = !store.get(|s| s.liquid_glass);
+            store.update(|s| s.liquid_glass = next);
+            for label in [WIDGET, crate::window::PANEL] {
+                if let Some(window) = app.get_webview_window(label) {
+                    crate::macos::set_liquid_glass(&window, next);
+                }
+            }
+            app.state::<Arc<Core>>()
+                .update(|state| state.liquid_glass = next);
         }
         "reset" => {
             if let Some(widget) = &widget {

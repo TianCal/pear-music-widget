@@ -415,14 +415,17 @@ pub fn dress(
     material: NSVisualEffectMaterial,
     level: Option<isize>,
     follow_everywhere: bool,
+    liquid_glass: bool,
 ) {
-    if let Err(err) = apply_vibrancy(
-        window,
-        material,
-        Some(NSVisualEffectState::Active),
-        Some(CORNER_RADIUS),
-    ) {
-        eprintln!("[vibrancy] {}: {err}", window.label());
+    if !macos::install_liquid_glass(window, CORNER_RADIUS, liquid_glass) {
+        if let Err(err) = apply_vibrancy(
+            window,
+            material,
+            Some(NSVisualEffectState::Active),
+            Some(CORNER_RADIUS),
+        ) {
+            eprintln!("[vibrancy] {}: {err}", window.label());
+        }
     }
     macos::set_has_shadow(window, true);
     if let Some(level) = level {
@@ -482,6 +485,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         NSVisualEffectMaterial::UnderWindowBackground,
         None,
         store.get(|s| s.always_on_top),
+        store.get(|s| s.liquid_glass),
     );
     macos::set_alpha(&window, store.get(|s| s.opacity));
     let shape = shape_of(&skin, None);

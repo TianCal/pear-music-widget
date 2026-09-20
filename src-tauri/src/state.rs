@@ -98,6 +98,9 @@ pub struct PlayerState {
     pub status_message: String,
     pub skin: String,
     pub panel_skin: String,
+    /// Native glass is installed once per window and only shown or hidden when
+    /// this changes; the renderer uses the same flag for its fallback surface.
+    pub liquid_glass: bool,
     /// How strongly the cover's colours wash the card, 0..=1. Mixed in the
     /// renderer, so it travels with the rest of the state.
     pub tint: f64,
@@ -148,6 +151,7 @@ impl PlayerState {
     fn new(
         skin: String,
         panel_skin: String,
+        liquid_glass: bool,
         tint: f64,
         lyrics_offset: f64,
         corners: SkinCorners,
@@ -158,6 +162,7 @@ impl PlayerState {
             status_message: String::new(),
             skin,
             panel_skin,
+            liquid_glass,
             tint,
             lyrics_offset,
             corners,
@@ -371,6 +376,7 @@ impl Core {
         jyutping: Arc<Jyutping>,
     ) -> Self {
         let (skin, panel_skin) = (crate::window::skin_of(&store), crate::window::panel_skin_of(&store));
+        let liquid_glass = store.get(|s| s.liquid_glass);
         let tint = store.get(|s| s.tint.clamp(0.0, 1.0));
         // The menu offers ±2s; the file is documented as hand-editable, so a
         // wider nudge typed in by hand is honoured — just not one that would
@@ -387,7 +393,15 @@ impl Core {
             app,
             store,
             api,
-            player: Mutex::new(PlayerState::new(skin, panel_skin, tint, lyrics_offset, corners, corners_autohide)),
+            player: Mutex::new(PlayerState::new(
+                skin,
+                panel_skin,
+                liquid_glass,
+                tint,
+                lyrics_offset,
+                corners,
+                corners_autohide,
+            )),
             cover: Mutex::new(None),
             queue: Mutex::new(QueueView::empty()),
             lyrics: Mutex::new(LyricsView::idle()),
@@ -896,6 +910,7 @@ mod tests {
         let mut state = PlayerState::new(
             "classic".into(),
             "classic".into(),
+            true,
             1.0,
             0.0,
             SkinCorners::default(),

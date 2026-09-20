@@ -115,9 +115,9 @@ body {
   height: 100%;
 }
 
-/* The window itself is the card: the vibrancy layer is rounded to the same
-   radius and macOS draws the shadow around it, so this only paints the
-   translucent surface on top. */
+/* The window itself is one continuous native glass sheet. Album colours remain
+   a renderer layer above it; controls and queue content do not create their
+   own glass islands. */
 .card {
   position: relative;
   display: flex;
@@ -128,6 +128,10 @@ body {
   overflow: hidden;
   background: var(--surface);
   box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+body.liquid-glass .card {
+  background: transparent;
 }
 
 /* A borderless window still resizes from its edges natively, but only where the
@@ -200,12 +204,12 @@ body.panel .resize-edges {
 .scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(105deg, rgba(0, 0, 0, 0.2) 0%, rgba(0, 0, 0, 0.04) 55%, rgba(0, 0, 0, 0.16) 100%);
+  background: rgba(0, 0, 0, 0.04);
 }
 
 @media (prefers-color-scheme: light) {
   .scrim {
-    background: linear-gradient(105deg, rgba(255, 255, 255, 0.34) 0%, rgba(255, 255, 255, 0.14) 55%, rgba(255, 255, 255, 0.3) 100%);
+    background: rgba(255, 255, 255, 0.08);
   }
 }
 
@@ -287,11 +291,12 @@ body.panel .resize-edges {
    `--corner-count` is written on <body> by renderStatus. Turning them off gives
    the title the column back, which is most of the point on the smallest skin. */
 .titles {
+  --corner-step: 22px;
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  padding-right: calc(var(--corner-count, 3) * 22px + 2px);
+  padding-right: calc(var(--corner-count, 3) * var(--corner-step) + 2px);
 }
 
 .marquee {
@@ -925,6 +930,17 @@ body.skin-stack .lyric {
   pointer-events: none;
 }
 
+/* Once auto-hide has actually removed the controls, their empty gutter belongs
+   to the titles. If CSS hover wakes the bar before WebKit delivers an event,
+   restore the gutter here too so the controls never cover the text. */
+.corner-bar.idle ~ .player .titles {
+  padding-right: 2px;
+}
+
+.card:hover .corner-bar.idle ~ .player .titles {
+  padding-right: calc(var(--corner-count, 3) * var(--corner-step) + 2px);
+}
+
 /* A second way back, needing no JavaScript event at all. The renderer wakes the
    bar on move, hover, wheel and press, but pointer *position* is the one signal
    a background window cannot rely on — AppKit sends `mouseMoved` to the key
@@ -1336,8 +1352,8 @@ body.skin-stack .player {
 }
 
 body.skin-stack .art {
-  width: 96px;
-  height: 96px;
+  width: 108px;
+  height: 108px;
   border-radius: 12px;
 }
 
@@ -1346,7 +1362,7 @@ body.skin-stack .meta {
 }
 
 body.skin-stack .titles {
-  padding-right: calc(var(--corner-count, 3) * 21px + 2px);
+  --corner-step: 21px;
   gap: 1px;
 }
 
@@ -1359,7 +1375,7 @@ body.skin-stack .marquee.scroll {
 }
 
 body.skin-stack .title {
-  font-size: 15px;
+  font-size: 14.5px;
 }
 
 body.skin-stack .controls {
@@ -1418,7 +1434,13 @@ body.skin-stack .upnext:not([hidden]) {
      exactly 302, so it is flush at rest and after every scroll. */
   padding: 12px 14px 14px;
   /* Same as the lyrics well: the tone change is the boundary, no rule needed. */
-  background: var(--well);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: light) {
+  .upnext {
+    background: rgba(255, 255, 255, 0.08);
+  }
 }
 
 .upnext[hidden] {
@@ -1558,7 +1580,7 @@ body.skin-classic .close-widget svg {
 
 /* 18px buttons in this skin, so a narrower step. */
 body.skin-classic .titles {
-  padding-right: calc(var(--corner-count, 3) * 20px + 2px);
+  --corner-step: 20px;
 }
 
 body.skin-classic .search {
