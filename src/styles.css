@@ -315,6 +315,7 @@ body.panel .resize-edges {
 .subtitle {
   display: inline-block;
   white-space: nowrap;
+  transform: translateX(0);
 }
 
 .title {
@@ -332,9 +333,30 @@ body.panel .resize-edges {
   line-height: 1.35;
 }
 
-.marquee.scroll .title,
-.marquee.scroll .subtitle {
+.marquee.scroll.intro .title,
+.marquee.scroll.intro .subtitle {
+  animation: drift-once var(--drift-cycle-duration, 24s) ease-in-out;
+}
+
+/* Hovering anywhere in the shared title region animates both overflowing
+   lines. Leaving removes the animation, so the explicit base transform above
+   puts them immediately back at the leading edge. */
+.titles:hover .marquee.scroll .title,
+.titles:hover .marquee.scroll .subtitle {
   animation: drift var(--drift-duration, 12s) ease-in-out infinite alternate;
+}
+
+@keyframes drift-once {
+  0%,
+  6%,
+  94%,
+  100% {
+    transform: translateX(0);
+  }
+  44%,
+  56% {
+    transform: translateX(var(--drift-distance, 0px));
+  }
 }
 
 @keyframes drift {

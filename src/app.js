@@ -42,6 +42,7 @@ const el = {
   card: $('card'),
   player: $('player'),
   cover: $('cover'),
+  titles: document.querySelector('.titles'),
   title: $('title'),
   subtitle: $('subtitle'),
   seek: $('seek'),
@@ -184,10 +185,10 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 
 // --------------------------------------------------------------- marquee
 
-/** Scroll long text only when it actually overflows. */
-const setupMarquee = (span) => {
+/** Measure long text, optionally giving newly displayed text one complete pass. */
+const setupMarquee = (span, { intro = false } = {}) => {
   const box = span.parentElement;
-  box.classList.remove('scroll');
+  box.classList.remove('scroll', 'intro');
   span.style.removeProperty('--drift-distance');
 
   const overflow = span.scrollWidth - box.clientWidth;
@@ -195,10 +196,32 @@ const setupMarquee = (span) => {
 
   // Overshoot by the width of the fade so the tail clears the mask entirely.
   const distance = overflow + 18;
+  const duration = clamp(distance / 16, 5, 18);
   span.style.setProperty('--drift-distance', `${-distance}px`);
-  span.style.setProperty('--drift-duration', `${clamp(distance / 16, 5, 18)}s`);
+  span.style.setProperty('--drift-duration', `${duration}s`);
+  span.style.setProperty('--drift-cycle-duration', `${duration * 2}s`);
   box.classList.add('scroll');
+
+  // Hover owns the animation while the pointer is already here; starting the
+  // intro afterwards would make the text move again when the pointer leaves.
+  if (intro && !el.titles.matches(':hover')) {
+    void box.offsetWidth;
+    box.classList.add('intro');
+  }
 };
+
+// Entering the shared title region switches both lines to hover control. An
+// unfinished intro must not resume after the pointer leaves.
+el.titles.addEventListener('mouseenter', () => {
+  el.title.parentElement.classList.remove('intro');
+  el.subtitle.parentElement.classList.remove('intro');
+});
+
+for (const span of [el.title, el.subtitle]) {
+  span.addEventListener('animationend', (event) => {
+    if (event.animationName === 'drift-once') span.parentElement.classList.remove('intro');
+  });
+}
 
 // ---------------------------------------------------------------- render
 
@@ -365,20 +388,27 @@ const renderCover = () => {
   applyPalette(state.cover);
 };
 
-const renderSong = () => {
+const renderSong = ({ restartMarquee = false } = {}) => {
   const song = state.song;
   const title = song?.title || 'Nothing playing';
   const subtitle = song ? [song.artist, song.album].filter(Boolean).join(' — ') : '';
 
-  if (title !== lastTitle) {
+  const titleChanged = title !== lastTitle;
+  if (titleChanged) {
     lastTitle = title;
     el.title.textContent = title;
-    requestAnimationFrame(() => setupMarquee(el.title));
   }
-  if (subtitle !== lastSubtitle) {
+  if (titleChanged || restartMarquee) {
+    requestAnimationFrame(() => setupMarquee(el.title, { intro: true }));
+  }
+
+  const subtitleChanged = subtitle !== lastSubtitle;
+  if (subtitleChanged) {
     lastSubtitle = subtitle;
     el.subtitle.textContent = subtitle;
-    requestAnimationFrame(() => setupMarquee(el.subtitle));
+  }
+  if (subtitleChanged || restartMarquee) {
+    requestAnimationFrame(() => setupMarquee(el.subtitle, { intro: true }));
   }
 
 };
@@ -873,7 +903,9 @@ const applyState = (next) => {
   // alone: queue data has its own event, and the remaining renderers name the
   // small slice of player state they actually depend on here.
   if (firstState || chromeChanged) renderStatus();
-  if (firstState || songTextChanged) renderSong();
+  if (firstState || songChanged || songTextChanged) {
+    renderSong({ restartMarquee: songChanged });
+  }
   if (firstState || controlsChanged) renderControls();
   if (firstState || statusChanged || songPresenceChanged || skinChanged) {
     renderUpNext();
