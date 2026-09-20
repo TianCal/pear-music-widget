@@ -37,6 +37,14 @@ objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 png = "0.18"
 tauri-build = { version = "2", features = [] }
 
+# Tauri 2.11.x requires tray-icon 0.24, whose released build leaves an NSMenu
+# attached to the status item. macOS 27 then swallows every left click and
+# opens that menu instead of forwarding the click that shows our dropdown.
+# This is 0.24.2 plus the merged upstream fix; remove it once Tauri can use
+# tray-icon >= 0.25.1.
+[patch.crates-io]
+tray-icon = { path = "vendor/tray-icon" }
+
 [profile.release]
 codegen-units = 1
 lto = true
