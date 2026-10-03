@@ -142,12 +142,13 @@ pub struct Settings {
     /// How strongly the cover's colours wash the card, 0..=1.
     #[serde(default = "default_tint")]
     pub tint: f64,
-    /// Seconds to shift the rolling lyrics by, positive meaning the lines turn
-    /// over *earlier*. LRC timings and the player's clock disagree by a beat
-    /// often enough to be worth a knob, and the mismatch is usually the same
-    /// wherever it comes from — so this is set once and kept across tracks.
+    /// Default lyric shift in seconds; positive turns lines over earlier.
     #[serde(rename = "lyricsOffset", default)]
     pub lyrics_offset: f64,
+    /// Absolute overrides keyed by video ID. Missing entries inherit Timing;
+    /// an explicit zero overrides a nonzero default.
+    #[serde(rename = "lyricsOffsetsByVideo", default)]
+    pub lyrics_offsets_by_video: BTreeMap<String, f64>,
     /// Convert the lyrics to Simplified Chinese before they are shown. Applies
     /// to the words only — everything else on the card is the player's.
     #[serde(rename = "simplifyLyrics", default)]
@@ -181,6 +182,20 @@ pub struct Settings {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+impl Settings {
+    pub fn lyrics_offset_for(&self, video_id: Option<&str>) -> f64 {
+        let offset = video_id
+            .and_then(|id| self.lyrics_offsets_by_video.get(id))
+            .copied()
+            .unwrap_or(self.lyrics_offset);
+        if offset.is_finite() {
+            offset.clamp(-10.0, 10.0)
+        } else {
+            0.0
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -197,6 +212,7 @@ impl Default for Settings {
             liquid_glass: default_liquid_glass(),
             tint: default_tint(),
             lyrics_offset: 0.0,
+            lyrics_offsets_by_video: BTreeMap::new(),
             simplify_lyrics: false,
             jyutping_lyrics: false,
             lyrics_cache_mb: default_lyrics_cache_mb(),
@@ -294,7 +310,8 @@ mod tests {
     /// `corners` has to read the old file, not just the new one.
     #[test]
     fn reads_the_pre_1_5_flat_corner_buttons_into_every_skin() {
-        let text = r#"{ "port": 26538, "corners": { "queue": true, "lyrics": true, "search": false } }"#;
+        let text =
+            r#"{ "port": 26538, "corners": { "queue": true, "lyrics": true, "search": false } }"#;
         let settings: Settings = serde_json::from_str(text).expect("old files still parse");
 
         assert_eq!(settings.port, 26538);

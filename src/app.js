@@ -1160,10 +1160,8 @@ const renderLyrics = () => {
   });
 };
 
-/** Seconds the roll runs ahead of the playhead, from the Lyrics timing menu.
- *  Positive turns the lines over earlier. Set once and kept across tracks: the
- *  drift is between the timings and the player's clock, not a property of any
- *  one song. */
+/** Effective lyric timing from Rust: Song Time overrides the global Timing.
+ *  Positive turns the lines over earlier; seeking subtracts the same shift. */
 const lyricShift = () => state.lyricsOffset || 0;
 
 /** Index of the last line whose timestamp has passed. */

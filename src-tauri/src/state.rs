@@ -379,7 +379,7 @@ impl Core {
         // The menu offers ±2s; the file is documented as hand-editable, so a
         // wider nudge typed in by hand is honoured — just not one that would
         // park the roll a whole verse away from the music.
-        let lyrics_offset = store.get(|s| s.lyrics_offset.clamp(-10.0, 10.0));
+        let lyrics_offset = store.get(|s| s.lyrics_offset_for(None));
         let corners = store.get(|s| s.corners.clone());
         // Hand-editable file, so clamp rather than trust.
         let corners_autohide = store.get(|s| s.corners_autohide.clamp(0.0, 60.0));
@@ -442,15 +442,21 @@ impl Core {
     /// Apply a patch and push to the renderers only when something actually
     /// changed. Both windows get the same snapshot.
     pub fn update(&self, patch: impl FnOnce(&mut PlayerState)) {
-        let next = {
+        // Keep the settings → player lock order, and resolve the shift in the
+        // same snapshot as the song so neither surface sees the previous song's
+        // override. No override map rides the position ticks.
+        let next = self.store.get(|settings| {
             let mut player = self.player.lock().expect("player lock");
             let before = player.clone();
             patch(&mut player);
+            player.lyrics_offset =
+                settings.lyrics_offset_for(player.song.as_ref().map(|song| song.video_id.as_str()));
             if *player == before {
-                return;
+                return None;
             }
-            player.clone()
-        };
+            Some(player.clone())
+        });
+        let Some(next) = next else { return };
         let _ = self.app.emit("state", &next);
     }
 
@@ -636,7 +642,11 @@ impl Core {
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
     /// lyrics panel is actually open.
     pub async fn refresh_lyrics(self: &Arc<Self>) {
-        let wanted = !self.lyrics_wanted_by.lock().expect("lyrics lock").is_empty();
+        let wanted = !self
+            .lyrics_wanted_by
+            .lock()
+            .expect("lyrics lock")
+            .is_empty();
         let song = self.player.lock().expect("player lock").song.clone();
 
         let Some(song) = song.filter(|_| wanted) else {
@@ -942,7 +952,10 @@ mod tests {
         state.apply_position(211.0);
         state.is_playing = false;
         state.apply_position(3445.0);
-        assert_eq!(state.position, 211.0, "pause must not jump lyrics to the end");
+        assert_eq!(
+            state.position, 211.0,
+            "pause must not jump lyrics to the end"
+        );
         // A cached REST/PLAYER_INFO response can repeat the same bad timestamp.
         state.apply_position(3445.0);
         assert_eq!(state.position, 211.0);

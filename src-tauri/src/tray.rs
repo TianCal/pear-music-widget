@@ -45,7 +45,9 @@ fn is_double_click() -> bool {
     let interval = Duration::from_secs_f64(crate::macos::double_click_interval());
     let now = Instant::now();
     let mut last = LAST_TRAY_CLICK.lock().expect("tray click lock");
-    let doubled = last.map(|at| now.duration_since(at) < interval).unwrap_or(false);
+    let doubled = last
+        .map(|at| now.duration_since(at) < interval)
+        .unwrap_or(false);
     // Cleared rather than re-armed on a hit, so three clicks are a double and a
     // single rather than two overlapping doubles.
     *last = if doubled { None } else { Some(now) };
@@ -123,7 +125,11 @@ fn columns(c: char) -> usize {
         | 0x1F300..=0x1F64F
         | 0x1F900..=0x1F9FF
         | 0x20000..=0x3FFFD);
-    if wide { 2 } else { 1 }
+    if wide {
+        2
+    } else {
+        1
+    }
 }
 
 /// Trim to a column budget, leaving room for the ellipsis that says so.
@@ -260,8 +266,10 @@ fn opacity_submenu(
         liquid_glass,
         None::<&str>,
     )?;
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
     refs.push(&custom);
     refs.push(&separator);
     refs.push(&glass);
@@ -291,9 +299,7 @@ fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::W
     Submenu::with_items(app, "Cover tint", true, &refs)
 }
 
-/// The one setting here that is about the *content* rather than the chrome. It
-/// is deliberately not per-track: the drift comes from the timings and the
-/// player's clock, and whatever corrects one track usually corrects the next.
+/// Global default for tracks without a Song Time override.
 fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 1000.0).round() as i32;
     let items: Vec<CheckMenuItem<tauri::Wry>> = LYRIC_OFFSETS
@@ -310,9 +316,54 @@ fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<
         })
         .collect::<tauri::Result<_>>()?;
 
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
     Submenu::with_items(app, "Timing", true, &refs)
+}
+
+/// Capture the video ID in each action: an open menu may outlive its song.
+fn song_time_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
+    let song = app.state::<Arc<Core>>().snapshot().song;
+    let id = song
+        .as_ref()
+        .map(|song| song.video_id.as_str())
+        .unwrap_or("");
+    let enabled = !id.is_empty();
+    let offset = app
+        .state::<Arc<Store>>()
+        .get(|s| s.lyrics_offsets_by_video.get(id).copied());
+    let selected = offset.map(|value| (value * 1000.0).round() as i32);
+    let inherit = CheckMenuItem::with_id(
+        app,
+        format!("songTime:default:{id}"),
+        "Use Timing",
+        enabled,
+        offset.is_none(),
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let choices = LYRIC_OFFSETS
+        .iter()
+        .map(|(ms, label)| {
+            CheckMenuItem::with_id(
+                app,
+                format!("songTime:{ms}:{id}"),
+                label,
+                enabled,
+                selected == Some(*ms),
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&inherit, &separator];
+    items.extend(
+        choices
+            .iter()
+            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>),
+    );
+    Submenu::with_items(app, "Song Time", enabled, &items)
 }
 
 /// Much of the Mandarin and Cantonese catalogue comes back traditional —
@@ -416,12 +467,13 @@ fn lyrics_submenu(
     let simplify = simplify_lyrics_item(app, simplify)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let timing = lyric_offset_submenu(app, offset)?;
+    let song_time = song_time_submenu(app)?;
     let cache = cache_mb
         .map(|cap| lyrics_cache_submenu(app, cap))
         .transpose()?;
 
     let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        vec![&jyutping, &simplify, &separator, &timing];
+        vec![&jyutping, &simplify, &separator, &timing, &song_time];
     if let Some(cache) = &cache {
         items.push(cache);
     }
@@ -893,9 +945,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     store.update(|s| s.lyrics_cache_mb = mb);
                     // Shrinking the cap evicts, which is a directory listing and
                     // a run of deletes — not work for the menu's own thread.
-                    tauri::async_runtime::spawn(async move {
-                        crate::lyrics_cache::configure(mb)
-                    });
+                    tauri::async_runtime::spawn(async move { crate::lyrics_cache::configure(mb) });
                 }
             } else if let Some(secs) = other.strip_prefix("cornerFade:") {
                 if let Ok(secs) = secs.parse::<f64>() {
@@ -915,9 +965,25 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 if let Ok(ms) = ms.parse::<f64>() {
                     let offset = ms / 1000.0;
                     store.update(|s| s.lyrics_offset = offset);
-                    // The roll runs in the renderer, so — like the tint — the
-                    // nudge has to reach it as state.
-                    app.state::<Arc<Core>>().update(|state| state.lyrics_offset = offset);
+                    app.state::<Arc<Core>>().update(|_| {});
+                }
+            } else if let Some(action) = other.strip_prefix("songTime:") {
+                if let Some((value, id)) = action.split_once(':') {
+                    if !id.is_empty() {
+                        if value == "default" {
+                            store.update(|s| {
+                                s.lyrics_offsets_by_video.remove(id);
+                            });
+                        } else if let Ok(ms) = value.parse::<i32>() {
+                            if LYRIC_OFFSETS.iter().any(|(choice, _)| *choice == ms) {
+                                store.update(|s| {
+                                    s.lyrics_offsets_by_video
+                                        .insert(id.to_string(), f64::from(ms) / 1000.0);
+                                });
+                            }
+                        }
+                        app.state::<Arc<Core>>().update(|_| {});
+                    }
                 }
             } else if other == "opacity:custom" {
                 let handle = app.clone();
@@ -1062,10 +1128,7 @@ fn refresh_now(app: &AppHandle) {
 
     let tooltip = match &snapshot.song {
         Some(song) => format!("{} — {}", song.title, song.artist),
-        None => format!(
-            "Pear Music Widget — {}",
-            status_label(&snapshot.status)
-        ),
+        None => format!("Pear Music Widget — {}", status_label(&snapshot.status)),
     };
     let _ = tray.set_tooltip(Some(tooltip));
 
@@ -1091,7 +1154,10 @@ mod tests {
 
     #[test]
     fn leaves_anything_that_already_fits() {
-        assert_eq!(ellipsize("Nothing playing", NOW_PLAYING_COLUMNS), "Nothing playing");
+        assert_eq!(
+            ellipsize("Nothing playing", NOW_PLAYING_COLUMNS),
+            "Nothing playing"
+        );
         let exact = "a".repeat(NOW_PLAYING_COLUMNS);
         assert_eq!(ellipsize(&exact, NOW_PLAYING_COLUMNS), exact);
     }
