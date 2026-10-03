@@ -14,7 +14,7 @@
 //! Posting keeps everything in FIFO order with the resize, at the cost of these
 //! being fire-and-forget. Nothing here needs a return value.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{class, msg_send};
@@ -105,7 +105,42 @@ pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
 /// percentages. The alert is dispatched onto AppKit's thread and returns its
 /// result through the callback, so menu handling never reaches across threads.
 pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
-    let current = (current.clamp(0.01, 1.0) * 100.0).round() as isize;
+    prompt_number(
+        app,
+        c"Custom Widget Opacity",
+        c"Enter a whole number from 1 to 100%.",
+        (current.clamp(0.01, 1.0) * 100.0).round().to_string(),
+        move |text| {
+            if let Ok(percent) = text.trim().parse::<u32>() {
+                if (1..=100).contains(&percent) {
+                    apply(f64::from(percent) / 100.0);
+                }
+            }
+        },
+    );
+}
+
+pub fn prompt_song_time(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
+    prompt_number(
+        app, c"Custom Song Time",
+        c"Enter seconds from -10 to 10. Positive moves lyrics earlier; negative moves them later. Decimals are allowed.",
+        current.to_string(),
+        move |text| {
+            if let Ok(seconds) = text.trim().parse::<f64>() {
+                if seconds.is_finite() && (-10.0..=10.0).contains(&seconds) { apply(seconds); }
+            }
+        },
+    );
+}
+
+/// Shared native numeric entry. Callers validate units and range before saving.
+fn prompt_number(
+    app: &AppHandle,
+    title: &'static CStr,
+    detail: &'static CStr,
+    current: String,
+    apply: impl FnOnce(String) + Send + 'static,
+) {
     let _ = app.run_on_main_thread(move || unsafe {
         let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
         let field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
@@ -116,17 +151,17 @@ pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + S
 
         let message: *mut AnyObject = msg_send![
             class!(NSString),
-            stringWithUTF8String: c"Custom Widget Opacity".as_ptr()
+            stringWithUTF8String: title.as_ptr()
         ];
         let detail: *mut AnyObject = msg_send![
             class!(NSString),
-            stringWithUTF8String: c"Enter a whole number from 1 to 100%.".as_ptr()
+            stringWithUTF8String: detail.as_ptr()
         ];
         let apply_title: *mut AnyObject =
             msg_send![class!(NSString), stringWithUTF8String: c"Apply".as_ptr()];
         let cancel_title: *mut AnyObject =
             msg_send![class!(NSString), stringWithUTF8String: c"Cancel".as_ptr()];
-        let value = CString::new(current.to_string()).expect("opacity contains no NUL");
+        let value = CString::new(current).expect("numeric value contains no NUL");
         let value: *mut AnyObject =
             msg_send![class!(NSString), stringWithUTF8String: value.as_ptr()];
 
@@ -138,13 +173,18 @@ pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + S
         let _: () = msg_send![alert, setAccessoryView: field];
         let _: () = msg_send![field, release];
 
-        // NSAlertFirstButtonReturn. Keep the current value when the text is not
-        // a valid percentage instead of turning an accidental zero invisible.
         let response: isize = msg_send![alert, runModal];
-        let percent: isize = msg_send![field, integerValue];
+        let text: *mut AnyObject = msg_send![field, stringValue];
+        let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
+        let value = if utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        };
         let _: () = msg_send![alert, release];
-        if response == 1000 && (1..=100).contains(&percent) {
-            apply(percent as f64 / 100.0);
+        // NSAlertFirstButtonReturn; invalid input leaves the setting unchanged.
+        if response == 1000 {
+            apply(value);
         }
     });
 }

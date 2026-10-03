@@ -53,7 +53,8 @@ button can be hidden per skin, and the bar can hide when idle.
 - **Lyrics:** shows synced rolling lyrics when available. Click the middle of a
   line to seek or scroll to browse manually. Lyrics timing can be adjusted by up
   to two seconds: **Timing** sets the default and **Song Time** saves an override
-  for the current video (**Use Timing** removes it). Traditional Chinese can be
+  for the current video (**Use Timing** removes it). **Custom…** accepts decimal
+  seconds from −10 to +10. Traditional Chinese can be
   converted to simplified Chinese,
   and offline numberless Jyutping can be shown beneath Chinese lines. These
   controls are grouped under the **Lyrics** submenu.

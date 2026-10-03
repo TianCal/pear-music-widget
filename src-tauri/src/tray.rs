@@ -334,13 +334,28 @@ fn song_time_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
     let offset = app
         .state::<Arc<Store>>()
         .get(|s| s.lyrics_offsets_by_video.get(id).copied());
-    let selected = offset.map(|value| (value * 1000.0).round() as i32);
     let inherit = CheckMenuItem::with_id(
         app,
         format!("songTime:default:{id}"),
         "Use Timing",
         enabled,
         offset.is_none(),
+        None::<&str>,
+    )?;
+    let custom_offset = offset.filter(|value| {
+        !LYRIC_OFFSETS
+            .iter()
+            .any(|(ms, _)| (*value - f64::from(*ms) / 1000.0).abs() < 1e-9)
+    });
+    let custom_label = custom_offset
+        .map(|value| format!("Custom… ({value:+}s)"))
+        .unwrap_or_else(|| "Custom…".to_string());
+    let custom = CheckMenuItem::with_id(
+        app,
+        format!("songTime:custom:{id}"),
+        custom_label,
+        enabled,
+        custom_offset.is_some(),
         None::<&str>,
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -352,12 +367,13 @@ fn song_time_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
                 format!("songTime:{ms}:{id}"),
                 label,
                 enabled,
-                selected == Some(*ms),
+                offset.is_some_and(|value| (value - f64::from(*ms) / 1000.0).abs() < 1e-9),
                 None::<&str>,
             )
         })
         .collect::<tauri::Result<Vec<_>>>()?;
-    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&inherit, &separator];
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&inherit, &custom, &separator];
     items.extend(
         choices
             .iter()
@@ -970,7 +986,18 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else if let Some(action) = other.strip_prefix("songTime:") {
                 if let Some((value, id)) = action.split_once(':') {
                     if !id.is_empty() {
-                        if value == "default" {
+                        if value == "custom" {
+                            let current = store.get(|s| s.lyrics_offset_for(Some(id)));
+                            let id = id.to_string();
+                            let handle = app.clone();
+                            crate::macos::prompt_song_time(app, current, move |seconds| {
+                                handle.state::<Arc<Store>>().update(|s| {
+                                    s.lyrics_offsets_by_video.insert(id, seconds);
+                                });
+                                handle.state::<Arc<Core>>().update(|_| {});
+                                refresh(&handle);
+                            });
+                        } else if value == "default" {
                             store.update(|s| {
                                 s.lyrics_offsets_by_video.remove(id);
                             });
