@@ -270,9 +270,7 @@
     const sat = (i, source) =>
       palette.greyscale ? band.s[i] * 0.14 : clamp(source * 100 * 1.5, band.s[i] * 0.35, band.s[i]);
 
-    // Strength only scales how much of the wash lands. At 0 the card is plain
-    // glass again; the accent is left alone, since that is the transport's
-    // colour rather than part of the tint.
+    // Strength scales how much of the wash lands. At 0 the card is plain glass.
     const a = (i) => Math.round(band.a[i] * strength * 1000) / 1000;
 
     return {
@@ -292,11 +290,14 @@
     typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)').matches : true;
 
   const build = (palette, strength) => {
-    const { h, s, l } = palette.accent;
+    strength = clamp(strength, 0, 1);
+    // Off disables artwork colour everywhere, including controls and queue
+    // selection. Keep a neutral accent visible against either glass appearance.
+    const { h, s, l } = strength === 0 ? { h: 0, s: 0, l: 55 } : palette.accent;
     return {
       accent: toHex(h, s, l),
       accentSoft: toRgba(h, s, l, 0.34),
-      ...washes(palette, prefersDark(), clamp(strength, 0, 1)),
+      ...washes(palette, prefersDark(), strength),
     };
   };
 
