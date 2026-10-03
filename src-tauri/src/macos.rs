@@ -206,6 +206,15 @@ pub fn install_liquid_glass(window: &WebviewWindow, corner_radius: f64, enabled:
         let glass: *mut AnyObject = msg_send![glass, initWithFrame: frame];
         let autoresize = VIEW_WIDTH_SIZABLE | VIEW_HEIGHT_SIZABLE;
 
+        // The replacement content view must carry the same rounded shape as
+        // the glass. Without a mask AppKit draws the focused-window rim around
+        // this root's rectangular bounds, leaving dark L-shaped corner marks
+        // outside the rounded material.
+        let _: () = msg_send![root, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![root, layer];
+        let _: () = msg_send![layer, setCornerRadius: corner_radius];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+
         // Regular glass keeps substantially more of its tone when the window
         // resigns key. Clear glass swings from almost transparent to a dense
         // inactive fill, which is too large a state change for a persistent

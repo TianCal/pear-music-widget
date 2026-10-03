@@ -711,10 +711,6 @@ body.skin-stack .seek.showing-volume .knob {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* No hairline along the top edge: the well is already a shade darker than the
-     card, and that reads as the boundary on its own. A rule as well made the
-     queue above look like a different pane bolted on. */
-  background: var(--well);
 }
 
 .lyrics[hidden] {
@@ -1415,8 +1411,7 @@ body.skin-stack .upnext:not([hidden]) {
 
 /* --------------------------------------------------------------- up next */
 
-/* Its own backdrop: the ambient artwork layer bleeds through the whole card, so
-   without this the queue's contrast depends on whatever cover is playing. */
+/* The shared card background continues through the queue and lyrics. */
 .upnext {
   /* Positioned so it paints above .ambient and .scrim — both are absolutely
      positioned siblings, and an unpositioned block would sit underneath them
@@ -1433,14 +1428,6 @@ body.skin-stack .upnext:not([hidden]) {
      the strip's edges mid-card. Out here, three cards and two gaps come to
      exactly 302, so it is flush at rest and after every scroll. */
   padding: 12px 14px 14px;
-  /* Same as the lyrics well: the tone change is the boundary, no rule needed. */
-  background: rgba(0, 0, 0, 0.06);
-}
-
-@media (prefers-color-scheme: light) {
-  .upnext {
-    background: rgba(255, 255, 255, 0.08);
-  }
 }
 
 .upnext[hidden] {

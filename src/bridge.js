@@ -2,7 +2,7 @@
 
 /**
  * The `window.widget` bridge, and the two things a WKWebView cannot do with CSS
- * alone: move the window and close the dropdown on Escape.
+ * alone: move the window and dismiss it with keyboard shortcuts.
  *
  * `app.js` was written against the Electron preload and is unchanged — this
  * file re-implements that surface on Tauri's IPC so it never had to be.
@@ -108,7 +108,23 @@ if (!IS_PANEL) {
   document.addEventListener('mouseleave', endDrag);
 }
 
-// ------------------------------------------------------------------ escape
+// -------------------------------------------------------- window shortcuts
+
+// AppKit's standard Close action does not close a borderless window. Match
+// the widget's close button directly, keeping the tray app available to reopen.
+if (!IS_PANEL) {
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
+          event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        invoke('hide_widget');
+      }
+    },
+    true,
+  );
+}
 
 // Escape closes the dropdown, like a real menu. The page's own handler closes
 // whichever sub-panel is open; this closes the window itself.
