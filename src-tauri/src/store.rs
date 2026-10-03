@@ -189,7 +189,7 @@ impl Settings {
             .copied()
             .unwrap_or(self.lyrics_offset);
         if offset.is_finite() {
-            offset.clamp(-10.0, 10.0)
+            offset.clamp(-20.0, 20.0)
         } else {
             0.0
         }

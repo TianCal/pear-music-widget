@@ -123,11 +123,11 @@ pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + S
 pub fn prompt_song_time(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
     prompt_number(
         app, c"Custom Song Time",
-        c"Enter seconds from -10 to 10. Positive moves lyrics earlier; negative moves them later. Decimals are allowed.",
+        c"Enter seconds from -20 to 20. Positive moves lyrics earlier; negative moves them later. Decimals are allowed.",
         current.to_string(),
         move |text| {
             if let Ok(seconds) = text.trim().parse::<f64>() {
-                if seconds.is_finite() && (-10.0..=10.0).contains(&seconds) { apply(seconds); }
+                if seconds.is_finite() && (-20.0..=20.0).contains(&seconds) { apply(seconds); }
             }
         },
     );
