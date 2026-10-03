@@ -1,11 +1,10 @@
-//! Synced lyrics from LRCLib, falling back to YouTube Music's own timed lyrics
-//! — the two sources YouTube Music's `synced-lyrics` plugin leans on. The
+//! Synced lyrics from YouTube Music, LRCLib, and Kugeci. The
 //! api-server exposes no lyrics route, so the widget has to ask for them itself.
 //!
 //! **This is the only place the app talks to anything other than localhost.**
 //! Keep it that way: the renderer's CSP allows no network at all, so anything
-//! fetched has to come through here. Two hosts are reached, `lrclib.net` and
-//! `music.youtube.com`, and nothing is sent to either beyond the track's title,
+//! fetched has to come through here. Hosts are `lrclib.net`,
+//! `music.youtube.com`, and `www.kugeci.com`; requests use the track's title,
 //! artist and video id.
 
 use std::collections::HashMap;
@@ -26,7 +25,7 @@ const TIMEOUT: Duration = Duration::from_secs(9);
 const CACHE_MAX: usize = 60;
 
 /// `Deserialize` for `lyrics_cache`, which reads these back off disk. Nothing
-/// from the network is deserialised into this — both sources are parsed by hand.
+/// from the network is deserialised into this — sources are parsed by hand.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LyricLine {
     /// `None` on an unsynced block — those do not follow along.
@@ -46,7 +45,7 @@ pub struct Lyrics {
     pub how: &'static str,
 }
 
-/// The four tiers, by name, for a record read back off disk — `how` is a
+/// The lookup tiers, by name, for a record read back off disk — `how` is a
 /// `&'static str` and stays one. Anything else came from a file someone edited,
 /// and says so.
 pub fn how_from(name: &str) -> &'static str {
@@ -55,6 +54,7 @@ pub fn how_from(name: &str) -> &'static str {
         "cleaned" => "cleaned",
         "search" => "search",
         "ytmusic" => "ytmusic",
+        "kugeci" => "kugeci",
         _ => "cached",
     }
 }
@@ -205,16 +205,17 @@ fn best_search_hit(hits: &Value, duration: f64) -> Option<&Value> {
         return pool.into_iter().next();
     }
 
-    let delta = |hit: &Value| {
-        (hit.get("duration").and_then(Value::as_f64).unwrap_or(0.0) - duration).abs()
-    };
-    pool.into_iter().reduce(|best, hit| {
-        if delta(hit) < delta(best) {
-            hit
-        } else {
-            best
-        }
-    })
+    let delta =
+        |hit: &Value| (hit.get("duration").and_then(Value::as_f64).unwrap_or(0.0) - duration).abs();
+    pool.into_iter().reduce(
+        |best, hit| {
+            if delta(hit) < delta(best) {
+                hit
+            } else {
+                best
+            }
+        },
+    )
 }
 
 fn query_string(params: &[(&str, String)]) -> String {
@@ -390,22 +391,20 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
         })
         .collect();
 
-    lines.iter().any(|line| !line.text.is_empty()).then(|| Lyrics {
-        synced: false,
-        lines,
-        how: "ytmusic",
-    })
+    lines
+        .iter()
+        .any(|line| !line.text.is_empty())
+        .then(|| Lyrics {
+            synced: false,
+            lines,
+            how: "ytmusic",
+        })
 }
 
 /// Keyed by video id, so unlike a free-text search this can never come back
 /// with a different song's words.
 async fn fetch_ytmusic(http: &reqwest::Client, video_id: &str) -> Option<Lyrics> {
-    let next = ytm_post(
-        http,
-        "next",
-        ytm_body("videoId", video_id, YTM_WEB_CLIENT),
-    )
-    .await?;
+    let next = ytm_post(http, "next", ytm_body("videoId", video_id, YTM_WEB_CLIENT)).await?;
     let browse_id = lyrics_browse_id(&next)?.to_string();
     let browse = ytm_post(
         http,
@@ -416,9 +415,362 @@ async fn fetch_ytmusic(http: &reqwest::Client, video_id: &str) -> Option<Lyrics>
     shape_ytmusic(&browse)
 }
 
+// --------------------------------------------------------------- Kugeci
+
+const KUGECI_ENDPOINT: &str = "https://www.kugeci.com";
+const KUGECI_MAX_BYTES: usize = 1024 * 1024;
+
+// Strip promotional labels only. Keeping Live / remix / acoustic qualifiers
+// prevents a studio recording from borrowing timings from a different version.
+static KUGECI_PROMO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:official(?:\s+music)?\s+video|official\s+audio|official\s+lyrics?|music\s+video|lyrics?\s+video|official|audio|lyrics?|m/?v|hd|4k)\b").unwrap()
+});
+
+fn kugeci_title(title: &str) -> String {
+    let title = KUGECI_PROMO.replace_all(title, " ");
+    // Empty brackets left by promotional labels are immaterial to matching.
+    let empty_brackets = Regex::new(r"\(\s*\)|\[\s*\]|【\s*】").expect("static regex");
+    let title = empty_brackets.replace_all(&title, " ");
+    WHITESPACE.replace_all(&title, " ").trim().to_string()
+}
+
+static KUGECI_SUBTITLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(.*?)\s*[（(]([^()（）]+)[）)]\s*$").unwrap());
+static KUGECI_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:live|remix|mix|acoustic|instrumental|version|ver|cover|karaoke|edit|demo|part|pt|mono|stereo|remaster(?:ed)?)\b|现场|現場|翻唱|伴奏|混音|版|录音|錄音").unwrap()
+});
+
+/// A lyric hook is sometimes appended to a song title. Try the literal title
+/// first, then omit a trailing subtitle; recording-version labels stay intact.
+fn kugeci_titles(title: &str) -> Vec<String> {
+    let full = kugeci_title(title);
+    let mut titles = vec![full.clone()];
+    if let Some(parts) = KUGECI_SUBTITLE.captures(&full) {
+        let base = parts[1].trim();
+        if !base.is_empty() && !KUGECI_VERSION.is_match(&parts[2]) {
+            titles.push(base.to_string());
+        }
+    }
+    titles
+}
+
+fn kugeci_title_matches(candidate: &str, title: &str) -> bool {
+    let candidate = kugeci_key(&kugeci_title(candidate));
+    !candidate.is_empty()
+        && kugeci_titles(title)
+            .iter()
+            .any(|title| kugeci_key(title) == candidate)
+}
+
+fn kugeci_key(text: &str) -> String {
+    fast2s::convert(text)
+        .replace('迴', "回")
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
+}
+
+static KUGECI_ARTIST_SPLIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)、|,|，|/|&|\band\b|\bfeat\.?|\bft\.?|\bwith\b|和|与|與|及").unwrap()
+});
+
+fn kugeci_artist_key(artist: &str) -> String {
+    let key = kugeci_key(artist);
+    // Verified provider alias, not a general prefix/suffix fuzzy match.
+    match key.as_str() {
+        "华云龙kle" => "华云龙".into(),
+        _ => key,
+    }
+}
+
+/// Match literal artist names first, then segment collaborations using the
+/// site's actual names. Splitting blindly on “和” breaks names like 楊和蘇.
+fn kugeci_artists_match(credits: &[String], artist: &str) -> bool {
+    let keys: Vec<_> = credits
+        .iter()
+        .map(|credit| kugeci_artist_key(credit))
+        .collect();
+    let artist_key = kugeci_artist_key(artist);
+    if artist_key.is_empty() {
+        return false;
+    }
+    if keys.contains(&artist_key) {
+        return true;
+    }
+    if !KUGECI_ARTIST_SPLIT.is_match(artist) && !artist.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let names = keys
+        .iter()
+        .filter(|key| !key.is_empty())
+        .map(|key| regex::escape(key))
+        .collect::<Vec<_>>()
+        .join("|");
+    if names.is_empty() {
+        return false;
+    }
+    // Apply the one verified alias inside a collaboration too.
+    let artist_key = artist_key.replace("华云龙kle", "华云龙");
+    let pattern = format!("^(?:{names})(?:(?:featuring|feat|with|and|ft|和|与|及)?(?:{names}))+$");
+    Regex::new(&pattern)
+        .expect("escaped artist names")
+        .is_match(&artist_key)
+}
+
+fn select(selector: &str) -> scraper::Selector {
+    scraper::Selector::parse(selector).expect("static lyrics selector")
+}
+
+fn kugeci_song_path(href: &str) -> Option<String> {
+    let path = href.strip_prefix(KUGECI_ENDPOINT).unwrap_or(href);
+    let id = path.strip_prefix("/song/")?;
+    (!id.is_empty() && id.bytes().all(|ch| ch.is_ascii_alphanumeric())).then(|| path.to_string())
+}
+
+/// Search matches the entire query, so use the title alone, then verify the
+/// artist in the same row. Footer recommendations must never become candidates.
+fn kugeci_candidates(html: &str, title: &str, artist: &str) -> Vec<String> {
+    let document = scraper::Html::parse_document(html);
+    let title_key = kugeci_key(&kugeci_title(title));
+    let artist_key = kugeci_key(artist);
+    if title_key.is_empty() || artist_key.is_empty() {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    for row in document.select(&select("#tablesort tbody tr")) {
+        let cells: Vec<_> = row.select(&select("td")).collect();
+        let Some(link) = cells
+            .get(1)
+            .and_then(|cell| cell.select(&select("a")).next())
+        else {
+            continue;
+        };
+        let name = link.text().collect::<String>();
+        if !kugeci_title_matches(&name, title) {
+            continue;
+        }
+        let matches_artist = cells.get(2).is_some_and(|cell| {
+            let credits = cell
+                .select(&select("a"))
+                .map(|link| link.text().collect::<String>())
+                .collect::<Vec<_>>();
+            kugeci_artists_match(&credits, artist)
+        });
+        if matches_artist {
+            if let Some(path) = link.value().attr("href").and_then(kugeci_song_path) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn shape_kugeci(html: &str, title: &str, artist: &str, duration: f64) -> Option<Lyrics> {
+    let document = scraper::Html::parse_document(html);
+    let name = document
+        .select(&select("main h1"))
+        .next()?
+        .text()
+        .collect::<String>();
+    if !kugeci_title_matches(&name, title) {
+        return None;
+    }
+    let credits: Vec<_> = document
+        .select(&select(".song-details-container a"))
+        .filter(|link| {
+            link.value().attr("href").is_some_and(|href| {
+                href.strip_prefix(KUGECI_ENDPOINT)
+                    .unwrap_or(href)
+                    .starts_with("/singer/")
+            })
+        })
+        .map(|link| {
+            let label = link.text().collect::<String>();
+            label
+                .trim()
+                .strip_prefix("演唱：")
+                .unwrap_or(label.trim())
+                .trim()
+                .to_string()
+        })
+        .collect();
+    if !kugeci_artists_match(&credits, artist) {
+        return None;
+    }
+    let container = document.select(&select("#lyricsContainer")).next()?;
+    let mut lrc = String::new();
+    for node in container.descendants() {
+        match node.value() {
+            scraper::Node::Text(text) => lrc.push_str(text),
+            scraper::Node::Element(element) if element.name() == "br" => lrc.push('\n'),
+            _ => {}
+        }
+    }
+    let lines = parse_lrc(&lrc);
+    if !lines.iter().any(|line| !line.text.is_empty()) {
+        return None;
+    }
+    // The site provides no recording duration. Reject obvious mismatches, but
+    // allow an outro after the last cue; cue time is not track duration.
+    if duration > 0.0 && lines.last()?.time? > duration + 10.0 {
+        return None;
+    }
+    Some(Lyrics {
+        synced: true,
+        lines,
+        how: "kugeci",
+    })
+}
+
+async fn kugeci_page(http: &reqwest::Client, path: &str) -> Option<String> {
+    let mut response = http
+        .get(format!("{KUGECI_ENDPOINT}{path}"))
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > KUGECI_MAX_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+static KUGECI_VIDEO_CREDIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*([^:：]+?)\s*[:：]\s*[「『]([^」』]+)[」』](.*?)[【\[(（]\s*official\s+(?:mv|music\s+video)\s*[】\])）]\s*$").unwrap()
+});
+
+static KUGECI_PLAIN_MV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*([^:：]+?)\s*[:：]\s*(.+?)[【\[]\s*official\s+(?:mv|music\s+video)\s*[】\]](.*)$",
+    )
+    .unwrap()
+});
+static KUGECI_LYRIC_VIDEO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(.+?)\s+-\s+([^『「【]+?)(?:[『「]([^』」]*)[』」])?[【\[](?:動態歌詞|动态歌词|動態歌詞字幕|动态歌词字幕)(?:\s*/?\s*lyrics)?[】\]]\s*$").unwrap()
+});
+static KUGECI_CCTV_CREDIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^歌曲Top\d+《([^》]+)》\s*(.+?)\s*【\d{4}年央视春晚】(?:｜订阅CCTV春晚)?\s*$")
+        .unwrap()
+});
+
+fn kugeci_video_credit(title: &str) -> Option<(String, String)> {
+    if let Some(parts) = KUGECI_VIDEO_CREDIT.captures(title) {
+        if !parts[3].chars().any(|ch| ch.is_alphanumeric()) {
+            return Some((parts[2].trim().into(), parts[1].trim().into()));
+        }
+    }
+    if let Some(parts) = KUGECI_PLAIN_MV.captures(title) {
+        if parts[2].contains(['「', '『', '」', '』']) {
+            return None;
+        }
+        // Keep title version labels, and reject version/reaction annotations
+        // appended after the official marker. Sponsor text is not a credit.
+        if !KUGECI_VERSION.is_match(&parts[3]) && !parts[3].to_lowercase().contains("reaction") {
+            let title = parts[2].trim_matches(|ch: char| {
+                !ch.is_alphanumeric() && !matches!(ch, '(' | ')' | '（' | '）')
+            });
+            let artist = parts[1].trim_matches(|ch: char| !ch.is_alphanumeric());
+            if !title.is_empty() && !artist.is_empty() {
+                return Some((title.into(), artist.into()));
+            }
+        }
+    }
+    if let Some(parts) = KUGECI_LYRIC_VIDEO.captures(title) {
+        if parts
+            .get(3)
+            .is_some_and(|annotation| KUGECI_VERSION.is_match(annotation.as_str()))
+        {
+            return None;
+        }
+        return Some((parts[2].trim().into(), parts[1].trim().into()));
+    }
+    if let Some(parts) = KUGECI_CCTV_CREDIT.captures(title) {
+        return Some((parts[1].trim().into(), parts[2].trim().into()));
+    }
+    None
+}
+
+async fn fetch_kugeci_for_song(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
+    tokio::time::timeout(TIMEOUT, async {
+        if let Some(words) = fetch_kugeci(http, &song.title, &song.artist, song.song_duration).await
+        {
+            return Some(words);
+        }
+        // Music/lyric videos and CCTV clips can report publishers as artists.
+        // Use only recognized explicit title/performer credit formats, and
+        // verify both fields against the search row and fetched song page.
+        let (title, artist) = kugeci_video_credit(&song.title)?;
+        fetch_kugeci(http, &title, &artist, song.song_duration).await
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn fetch_kugeci(
+    http: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: f64,
+) -> Option<Lyrics> {
+    if kugeci_key(title).is_empty() || kugeci_key(artist).is_empty() {
+        return None;
+    }
+    // Bound the whole fallback, including the search and up to two duplicate
+    // recordings, so an unavailable site cannot add several request timeouts.
+    tokio::time::timeout(TIMEOUT, async {
+        let mut queries = Vec::new();
+        for title in kugeci_titles(title) {
+            let query = title
+                .trim_matches(|ch: char| !ch.is_alphanumeric())
+                .to_string();
+            if query.is_empty() {
+                continue;
+            }
+            for query in [query.clone(), fast2s::convert(&query).replace('迴', "回")] {
+                if !queries.contains(&query) {
+                    queries.push(query);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        for query in queries {
+            if let Some(html) = kugeci_page(http, &format!("/search?q={}", urlencode(&query))).await
+            {
+                paths = kugeci_candidates(&html, title, artist);
+                if !paths.is_empty() {
+                    break;
+                }
+            }
+        }
+        for path in paths.into_iter().take(2) {
+            if let Some(html) = kugeci_page(http, &path).await {
+                if let Some(words) = shape_kugeci(&html, title, artist, duration) {
+                    return Some(words);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 // ------------------------------------------------------------------ lookup
 
-/// Four-tier match, and only two sources.
+/// YouTube Music, three LRCLib tiers, then Kugeci.
 ///
 /// YouTube Music goes first, because it is asked by **video id** — it is the one
 /// tier that cannot answer with a different song's words, and it covers what
@@ -510,7 +862,13 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
             .and_then(|hit| shape(Some(hit), "search"));
     }
 
-    // Nothing timed anywhere, so the block YouTube had all along wins.
+    // 5. Kugeci carries timed lyrics for Chinese tracks the other sources miss.
+    // It can upgrade plain LRCLib lyrics as well as YouTube's unsynced block.
+    if result.as_ref().is_none_or(|words| !words.synced) {
+        result = fetch_kugeci_for_song(http, song).await.or(result);
+    }
+
+    // Nothing timed anywhere, so keep whichever plain block we found.
     let result = result.or(unsynced);
 
     remember(&song.video_id, &result);
@@ -519,11 +877,25 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     result
 }
 
+pub fn clear_negative_cache() {
+    let mut cache = CACHE.lock().expect("lyrics cache");
+    retain_found_lyrics(&mut cache);
+}
+
+fn retain_found_lyrics(cache: &mut (Vec<String>, HashMap<String, Option<Lyrics>>)) {
+    let (order, entries) = cache;
+    entries.retain(|_, result| result.is_some());
+    order.retain(|video_id| entries.contains_key(video_id));
+}
+
 /// The in-memory half: the last `CACHE_MAX` lookups, misses included.
 fn remember(video_id: &str, result: &Option<Lyrics>) {
     let mut cache = CACHE.lock().expect("lyrics cache");
     let (order, entries) = &mut *cache;
-    if entries.insert(video_id.to_string(), result.clone()).is_none() {
+    if entries
+        .insert(video_id.to_string(), result.clone())
+        .is_none()
+    {
         order.push(video_id.to_string());
     }
     while order.len() > CACHE_MAX {
@@ -535,6 +907,328 @@ fn remember(video_id: &str, result: &Option<Lyrics>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_memory_misses_keeps_found_lyrics_and_cache_order() {
+        let words = Lyrics {
+            synced: false,
+            lines: Vec::new(),
+            how: "ytmusic",
+        };
+        let mut cache = (
+            vec!["miss".into(), "found".into()],
+            HashMap::from([("miss".into(), None), ("found".into(), Some(words.clone()))]),
+        );
+        retain_found_lyrics(&mut cache);
+        assert_eq!(cache.0, vec!["found"]);
+        assert_eq!(cache.1.get("found"), Some(&Some(words)));
+        assert!(!cache.1.contains_key("miss"));
+    }
+
+    // Synthetic text with the site's actual markup; no copyrighted lyric fixture.
+    const KUGECI_SONG: &str = r#"<main><h1> 愛情 </h1>
+        <div class="song-details-container"><a href="/writer/x">作词：Someone</a>
+        <a href="/singer/a">演唱： Singer &amp; Co</a></div>
+        <div id="lyricsContainer">[00:01.20]First &amp; second<br>[00:02.00]<br />[00:03.40]<span>Last</span></div>
+        <div id="txt">Duplicated plain lyrics</div></main>"#;
+
+    #[test]
+    fn kugeci_parses_entities_breaks_and_instrumental_gaps() {
+        let lyrics = shape_kugeci(
+            KUGECI_SONG,
+            "爱情 (Official Music Video)",
+            "Singer & Co",
+            4.0,
+        )
+        .unwrap();
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.how, "kugeci");
+        assert_eq!(how_from(lyrics.how), "kugeci");
+        assert_eq!(lyrics.lines.len(), 3);
+        assert_eq!(lyrics.lines[0].text, "First & second");
+        assert_eq!(lyrics.lines[0].time, Some(1.2));
+        assert_eq!(lyrics.lines[1].text, "");
+        assert_eq!(lyrics.lines[2].text, "Last");
+    }
+
+    #[test]
+    fn kugeci_rejects_different_recordings_and_missing_markup() {
+        assert!(shape_kugeci(KUGECI_SONG, "爱情 (Live)", "Singer & Co", 4.0).is_none());
+        assert!(shape_kugeci(KUGECI_SONG, "爱情", "Someone", 4.0).is_none());
+        assert!(shape_kugeci(
+            &KUGECI_SONG.replace("[00:03.40]", "[04:00.00]"),
+            "爱情",
+            "Singer & Co",
+            4.0
+        )
+        .is_none());
+        assert!(shape_kugeci("<main>Challenge page</main>", "爱情", "Singer", 4.0).is_none());
+        assert!(shape_kugeci(
+            &KUGECI_SONG.replace("lyricsContainer", "changed"),
+            "爱情",
+            "Singer & Co",
+            4.0
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn kugeci_search_verifies_artist_and_ignores_footer_and_external_links() {
+        let html = r#"<table id="tablesort"><tbody>
+        <tr><td>date</td><td><a href="/song/studio">爱情</a></td><td><a href="/singer/a">Wrong singer</a></td></tr>
+        <tr><td>date</td><td><a href="/song/live">爱情 (Live)</a></td><td><a>Singer &amp; Co</a></td></tr>
+        <tr><td>date</td><td><a href="https://www.kugeci.com/song/right">愛情</a></td><td><a>Other</a><a>Singer &amp; Co</a></td><td><a href="/song/right">link</a></td></tr>
+        <tr><td>date</td><td><a href="https://evil.test/song/wrong">爱情</a></td><td><a>Singer &amp; Co</a></td></tr>
+        </tbody></table><footer><a href="/song/footer">爱情</a></footer>"#;
+        assert_eq!(
+            kugeci_candidates(html, "爱情", "Singer & Co"),
+            vec!["/song/right"]
+        );
+        assert!(kugeci_candidates(html, "爱情", "").is_empty());
+        for path in [
+            "//evil.test/song/id",
+            "/song/../other",
+            "https://www.kugeci.com.evil.test/song/id",
+        ] {
+            assert!(kugeci_song_path(path).is_none());
+        }
+    }
+
+    #[test]
+    fn kugeci_lyric_video_keeps_recording_annotations() {
+        for annotation in ["Live", "Remix", "Acoustic", "粤语版", "现场版"] {
+            let title = format!("Singer - Song『{annotation}』【動態歌詞Lyrics】");
+            assert!(kugeci_video_credit(&title).is_none(), "{annotation}");
+        }
+        assert_eq!(
+            kugeci_video_credit("Singer - Song『a lyric hook』【動態歌詞Lyrics】"),
+            Some(("Song".into(), "Singer".into()))
+        );
+    }
+
+    #[test]
+    fn kugeci_resolves_verified_queue_metadata_formats() {
+        assert!(kugeci_artists_match(
+            &["Vansdaddy".into(), "华云龙KLE".into()],
+            "Vansdaddy和华云龙"
+        ));
+        let cases = [
+            ("🏍C-BLOCK : 很高兴认识你  🛵【 OFFICIAL MV 】Sup Music X 陌陌  \"送给每个美好的相遇\"", "很高兴认识你", "C-BLOCK"),
+            ("陳韻若 - 愛的迴歸線『在愛的迴歸線 陽光在手指間』【動態歌詞Lyrics】", "愛的迴歸線", "陳韻若"),
+            ("歌曲Top9《答案》杨坤 郭采洁 【2014年央视春晚】｜订阅CCTV春晚", "答案", "杨坤 郭采洁"),
+        ];
+        for (video_title, title, artist) in cases {
+            assert_eq!(
+                kugeci_video_credit(video_title),
+                Some((title.into(), artist.into()))
+            );
+        }
+        assert!(kugeci_artists_match(
+            &["杨坤".into(), "郭采洁".into()],
+            "杨坤 郭采洁"
+        ));
+        assert!(kugeci_title_matches("爱的回归线", "愛的迴歸線"));
+        assert!(!kugeci_artists_match(&["华云龙KLE".into()], "华云龙Other"));
+        assert!(!kugeci_artists_match(&["A".into(), "B".into()], "AB"));
+        assert!(kugeci_artists_match(
+            &["楊和蘇KeyNG".into(), "JinJiBeWater_隼".into()],
+            "楊和蘇KeyNG和JinJiBeWater_隼"
+        ));
+        for title in [
+            "A : Song 【OFFICIAL MV】 (Live)",
+            "A : Song 【OFFICIAL MV】 reaction",
+            "A - Song【reaction Lyrics】",
+            "歌曲Top9《答案》不同人【2014年其他节目】",
+        ] {
+            assert!(kugeci_video_credit(title).is_none());
+        }
+    }
+
+    #[test]
+    fn kugeci_extracts_explicit_music_video_credit_from_uploader_metadata() {
+        let title = "功夫胖 KUNGFU-PEN ：「无赖」🐼 🐼 🐼 【 OFFICIAL MV  】";
+        assert_eq!(
+            kugeci_video_credit(title),
+            Some(("无赖".into(), "功夫胖 KUNGFU-PEN".into()))
+        );
+        for title in ["A: Song", "A ：「Song」 reaction video", "Song (Live)"] {
+            assert!(kugeci_video_credit(title).is_none());
+        }
+    }
+
+    #[test]
+    fn kugeci_matches_alternate_subtitle_without_changing_recording_version() {
+        let search = r#"<table id="tablesort"><tbody><tr><td>date</td>
+            <td><a href="/song/9QbM6b0K">月半小夜曲</a></td><td><a>TizzyT</a></td></tr></tbody></table>"#;
+        for title in ["月半小夜曲 (你怎么不回答)", "月半小夜曲（你怎么不回答）"]
+        {
+            assert_eq!(
+                kugeci_candidates(search, title, "Tizzy T"),
+                vec!["/song/9QbM6b0K"]
+            );
+        }
+        for title in [
+            "月半小夜曲 (Live)",
+            "月半小夜曲（现场版）",
+            "月半小夜曲 (Remix)",
+        ] {
+            assert!(kugeci_candidates(search, title, "Tizzy T").is_empty());
+        }
+    }
+
+    #[test]
+    fn kugeci_matches_zhou_xuan_chinese_collaboration_metadata() {
+        let search = r#"<table id="tablesort"><tbody><tr><td>date</td>
+            <td><a href="/song/7CJI2dO0">周旋</a></td>
+            <td><a>王以太</a><a>艾热 AIR</a></td></tr></tbody></table>"#;
+        let artist = "王以太和艾热 AIR";
+        assert_eq!(
+            kugeci_candidates(search, "周旋", &artist),
+            vec!["/song/7CJI2dO0"]
+        );
+        let page = r#"<main><h1>周旋</h1><div class="song-details-container">
+            <a href="/singer/a">演唱： 王以太</a><a href="/singer/b">演唱： 艾热 AIR</a></div>
+            <div id="lyricsContainer">[00:21.87]Example<br>[00:25.89]Next</div></main>"#;
+        assert!(shape_kugeci(page, "周旋", &artist, 291.0).is_some());
+    }
+
+    #[test]
+    fn kugeci_requires_all_collaborators_and_preserves_literal_artist_names() {
+        let credits = vec!["王以太".to_string(), "艾热 AIR".to_string()];
+        for artist in [
+            "王以太和艾热 AIR",
+            "王以太 & 艾熱 AIR",
+            "王以太/艾热 AIR",
+            "王以太 feat. 艾热 AIR",
+        ] {
+            assert!(kugeci_artists_match(&credits, artist), "{artist}");
+        }
+        assert!(!kugeci_artists_match(&credits, "王以太和其他歌手"));
+        assert!(!kugeci_artists_match(&credits[..1], "王以太和艾热 AIR"));
+        assert!(kugeci_artists_match(&["和平饭店".into()], "和平饭店"));
+        assert!(kugeci_artists_match(&["Singer & Co".into()], "Singer & Co"));
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_verified_queue_formats() {
+        let cases = [
+            ("台北一夜", "Vansdaddy和华云龙", 196.0),
+            ("🏍C-BLOCK : 很高兴认识你  🛵【 OFFICIAL MV 】Sup Music X 陌陌  \"送给每个美好的相遇\"", "ZHONG.TV", 259.0),
+            ("陳韻若 - 愛的迴歸線『在愛的迴歸線 陽光在手指間』【動態歌詞Lyrics】", "Music Channel HM", 258.0),
+            ("歌曲Top9《答案》杨坤 郭采洁 【2014年央视春晚】｜订阅CCTV春晚", "CCTV春晚", 205.0),
+        ];
+        let http = reqwest::Client::new();
+        for (title, artist, song_duration) in cases {
+            let song = Song {
+                title: title.into(),
+                artist: artist.into(),
+                song_duration,
+                ..Song::default()
+            };
+            let words = fetch_kugeci_for_song(&http, &song)
+                .await
+                .unwrap_or_else(|| panic!("no result for {title}"));
+            assert!(words.synced);
+            assert_eq!(words.how, "kugeci");
+            assert!(words.lines.len() > 20);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_uploader_music_video() {
+        let song = Song {
+            title: "功夫胖 KUNGFU-PEN ：「无赖」🐼 🐼 🐼 【 OFFICIAL MV  】".into(),
+            artist: "ZHONG.TV".into(),
+            song_duration: 279.0,
+            ..Song::default()
+        };
+        let words = fetch_kugeci_for_song(&reqwest::Client::new(), &song)
+            .await
+            .expect("explicit video title credit resolves to Kugeci");
+        assert!(words.synced);
+        assert_eq!(words.how, "kugeci");
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_alternate_subtitle() {
+        let words = fetch_kugeci(
+            &reqwest::Client::new(),
+            "月半小夜曲 (你怎么不回答)",
+            "Tizzy T",
+            230.0,
+        )
+        .await
+        .expect("alternate title matches the same recording");
+        assert!(words.synced);
+        assert_eq!(words.how, "kugeci");
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit queue audit; needs PMW_LYRICS_AUDIT_INPUT and PMW_LYRICS_AUDIT_OUTPUT"]
+    async fn audit_queue_lyrics() {
+        use futures_util::{stream, StreamExt};
+        let input = std::env::var("PMW_LYRICS_AUDIT_INPUT").expect("audit input");
+        let output = std::env::var("PMW_LYRICS_AUDIT_OUTPUT").expect("audit output");
+        let tracks: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(input).unwrap()).unwrap();
+        let http = reqwest::Client::new();
+        // Fresh lookups in tests: the disk cache stays disabled, and each row
+        // records only metadata and provenance, never the fetched lyric text.
+        let mut pending = stream::iter(tracks.into_iter().enumerate()).map(|(index, track)| {
+            let http = http.clone();
+            async move {
+                let text = |key| track.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                let song = Song { video_id: text("videoId"), title: text("title"), artist: text("artist"),
+                    album: text("album"), song_duration: track.get("duration").and_then(Value::as_f64).unwrap_or(0.0),
+                    ..Song::default() };
+                let result = tokio::time::timeout(Duration::from_secs(75), fetch_lyrics(&http, &song)).await;
+                let (status, words) = match result {
+                    Ok(Some(words)) => ("resolved", Some(words)),
+                    Ok(None) => ("no_match", None),
+                    Err(_) => ("timeout", None),
+                };
+                serde_json::json!({"position": index + 1, "videoId": song.video_id, "title": song.title,
+                    "artist": song.artist, "album": song.album, "duration": song.song_duration, "status": status,
+                    "source": words.as_ref().map(|words| words.how), "synced": words.as_ref().map(|words| words.synced),
+                    "lineCount": words.as_ref().map(|words| words.lines.len())})
+            }
+        }).buffer_unordered(3);
+        let mut rows = Vec::new();
+        while let Some(row) = pending.next().await {
+            println!(
+                "audit {}: {} — {}: {} ({})",
+                row["position"], row["title"], row["artist"], row["status"], row["source"]
+            );
+            rows.push(row);
+            rows.sort_by_key(|row| row["position"].as_u64().unwrap());
+            std::fs::write(&output, serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_zhou_xuan() {
+        let words = fetch_kugeci(&reqwest::Client::new(), "周旋", "王以太和艾热 AIR", 291.0)
+            .await
+            .expect("current track matches the collaboration and timings");
+        assert!(words.synced);
+        assert_eq!(words.how, "kugeci");
+        assert!(words.lines.len() > 20);
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_supplied_song() {
+        let words = fetch_kugeci(&reqwest::Client::new(), "月半小夜曲", "TizzyT", 0.0)
+            .await
+            .expect("supplied song found through title search");
+        assert!(words.synced);
+        assert_eq!(words.how, "kugeci");
+        assert!(words.lines.len() > 20);
+    }
 
     #[test]
     fn keeps_instrumental_gaps_and_sorts() {

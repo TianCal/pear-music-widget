@@ -59,7 +59,13 @@ const OPACITIES: [u32; 4] = [100, 75, 50, 25];
 
 /// How strongly the cover's colours wash the card. Stored as a fraction, shown
 /// by name — "40%" means nothing to look at, whereas "Subtle" does.
-const TINTS: [(u32, &str); 5] = [(0, "Off"), (35, "Subtle"), (60, "Medium"), (80, "Strong"), (100, "Vivid")];
+const TINTS: [(u32, &str); 5] = [
+    (0, "Off"),
+    (35, "Subtle"),
+    (60, "Medium"),
+    (80, "Strong"),
+    (100, "Vivid"),
+];
 
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
@@ -198,12 +204,21 @@ fn skin_submenu(
     let items: Vec<CheckMenuItem<tauri::Wry>> = SKIN_LABELS
         .iter()
         .map(|(key, text)| {
-            CheckMenuItem::with_id(app, format!("{id_prefix}:{key}"), text, true, *key == current, None::<&str>)
+            CheckMenuItem::with_id(
+                app,
+                format!("{id_prefix}:{key}"),
+                text,
+                true,
+                *key == current,
+                None::<&str>,
+            )
         })
         .collect::<tauri::Result<_>>()?;
 
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
     Submenu::with_items(app, label, true, &refs)
 }
 
@@ -258,12 +273,21 @@ fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::W
     let items: Vec<CheckMenuItem<tauri::Wry>> = TINTS
         .iter()
         .map(|(pct, label)| {
-            CheckMenuItem::with_id(app, format!("tint:{pct}"), label, true, *pct == selected, None::<&str>)
+            CheckMenuItem::with_id(
+                app,
+                format!("tint:{pct}"),
+                label,
+                true,
+                *pct == selected,
+                None::<&str>,
+            )
         })
         .collect::<tauri::Result<_>>()?;
 
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        items.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
     Submenu::with_items(app, "Cover tint", true, &refs)
 }
 
@@ -295,7 +319,10 @@ fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<
 /// LRCLib carries what was published, and YouTube Music's own timings are
 /// whatever the label uploaded. This converts the words on the way to the
 /// panel; nothing else on the card is touched.
-fn simplify_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+fn simplify_lyrics_item(
+    app: &AppHandle,
+    checked: bool,
+) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
     CheckMenuItem::with_id(
         app,
         "simplifyLyrics",
@@ -306,8 +333,18 @@ fn simplify_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMe
     )
 }
 
-fn jyutping_lyrics_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
-    CheckMenuItem::with_id(app, "jyutpingLyrics", "Jyutping", true, checked, None::<&str>)
+fn jyutping_lyrics_item(
+    app: &AppHandle,
+    checked: bool,
+) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    CheckMenuItem::with_id(
+        app,
+        "jyutpingLyrics",
+        "Jyutping",
+        true,
+        checked,
+        None::<&str>,
+    )
 }
 
 /// How much disk the words may keep, plus the two things you want next to that
@@ -333,7 +370,20 @@ fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<t
 
     let held = crate::lyrics_cache::size_bytes();
     let separator = PredefinedMenuItem::separator(app)?;
-    let open = MenuItem::with_id(app, "lyricsCacheOpen", "Open cache folder", true, None::<&str>)?;
+    let open = MenuItem::with_id(
+        app,
+        "lyricsCacheOpen",
+        "Open cache folder",
+        true,
+        None::<&str>,
+    )?;
+    let negative = MenuItem::with_id(
+        app,
+        "lyricsCacheClearNegative",
+        "Clear negative cache",
+        true,
+        None::<&str>,
+    )?;
     let empty = MenuItem::with_id(
         app,
         "lyricsCacheClear",
@@ -348,6 +398,7 @@ fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<t
         .collect();
     refs.push(&separator);
     refs.push(&open);
+    refs.push(&negative);
     refs.push(&empty);
     Submenu::with_items(app, "Cache", true, &refs)
 }
@@ -378,7 +429,14 @@ fn lyrics_submenu(
 }
 
 fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
-    CheckMenuItem::with_id(app, "alwaysOnTop", "Always on top", true, checked, None::<&str>)
+    CheckMenuItem::with_id(
+        app,
+        "alwaysOnTop",
+        "Always on top",
+        true,
+        checked,
+        None::<&str>,
+    )
 }
 
 /// The four toggles in the card's top-right corner, each shown or hidden on its
@@ -434,7 +492,13 @@ fn corner_submenu(
         .collect::<tauri::Result<_>>()?;
 
     let separator = PredefinedMenuItem::separator(app)?;
-    let hide_label = MenuItem::with_id(app, "cornerFadeLabel", "Hide when idle", false, None::<&str>)?;
+    let hide_label = MenuItem::with_id(
+        app,
+        "cornerFadeLabel",
+        "Hide when idle",
+        false,
+        None::<&str>,
+    )?;
 
     let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = shown
         .iter()
@@ -490,7 +554,13 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         &[
             &MenuItem::with_id(app, "nowPlaying", now_playing, false, None::<&str>)?,
-            &MenuItem::with_id(app, "status", status_label(&snapshot.status), false, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                "status",
+                status_label(&snapshot.status),
+                false,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(
                 app,
@@ -502,7 +572,12 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             )?,
             &always_on_top_item(app, always_on_top)?,
             &skin_submenu(app, "skin", "Skin", &widget_skin)?,
-            &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
+            &skin_submenu(
+                app,
+                "panelSkin",
+                "Dropdown skin",
+                &window::panel_skin_of(&store),
+            )?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity, store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -513,9 +588,22 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 Some(store.get(|s| s.lyrics_cache_mb)),
             )?,
             &corner_submenu(app, &widget_skin, corners, corners_autohide)?,
-            &MenuItem::with_id(app, "reset", "Reset size and position", widget_alive, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                "reset",
+                "Reset size and position",
+                widget_alive,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
-            &CheckMenuItem::with_id(app, "openAtLogin", "Open at login", true, open_at_login, None::<&str>)?,
+            &CheckMenuItem::with_id(
+                app,
+                "openAtLogin",
+                "Open at login",
+                true,
+                open_at_login,
+                None::<&str>,
+            )?,
             &MenuItem::with_id(app, "reconnect", "Reconnect", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
@@ -559,11 +647,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
-            &opacity_submenu(
-                app,
-                store.get(|s| s.opacity),
-                store.get(|s| s.liquid_glass),
-            )?,
+            &opacity_submenu(app, store.get(|s| s.opacity), store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
                 app,
                 store.get(|s| s.lyrics_offset),
@@ -571,7 +655,12 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 store.get(|s| s.jyutping_lyrics),
                 None,
             )?,
-            &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
+            &corner_submenu(
+                app,
+                &skin,
+                store.corners_for(&skin),
+                store.get(|s| s.corners_autohide),
+            )?,
             &always_on_top_item(app, store.get(|s| s.always_on_top))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reset", "Reset size and position", alive, None::<&str>)?,
@@ -601,7 +690,12 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 store.get(|s| s.jyutping_lyrics),
                 None,
             )?,
-            &corner_submenu(app, &skin, store.corners_for(&skin), store.get(|s| s.corners_autohide))?,
+            &corner_submenu(
+                app,
+                &skin,
+                store.corners_for(&skin),
+                store.get(|s| s.corners_autohide),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -740,6 +834,21 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             let dir = crate::lyrics_cache::dir();
             let _ = std::fs::create_dir_all(&dir);
             let _ = Command::new("open").arg(dir).spawn();
+        }
+        "lyricsCacheClearNegative" => {
+            let handle = app.clone();
+            let core = app.state::<Arc<Core>>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                let cleared = tauri::async_runtime::spawn_blocking(|| {
+                    crate::lyrics_cache::clear_negative();
+                    crate::lyrics::clear_negative_cache();
+                })
+                .await;
+                if cleared.is_ok() {
+                    core.retry_missing_lyrics().await;
+                    refresh(&handle);
+                }
+            });
         }
         "lyricsCacheClear" => crate::lyrics_cache::clear(),
         "reconnect" => crate::ws::retry(app),
@@ -992,7 +1101,10 @@ mod tests {
         assert_eq!(columns('a'), 1);
         assert_eq!(columns('海'), 2);
         assert_eq!(columns('「'), 2);
-        let mixed = ellipsize("最好的我 (50 Feet) 「想愛不能愛的哀愁」【動態歌詞】", NOW_PLAYING_COLUMNS);
+        let mixed = ellipsize(
+            "最好的我 (50 Feet) 「想愛不能愛的哀愁」【動態歌詞】",
+            NOW_PLAYING_COLUMNS,
+        );
         assert!(mixed.chars().map(columns).sum::<usize>() <= NOW_PLAYING_COLUMNS);
     }
 }

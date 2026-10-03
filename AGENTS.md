@@ -144,9 +144,23 @@ Lookup order:
 2. LRCLib exact match with full metadata.
 3. LRCLib exact match with a cleaned title.
 4. LRCLib search, ranked by duration.
+5. Kugeci title search, verified against title and artist on both the result row
+   and song page. Preserve live/remix qualifiers and try original plus simplified
+   Chinese titles. The site supplies LRC in `#lyricsContainer`, without duration
+   or album metadata; treat failed requests or changed markup as misses.
+   Pass the full artist credit to Kugeci. Match literal names first, then require
+   every collaborator (including names joined with `和`) in the singer list.
+   Try a trailing parenthesized subtitle without the subtitle only after the
+   full title. Keep recording qualifiers such as Live, remix, and 粤语版 intact.
+   Recognized official-video, lyric-video, and CCTV song/performer title formats
+   can supply credits when the API artist is an uploader. Recheck extracted
+   title and performers against Kugeci. Preserve version annotations, and keep
+   the verified 华云龙 ↔ 华云龙KLE alias specific rather than stripping arbitrary
+   artist suffixes. Segment collaborations using provider names so `和` inside
+   a name (such as 楊和蘇) remains intact.
 
-Keep unsynced YouTube lyrics as a fallback while looking for a synced LRCLib
-result. Preserve empty LRC lines because they represent instrumental gaps.
+Keep unsynced lyrics as a fallback while looking for a synced result from later
+sources. Preserve empty LRC lines because they represent instrumental gaps.
 
 The cache holds 60 entries in memory and JSON files under
 `~/Library/Caches/pear-music-widget/lyrics`. Disk hits return to memory. Evict
@@ -154,6 +168,9 @@ oldest-written files to 90% of `lyricsCacheMb`; `0` disables new caching without
 deleting existing files. Hits do not expire, while misses expire after one week.
 Corrupt records behave as cache misses. Keep `how` mapped to the known static
 source labels.
+Lyrics → Cache → Clear negative cache removes remembered misses from disk and
+memory, preserving synced and unsynced hits. Retry a current `none` result after
+clearing; keep cache expiry independent of provider/matching changes.
 
 The lyric roll depends on three rules:
 

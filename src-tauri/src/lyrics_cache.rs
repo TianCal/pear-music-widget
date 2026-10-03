@@ -22,7 +22,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -50,12 +50,14 @@ const EVICT_TO: f64 = 0.9;
 /// Bumped if the stored shape changes; an older record is treated as absent and
 /// fetched again, which is all a cache owes anyone.
 const VERSION: u8 = 1;
-
 static CAP_BYTES: AtomicU64 = AtomicU64::new(0);
 /// What the directory holds, tracked rather than measured: the tray menu is
 /// rebuilt on every state change and cannot go counting files each time.
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 static DIR: OnceLock<PathBuf> = OnceLock::new();
+// A negative-cache sweep must not remove a positive result written after it
+// read the old miss. Serialize file mutations, including the existing clear.
+static WRITES: Mutex<()> = Mutex::new(());
 
 // ------------------------------------------------------------------- records
 
@@ -64,12 +66,12 @@ struct Record {
     v: u8,
     /// Unix seconds, for the miss expiry.
     at: u64,
-    /// `None` is a miss — a track none of the four tiers could match.
+    /// `None` is a miss — a track none of the sources could match.
     lyrics: Option<Stored>,
 }
 
 /// `Lyrics` with `how` widened to a `String`: the live type carries a
-/// `&'static str`, which is worth keeping (it is one of four known values, not
+/// `&'static str`, which is worth keeping (it is one of the known values, not
 /// arbitrary text) and cannot be deserialised into.
 #[derive(Serialize, Deserialize)]
 struct Stored {
@@ -146,6 +148,10 @@ pub fn load(video_id: &str) -> Option<Option<Lyrics>> {
     }
     let path = path_for(video_id)?;
     let record: Record = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+    record_result(record, now())
+}
+
+fn record_result(record: Record, now: u64) -> Option<Option<Lyrics>> {
     if record.v != VERSION {
         return None;
     }
@@ -159,7 +165,7 @@ pub fn load(video_id: &str) -> Option<Option<Lyrics>> {
         // A miss worth re-asking about. Left on disk — the write that follows
         // the refetch replaces it, and deleting it here would only make the
         // total wrong if that fetch never happened.
-        None if now().saturating_sub(record.at) > MISS_TTL.as_secs() => None,
+        None if now.saturating_sub(record.at) > MISS_TTL.as_secs() => None,
         None => Some(None),
     }
 }
@@ -171,6 +177,7 @@ pub fn store(video_id: &str, lyrics: &Option<Lyrics>) {
     let Some(path) = path_for(video_id) else {
         return;
     };
+    let _write = WRITES.lock().expect("lyrics cache writes");
     let record = Record {
         v: VERSION,
         at: now(),
@@ -209,6 +216,7 @@ pub fn store(video_id: &str, lyrics: &Option<Lyrics>) {
 }
 
 pub fn clear() {
+    let _write = WRITES.lock().expect("lyrics cache writes");
     let dir = dir();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -218,6 +226,31 @@ pub fn clear() {
         }
     }
     TOTAL_BYTES.store(0, Ordering::Relaxed);
+}
+
+/// Explicitly forget failed lookups without removing any found lyrics.
+pub fn clear_negative() {
+    let _write = WRITES.lock().expect("lyrics cache writes");
+    clear_negative_in(&dir());
+    TOTAL_BYTES.store(measure(), Ordering::Relaxed);
+}
+
+fn clear_negative_in(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_record(&path) {
+            continue;
+        }
+        let record = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Record>(&text).ok());
+        if record.is_some_and(|record| record.lyrics.is_none()) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ eviction
@@ -302,6 +335,73 @@ pub fn human(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_misses_expire_after_a_week_and_hits_do_not_expire() {
+        let record = |lyrics| Record {
+            v: VERSION,
+            at: 100,
+            lyrics,
+        };
+        let miss_age = 100 + MISS_TTL.as_secs();
+        assert_eq!(record_result(record(None), miss_age), Some(None));
+        assert!(record_result(record(None), miss_age + 1).is_none());
+        for synced in [true, false] {
+            let words = Stored {
+                synced,
+                how: "ytmusic".into(),
+                lines: Vec::new(),
+            };
+            assert!(record_result(record(Some(words)), miss_age + 1)
+                .unwrap()
+                .is_some());
+        }
+        // Records written during the Kugeci migration remain compatible.
+        let old: Record =
+            serde_json::from_str(r#"{"v":1,"lookup_v":5,"at":100,"lyrics":null}"#).unwrap();
+        assert_eq!(record_result(old, 100), Some(None));
+    }
+
+    #[test]
+    fn clearing_negative_cache_preserves_synced_plain_and_unrecognized_files() {
+        let dir = std::env::temp_dir().join(format!("pmw-negative-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (name, lyrics) in [
+            ("miss.json", None),
+            ("synced.json", Some(true)),
+            ("plain.json", Some(false)),
+        ] {
+            let words = lyrics.map(|synced| Stored {
+                synced,
+                how: "kugeci".into(),
+                lines: Vec::new(),
+            });
+            let record = Record {
+                v: VERSION,
+                at: 100,
+                lyrics: words,
+            };
+            fs::write(dir.join(name), serde_json::to_string(&record).unwrap()).unwrap();
+        }
+        fs::write(dir.join("corrupt.json"), "{").unwrap();
+        fs::write(dir.join("unrecognized.json"), "{}").unwrap();
+        fs::write(dir.join("notes.txt"), "keep").unwrap();
+        clear_negative_in(&dir);
+        assert!(!dir.join("miss.json").exists());
+        for name in [
+            "synced.json",
+            "plain.json",
+            "corrupt.json",
+            "unrecognized.json",
+            "notes.txt",
+        ] {
+            assert!(dir.join(name).exists(), "{name}");
+        }
+        clear_negative_in(&dir); // Idempotent.
+        assert!(dir.join("plain.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A cache that grows past its cap has to come back under it, and the
     /// oldest file is the one that goes. Against a directory of its own, not

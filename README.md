@@ -65,10 +65,13 @@ repeat-all/repeat-one, seeking, cover-derived tint, opacity, light/dark
 appearance, always-on-top mode, remembered positions and sizes, native macOS
 vibrancy, and no Dock icon.
 
-Lyrics are tried from YouTube Music first and [LRCLib](https://lrclib.net) as a
-fallback. This is the widget's only non-localhost network access. Results are
+Lyrics are tried from YouTube Music first, then [LRCLib](https://lrclib.net),
+with [Kugeci](https://www.kugeci.com) as a final source for synced lyrics.
+Kugeci matches title and artist; different recordings can still have different
+timings. This is the widget's only non-localhost network access. Results are
 cached under `~/Library/Caches/pear-music-widget/lyrics`; the menu controls the
-cache size and can open or clear it.
+cache size and can open or clear it. **Lyrics → Cache → Clear negative cache**
+retries remembered misses while keeping lyrics already found.
 
 ## Install
 

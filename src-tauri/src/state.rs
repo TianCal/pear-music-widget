@@ -369,13 +369,11 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(
-        app: AppHandle,
-        store: Arc<Store>,
-        api: Arc<Api>,
-        jyutping: Arc<Jyutping>,
-    ) -> Self {
-        let (skin, panel_skin) = (crate::window::skin_of(&store), crate::window::panel_skin_of(&store));
+    pub fn new(app: AppHandle, store: Arc<Store>, api: Arc<Api>, jyutping: Arc<Jyutping>) -> Self {
+        let (skin, panel_skin) = (
+            crate::window::skin_of(&store),
+            crate::window::panel_skin_of(&store),
+        );
         let liquid_glass = store.get(|s| s.liquid_glass);
         let tint = store.get(|s| s.tint.clamp(0.0, 1.0));
         // The menu offers ±2s; the file is documented as hand-editable, so a
@@ -570,10 +568,12 @@ impl Core {
             return; // a newer song won the race
         }
 
-        let like = like
-            .ok()
-            .flatten()
-            .and_then(|value| value.get("state").and_then(Value::as_str).map(str::to_string));
+        let like = like.ok().flatten().and_then(|value| {
+            value
+                .get("state")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
         self.set_cover(cover);
         self.update(|state| state.like = like);
 
@@ -674,6 +674,14 @@ impl Core {
         });
     }
 
+    /// A cache-menu retry should not replace lyrics already on screen.
+    pub async fn retry_missing_lyrics(self: &Arc<Self>) {
+        let missing = self.lyrics_source.lock().expect("lyrics lock").state == "none";
+        if missing {
+            self.refresh_lyrics().await;
+        }
+    }
+
     pub fn set_lyrics_wanted(&self, label: &str, wanted: bool) {
         let mut open = self.lyrics_wanted_by.lock().expect("lyrics lock");
         if wanted {
@@ -715,10 +723,12 @@ impl Core {
             .and_then(|value| value.get("state").and_then(Value::as_bool));
         // Null is a real answer here — it means the player has not reported a
         // mode yet — so it stays `None` rather than being defaulted to NONE.
-        let repeat = repeat
-            .ok()
-            .flatten()
-            .and_then(|value| value.get("mode").and_then(Value::as_str).map(str::to_string));
+        let repeat = repeat.ok().flatten().and_then(|value| {
+            value
+                .get("mode")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
         let volume = volume.ok().flatten();
         let reported = volume
             .as_ref()
