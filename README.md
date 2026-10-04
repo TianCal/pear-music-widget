@@ -62,6 +62,8 @@ button can be hidden per skin, and the bar can hide when idle.
   track.
 - **Volume:** drag the speaker popover, scroll over the card, or press ↑/↓ while
   focused. Hold Shift for 1% keyboard steps.
+- **Playback shortcuts:** while focused, press Space to play/pause or ←/→ to
+  jump back/forward five seconds. Shortcuts leave search typing unaffected.
 
 Other features include play/pause, next, previous, shuffle, like/dislike,
 repeat-all/repeat-one, seeking, cover-derived tint, opacity, light/dark

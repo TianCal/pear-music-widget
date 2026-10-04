@@ -550,6 +550,13 @@ body.panel .resize-edges {
   filter: brightness(1.12);
 }
 
+body.tint-off .btn.play,
+body.tint-off .btn.play:hover {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+}
+
 /* --------------------------------------------------------------- volume */
 
 .volume {

@@ -900,6 +900,10 @@ const applyState = (next) => {
   // same object but arrive on their own events, and this push does not carry them.
   Object.assign(state, next);
 
+  if (firstState || tintChanged) {
+    document.body.classList.toggle('tint-off', state.tint === 0);
+  }
+
   if (firstState || liquidGlassChanged) {
     document.body.classList.toggle('liquid-glass', !!state.liquidGlass);
   }
@@ -1751,11 +1755,32 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-// Up/down adjust volume whenever the widget or the dropdown has focus.
+// Playback and volume shortcuts belong to the focused surface, outside editors.
 document.addEventListener('keydown', (event) => {
-  if (searching) return;
-  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  if (searching || event.defaultPrevented || event.isComposing) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   if (state.status !== 'connected') return;
+
+  if (event.key === ' ') {
+    event.preventDefault();
+    if (!event.repeat) el.play.click();
+    return;
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    const duration = state.song?.songDuration || 0;
+    if (!duration || seeking) return;
+    event.preventDefault();
+    const now = performance.now();
+    const position = clock.position + (clock.playing ? (now - clock.at) / 1000 : 0);
+    clock.position = clamp(position + (event.key === 'ArrowRight' ? 5 : -5), 0, duration);
+    clock.at = now;
+    ignorePositionUntil = now + 1200;
+    bumpProgress();
+    send('seek', { seconds: clock.position });
+    return;
+  }
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
 
   event.preventDefault();
   const step = event.shiftKey ? VOLUME_STEP_FINE : VOLUME_STEP;
