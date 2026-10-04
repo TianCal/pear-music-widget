@@ -37,9 +37,8 @@ for (const dark of [false, true]) {
     const green = await extract('green', 0);
     assert.equal(orange.accent, green.accent, 'controls must not change colour with the cover');
     assert.equal(orange.accentSoft, green.accentSoft);
-    const channels = orange.accent.match(/[a-f\d]{2}/gi);
-    assert.equal(channels[0], channels[1], 'disabled tint uses a neutral accent');
-    assert.equal(channels[1], channels[2]);
+    assert.equal(orange.accent, '#d7788b', 'disabled tint uses the fixed muted rose accent');
+    assert.equal(orange.accentSoft, 'rgba(215, 120, 139, 0.23)');
     for (const key of ['wash1', 'wash2', 'wash3', 'washBase']) {
       assert.match(orange[key], /, 0\)$/);
       assert.match(green[key], /, 0\)$/);

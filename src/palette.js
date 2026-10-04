@@ -292,11 +292,11 @@
   const build = (palette, strength) => {
     strength = clamp(strength, 0, 1);
     // Off disables artwork colour everywhere, including controls and queue
-    // selection. Keep a neutral accent visible against either glass appearance.
-    const { h, s, l } = strength === 0 ? { h: 0, s: 0, l: 55 } : palette.accent;
+    // selection. Use a fixed muted rose accent against either glass appearance.
+    const { h, s, l } = palette.accent;
     return {
-      accent: toHex(h, s, l),
-      accentSoft: toRgba(h, s, l, 0.34),
+      accent: strength === 0 ? '#d7788b' : toHex(h, s, l),
+      accentSoft: strength === 0 ? 'rgba(215, 120, 139, 0.23)' : toRgba(h, s, l, 0.34),
       ...washes(palette, prefersDark(), strength),
     };
   };
