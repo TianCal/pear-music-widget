@@ -28,8 +28,9 @@ A solid menu-bar icon means connected; a hollow one means YouTube Music or its
 API server is unavailable. Pressing play can launch YouTube Music. Double-click
 the floating card—or the cover in the dropdown—to bring YouTube Music forward.
 
-The floating widget's close button appears on hover and hides the widget. Use a
-tray double-click or **Show floating widget** to bring it back.
+The floating widget's close button shares the corner buttons' auto-hide setting
+and hides the widget. Use a tray double-click or **Show floating widget** to bring
+it back.
 
 ## Skins
 
@@ -46,7 +47,9 @@ layout without reflowing it.
 ## Controls
 
 The corner bar contains **Repeat**, **Queue**, **Lyrics**, and **Search**. Each
-button can be hidden per skin, and the bar can hide when idle.
+button can be hidden per skin, and the bar can hide when idle. Choose
+**Immediately** to show the buttons on hover and hide them as soon as the pointer
+leaves, or choose a delay.
 
 - **Queue:** opens the full playlist. Click any row, including a previously
   played track, to jump to it. Stack also shows a horizontal six-track strip.

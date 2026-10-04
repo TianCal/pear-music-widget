@@ -266,6 +266,7 @@ let cornerFadeArmedFor = null;
 
 /** Give hidden corner controls' gutter back to the titles, and remeasure it. */
 const setCornerIdle = (idle) => {
+  if (!IS_PANEL) el.closeWidget.classList.toggle('awake', !idle);
   if (el.cornerBar.classList.contains('idle') === idle) return;
   el.cornerBar.classList.toggle('idle', idle);
   refreshMarquees();
@@ -285,37 +286,16 @@ const armCornerFade = () => {
   cornerIdleTimer = setTimeout(() => setCornerIdle(true), after * 1000);
 };
 
-/* The close button rides the same wake, on its own countdown. Two differences
-   from the corner bar, both deliberate: it starts hidden rather than shown, and
-   its delay is fixed rather than taken from the Corner buttons submenu — the
-   whole reason it can exist at all is that a card nobody is pointing at carries
-   no dismissal furniture, and that has to hold with auto-hide switched off.
-   Long enough to travel to the corner and click, short enough that a card you
-   are only listening to goes clean again. */
-const CLOSE_IDLE_MS = 2200;
-let closeIdleTimer = null;
-
-const wakeClose = () => {
-  el.closeWidget.classList.add('awake');
-  clearTimeout(closeIdleTimer);
-  closeIdleTimer = setTimeout(() => el.closeWidget.classList.remove('awake'), CLOSE_IDLE_MS);
-};
-
 /** The pointer moved, so start the countdowns over. */
 const wakeChrome = () => {
   const now = performance.now();
-  // Asleep if *either* is, so the button coming back does not depend on the bar
-  // having faded — with auto-hide off the bar never does.
-  const asleep =
-    el.cornerBar.classList.contains('idle') ||
-    (!IS_PANEL && !el.closeWidget.classList.contains('awake'));
+  const asleep = el.cornerBar.classList.contains('idle');
   // A mousemove fires far faster than this needs to run, and re-arming a
   // timeout per event is pure churn while the pointer is travelling.
   if (!asleep && now - cornerWokeAt < 200) return;
   cornerWokeAt = now;
   setCornerIdle(false);
   armCornerFade();
-  if (!IS_PANEL) wakeClose();
 };
 
 /* Four signals, because a widget is meant to be used without focusing it first
@@ -899,10 +879,6 @@ const applyState = (next) => {
   // Merged rather than replaced: artwork, the queue and the lyrics live on this
   // same object but arrive on their own events, and this push does not carry them.
   Object.assign(state, next);
-
-  if (firstState || tintChanged) {
-    document.body.classList.toggle('tint-off', state.tint === 0);
-  }
 
   if (firstState || liquidGlassChanged) {
     document.body.classList.toggle('liquid-glass', !!state.liquidGlass);

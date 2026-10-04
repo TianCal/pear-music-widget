@@ -535,9 +535,9 @@ body.panel .resize-edges {
   width: 34px;
   height: 34px;
   margin: 0 3px;
-  background: var(--accent);
-  color: #fff;
-  box-shadow: 0 3px 12px var(--accent-soft);
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
 }
 
 .btn.play svg {
@@ -546,15 +546,8 @@ body.panel .resize-edges {
 }
 
 .btn.play:hover {
-  background: var(--accent);
-  filter: brightness(1.12);
-}
-
-body.tint-off .btn.play,
-body.tint-off .btn.play:hover {
   background: transparent;
-  color: var(--fg);
-  box-shadow: none;
+  filter: brightness(1.12);
 }
 
 /* --------------------------------------------------------------- volume */
@@ -978,9 +971,7 @@ body.skin-stack .lyric {
    slot the titles have to clear. Tucked to 5px, where the resize ring ends —
    any closer and the top-left of the hit area sits under `.resize-edges` and
    drags the window instead of closing it.
-   Unlike the corner bar this is hidden by *default* rather than after a delay,
-   and stays hidden whatever the auto-hide is set to — the point of it is to be
-   absent from the resting card and one wake away when wanted.
+   Visibility shares the corner bar's auto-hide setting and wake timing.
    **No opacity transition**, for the reason spelled out at `.corner-bar.idle`:
    this document is permanently `hidden` to WebKit and its transitions never
    advance, so a faded-in button would simply never arrive.
@@ -1021,7 +1012,8 @@ body.skin-stack .lyric {
   pointer-events: none;
 }
 
-.close-widget.awake {
+.close-widget.awake,
+.card:hover .close-widget {
   opacity: 1;
   pointer-events: auto;
 }

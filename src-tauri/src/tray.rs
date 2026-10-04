@@ -71,14 +71,15 @@ const TINTS: [(u32, &str); 5] = [
 
 const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
 
-/// Stillness before the corner buttons fade, in seconds. "Never" first, because
-/// it is the default and the rest are opt-ins.
-const CORNER_AUTOHIDE: [(u32, &str); 5] = [
-    (0, "Never"),
-    (2, "After 2s"),
-    (3, "After 3s"),
-    (5, "After 5s"),
-    (10, "After 10s"),
+/// Stillness before the corner buttons fade, in seconds. Zero remains "Never";
+/// a one-millisecond delay hides immediately while preserving click-to-wake.
+const CORNER_AUTOHIDE: [(f64, &str); 6] = [
+    (0.0, "Never"),
+    (0.001, "Immediately"),
+    (2.0, "After 2s"),
+    (3.0, "After 3s"),
+    (5.0, "After 5s"),
+    (10.0, "After 10s"),
 ];
 
 /// Nudges for the lyric roll, in milliseconds, listed the way they read on a
@@ -544,7 +545,7 @@ fn corner_submenu(
 
     // Pick-one, unlike the three above — hence a separator between them, so the
     // two kinds of checkmark do not read as one list.
-    let selected = autohide.round() as u32;
+    let selected = autohide;
     let fade: Vec<CheckMenuItem<tauri::Wry>> = CORNER_AUTOHIDE
         .iter()
         .map(|(secs, text)| {
