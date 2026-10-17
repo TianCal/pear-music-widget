@@ -659,6 +659,12 @@ static KUGECI_PLAIN_MV: LazyLock<Regex> = LazyLock::new(|| {
 static KUGECI_LYRIC_VIDEO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*(.+?)\s+-\s+([^『「【]+?)(?:[『「]([^』」]*)[』」])?[【\[](?:動態歌詞|动态歌词|動態歌詞字幕|动态歌词字幕)(?:\s*/?\s*lyrics)?[】\]]\s*$").unwrap()
 });
+// Some uploaders supply explicit performer credits without a video marker.
+// Keep this form unadorned: annotated videos must use the stricter parsers.
+static KUGECI_PLAIN_CREDIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*([^\[\]【】『』「」()（）]+?)\s+-\s+([^\[\]【】『』「」()（）]+?)\s*$")
+        .unwrap()
+});
 static KUGECI_CCTV_CREDIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^歌曲Top\d+《([^》]+)》\s*(.+?)\s*【\d{4}年央视春晚】(?:｜订阅CCTV春晚)?\s*$")
         .unwrap()
@@ -693,6 +699,9 @@ fn kugeci_video_credit(title: &str) -> Option<(String, String)> {
         {
             return None;
         }
+        return Some((parts[2].trim().into(), parts[1].trim().into()));
+    }
+    if let Some(parts) = KUGECI_PLAIN_CREDIT.captures(title) {
         return Some((parts[2].trim().into(), parts[1].trim().into()));
     }
     if let Some(parts) = KUGECI_CCTV_CREDIT.captures(title) {
@@ -1042,6 +1051,56 @@ mod tests {
         ] {
             assert!(kugeci_video_credit(title).is_none());
         }
+    }
+
+    #[test]
+    fn kugeci_extracts_current_san_xin_credit() {
+        assert_eq!(
+            kugeci_video_credit("KEY.L刘聪 ft. 李佳隆 - 散心"),
+            Some(("散心".into(), "KEY.L刘聪 ft. 李佳隆".into()))
+        );
+    }
+
+    #[test]
+    fn kugeci_san_xin_verifies_search_and_page_credits() {
+        let (title, artist) = kugeci_video_credit("KEY.L刘聪 ft. 李佳隆 - 散心").unwrap();
+        let search = r#"<table id="tablesort"><tbody><tr><td>date</td>
+            <td><a href="/song/Cc6WfjTb">散心</a></td>
+            <td><a>KEY.L刘聪</a><a>李佳隆</a></td></tr></tbody></table>"#;
+        let page = r#"<main><h1>散心</h1><div class="song-details-container">
+            <a href="/singer/a">演唱： KEY.L刘聪</a>
+            <a href="/singer/b">演唱： 李佳隆</a></div>
+            <div id="lyricsContainer">[00:04.851]fixture<br />[00:06.718]line</div></main>"#;
+        assert_eq!(
+            kugeci_candidates(search, &title, &artist),
+            vec!["/song/Cc6WfjTb"]
+        );
+        assert!(shape_kugeci(page, &title, &artist, 265.0).is_some());
+        assert!(shape_kugeci(page, &title, "FirePanda", 265.0).is_none());
+        assert!(shape_kugeci(page, &title, "KEY.L刘聪 ft. Someone", 265.0).is_none());
+        for annotated in [
+            "KEY.L刘聪 ft. 李佳隆 - 散心 (Live)",
+            "A - Song【reaction Lyrics】",
+        ] {
+            assert!(kugeci_video_credit(annotated).is_none());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live Kugeci availability check; run explicitly"]
+    async fn kugeci_live_san_xin_uploader() {
+        let song = Song {
+            title: "KEY.L刘聪 ft. 李佳隆 - 散心".into(),
+            artist: "FirePanda".into(),
+            song_duration: 265.0,
+            ..Song::default()
+        };
+        let words = fetch_kugeci_for_song(&reqwest::Client::new(), &song)
+            .await
+            .expect("uploader title resolves to synced Kugeci lyrics");
+        assert!(words.synced);
+        assert_eq!(words.how, "kugeci");
+        assert!(words.lines.len() > 20);
     }
 
     #[test]

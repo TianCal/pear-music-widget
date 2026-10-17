@@ -48,3 +48,9 @@ supply explicit credits when the artist field is an uploader. Artist and title
 verification still applies to both the search result and fetched page. 迴 and 回
 normalize for matching/search. Collaboration segmentation uses the provider's
 whole names, keeping conjunction characters inside names intact.
+
+The [散心 page](https://www.kugeci.com/song/Cc6WfjTb) lists KEY.L刘聪 and
+李佳隆. The player reports `KEY.L刘聪 ft. 李佳隆 - 散心` with uploader
+`FirePanda` as the artist. Unadorned `performers - title` credits now supply
+both lookup fields; annotated titles still require the stricter video formats.
+The search row and song page must both verify every credited performer.
