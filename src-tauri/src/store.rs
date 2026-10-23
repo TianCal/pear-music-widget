@@ -268,6 +268,15 @@ pub struct SavedFolder {
     pub track: Option<String>,
     #[serde(default)]
     pub position: f64,
+    /// Playing only the folder's liked tracks (Source → Liked Songs).
+    #[serde(rename = "likedOnly", default)]
+    pub liked_only: bool,
+    /// `ALL` or `ONE`. YouTube Music keeps its own modes; a folder keeps
+    /// these, so repeat-one survives a switch or a relaunch.
+    #[serde(default)]
+    pub repeat: Option<String>,
+    #[serde(default)]
+    pub shuffle: bool,
 }
 
 /// Most folders the Source menu keeps.

@@ -816,6 +816,20 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         return hit;
     }
 
+    let result = if song.video_id.starts_with(crate::local::ID_PREFIX) {
+        lookup_local(http, song).await
+    } else {
+        lookup_streamed(http, song).await
+    };
+
+    remember(&song.video_id, &result);
+    lyrics_cache::store(&song.video_id, &result);
+
+    result
+}
+
+/// A YouTube Music track: its own lyrics first, then LRCLib, then Kugeci.
+async fn lookup_streamed(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
     let title = song.title.clone();
     let artist = lead_artist(&song.artist);
     let duration = song.song_duration.round();
@@ -823,11 +837,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     // 1. YouTube Music's own lyrics, for the track the player is actually
     //    playing. Being keyed by the video id, this is the only tier that
     //    cannot come back with a different song's words, so it goes first.
-    let mut result = if song.video_id.starts_with(crate::local::ID_PREFIX) {
-        None
-    } else {
-        fetch_ytmusic(http, &song.video_id).await
-    };
+    let mut result = fetch_ytmusic(http, &song.video_id).await;
 
     // Unless they are unsynced. YouTube serves a plain block for a good part of
     // the catalogue, and LRCLib often has the same song *with* timings — a roll
@@ -882,12 +892,218 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     }
 
     // Nothing timed anywhere, so keep whichever plain block we found.
-    let result = result.or(unsynced);
+    result.or(unsynced)
+}
 
-    remember(&song.video_id, &result);
-    lyrics_cache::store(&song.video_id, &result);
+/// A local file. Its tags carry the real album and its exact duration — often
+/// better than what YouTube reports — but there is no video id, so the order
+/// leans on what that metadata can verify:
+///
+/// 1. LRCLib exact match with the full tags and duration (LRCLib checks it).
+/// 2. Kugeci, for Chinese titles or artists only — the catalogue it covers,
+///    and verified against title and artist. Asking it about anything else
+///    only delays a miss.
+/// 3. LRCLib exact on a cleaned title.
+/// 4. LRCLib search, rejecting hits more than `LOCAL_DURATION_SLACK` off the
+///    file — live-versus-studio timing is exactly what fuzzy search gets wrong.
+/// 5. YouTube Music: search its catalogue for the song, check artist, title
+///    and duration, and take that video's timed lyrics. Direct to YouTube, like
+///    tier 1 of the streamed order, so YouTube Music need not be running.
+///
+/// Each tier keeps looking past unsynced words; the first plain block found is
+/// the fallback if nothing timed turns up.
+async fn lookup_local(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
+    let title = song.title.clone();
+    let artist = lead_artist(&song.artist);
+    let duration = song.song_duration.round();
+    let chinese = has_cjk(&title) || has_cjk(&song.artist);
+    let mut plain: Option<Lyrics> = None;
 
-    result
+    // 1.
+    if !title.is_empty() && !artist.is_empty() {
+        let mut params = vec![("track_name", title.clone()), ("artist_name", artist.clone())];
+        if !song.album.is_empty() {
+            params.push(("album_name", song.album.clone()));
+        }
+        if duration > 0.0 {
+            params.push(("duration", format!("{duration:.0}")));
+        }
+        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
+        if let Some(found) = settle(shape(payload.as_ref(), "exact"), &mut plain) {
+            return Some(found);
+        }
+    }
+
+    // 2.
+    if chinese {
+        if let Some(found) = settle(fetch_kugeci_for_song(http, song).await, &mut plain) {
+            return Some(found);
+        }
+    }
+
+    // 3.
+    let simple = clean_title(&title);
+    if !simple.is_empty() && simple != title && !artist.is_empty() {
+        let params = [("track_name", simple.clone()), ("artist_name", artist.clone())];
+        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
+        if let Some(found) = settle(shape(payload.as_ref(), "cleaned"), &mut plain) {
+            return Some(found);
+        }
+    }
+
+    // 4.
+    if !simple.is_empty() {
+        let q = format!("{simple} {artist}").trim().to_string();
+        let payload = request(http, &format!("/search?{}", query_string(&[("q", q)]))).await;
+        let hit = payload
+            .as_ref()
+            .and_then(|hits| best_search_hit(hits, duration))
+            .filter(|hit| within_duration(hit, duration));
+        if let Some(found) = settle(hit.and_then(|hit| shape(Some(hit), "search")), &mut plain) {
+            return Some(found);
+        }
+    }
+
+    // 5.
+    if let Some(video_id) = find_ytmusic_video(http, &title, &song.artist, duration).await {
+        if let Some(found) = settle(fetch_ytmusic(http, &video_id).await, &mut plain) {
+            return Some(found);
+        }
+    }
+
+    plain
+}
+
+/// How far a local file's duration may be from a search hit's.
+const LOCAL_DURATION_SLACK: f64 = 3.0;
+
+/// Synced words end the search; plain ones are kept as the fallback (the
+/// first found wins) and the search goes on.
+fn settle(found: Option<Lyrics>, plain: &mut Option<Lyrics>) -> Option<Lyrics> {
+    match found {
+        Some(words) if words.synced => Some(words),
+        Some(words) => {
+            plain.get_or_insert(words);
+            None
+        }
+        None => None,
+    }
+}
+
+/// An LRCLib hit within `LOCAL_DURATION_SLACK` of the file, or any hit when
+/// either duration is unknown.
+fn within_duration(hit: &Value, duration: f64) -> bool {
+    match hit.get("duration").and_then(Value::as_f64) {
+        Some(theirs) if duration > 0.0 && theirs > 0.0 => (theirs - duration).abs() <= LOCAL_DURATION_SLACK,
+        _ => true,
+    }
+}
+
+/// Han characters: the catalogue Kugeci covers.
+fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F)
+    })
+}
+
+/// `3:45` or `1:02:03` at the end of a YouTube Music result's subtitle
+/// (`Artist • Album • 3:45`), in seconds.
+fn subtitle_duration(subtitle: &str) -> Option<f64> {
+    let last = subtitle.rsplit('•').next()?.trim();
+    let mut seconds = 0.0;
+    let mut parts = 0;
+    for part in last.split(':') {
+        let value: u32 = part.parse().ok()?;
+        seconds = seconds * 60.0 + f64::from(value);
+        parts += 1;
+    }
+    (parts >= 2).then_some(seconds)
+}
+
+/// YouTube Music's search filter for songs (not videos, albums or artists).
+const YTM_SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA==";
+
+/// Find the YouTube Music song a local file is a copy of: same artist, same
+/// title (script and notes folded), duration within the slack. `None` rather
+/// than a near miss — the words that come back are timed to this recording.
+async fn find_ytmusic_video(
+    http: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: f64,
+) -> Option<String> {
+    let mut body = ytm_body("query", &format!("{title} {}", lead_artist(artist)), YTM_WEB_CLIENT);
+    body["params"] = Value::String(YTM_SONGS_FILTER.into());
+    let payload = ytm_post(http, "search", body).await?;
+    crate::search::parse_search_results(&payload)
+        .into_iter()
+        .filter(|hit| crate::artwork::artist_matches(artist, &hit.subtitle))
+        .filter(|hit| match subtitle_duration(&hit.subtitle) {
+            Some(theirs) if duration > 0.0 => (theirs - duration).abs() <= LOCAL_DURATION_SLACK,
+            _ => duration <= 0.0,
+        })
+        .map(|hit| (crate::artwork::name_score(title, &hit.title), hit))
+        .filter(|(score, _)| *score >= 2)
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, hit)| hit.video_id)
+}
+
+#[cfg(test)]
+mod local_order_tests {
+    use super::*;
+
+    fn words(synced: bool, how: &'static str) -> Lyrics {
+        Lyrics {
+            synced,
+            lines: Vec::new(),
+            how,
+        }
+    }
+
+    #[test]
+    fn settle_stops_on_synced_and_keeps_the_first_plain() {
+        let mut plain = None;
+        assert!(settle(Some(words(false, "exact")), &mut plain).is_none());
+        assert!(settle(Some(words(false, "search")), &mut plain).is_none());
+        assert_eq!(plain.as_ref().map(|w| w.how), Some("exact"));
+        assert_eq!(settle(Some(words(true, "kugeci")), &mut plain).map(|w| w.how), Some("kugeci"));
+    }
+
+    #[test]
+    fn kugeci_is_for_han_text_only() {
+        assert!(has_cjk("不懂"));
+        assert!(has_cjk("凍結"));
+        assert!(!has_cjk("Always Online"));
+        assert!(!has_cjk("Jay"));
+    }
+
+    #[test]
+    fn subtitle_durations_parse() {
+        assert_eq!(subtitle_duration("林俊傑 • 樂行者 • 4:32"), Some(272.0));
+        assert_eq!(subtitle_duration("A • B • 1:02:03"), Some(3723.0));
+        assert_eq!(subtitle_duration("林俊傑 • 樂行者"), None);
+    }
+
+    #[test]
+    fn search_hits_far_from_the_file_are_rejected() {
+        let near = serde_json::json!({ "duration": 271.0 });
+        let far = serde_json::json!({ "duration": 300.0 });
+        let unknown = serde_json::json!({});
+        assert!(within_duration(&near, 272.0));
+        assert!(!within_duration(&far, 272.0));
+        assert!(within_duration(&unknown, 272.0));
+        assert!(within_duration(&far, 0.0));
+    }
+
+    /// `cargo test local_lyrics_live -- --ignored --nocapture` — hits the network.
+    #[tokio::test]
+    #[ignore]
+    async fn local_lyrics_live() {
+        let http = reqwest::Client::new();
+        let id = find_ytmusic_video(&http, "不懂", "林俊杰", 272.0).await;
+        println!("ytmusic id for 不懂: {id:?}");
+        assert!(id.is_some());
+    }
 }
 
 /// Forget one remembered miss, in memory and on disk — after the credit it
@@ -1428,5 +1644,44 @@ mod tests {
         assert_eq!(lead_artist("A、B"), "A");
         assert_eq!(lead_artist("A & B"), "A");
         assert_eq!(lead_artist("Solo"), "Solo");
+    }
+}
+
+/// `PMW_SCAN=/path cargo test local_order_sample -- --ignored --nocapture`
+#[cfg(test)]
+mod local_order_sample {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn local_order_sample() {
+        let root = std::env::var("PMW_SCAN").expect("PMW_SCAN");
+        let names = std::collections::BTreeMap::from([
+            ("Jaychou".to_string(), "周杰伦".to_string()),
+            ("JJ".to_string(), "林俊杰".to_string()),
+        ]);
+        let tracks = crate::local::scan(std::path::Path::new(&root));
+        let http = reqwest::Client::new();
+        let step = (tracks.len() / 12).max(1);
+        for track in tracks.iter().step_by(step).take(12) {
+            let song = Song {
+                video_id: track.id.clone(),
+                title: track.title.clone(),
+                artist: crate::store::map_artist(&names, &track.artist),
+                raw_artist: track.artist.clone(),
+                album: track.album.clone(),
+                song_duration: track.duration,
+                image_src: None,
+                url: None,
+                media_type: Some("LOCAL".into()),
+            };
+            let found = lookup_local(&http, &song).await;
+            println!(
+                "{} — {} | {}",
+                song.title,
+                song.artist,
+                found.map_or("none".to_string(), |w| format!("{} synced={}", w.how, w.synced))
+            );
+        }
     }
 }

@@ -593,17 +593,34 @@ fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
         (None, false) => "Local Music (not connected)".to_string(),
     };
 
+    // Liked Songs: a scope of Local Music, counted while a folder plays.
+    let scope = local_player.scope();
+    let liked_only = scope.is_some_and(|(liked, _)| liked);
+    let (liked_label, liked_enabled) = match scope {
+        Some((_, 0)) => ("Liked Songs (none yet)".to_string(), false),
+        Some((_, count)) => (format!("Liked Songs ({count})"), true),
+        None => ("Liked Songs".to_string(), target.is_some()),
+    };
+
     let youtube = CheckMenuItem::with_id(app, "source:youtube", "YouTube Music", true, !local, None::<&str>)?;
     let local_music = CheckMenuItem::with_id(
         app,
         "source:local",
         local_label,
         target.is_some() || local,
-        local,
+        local && !liked_only,
+        None::<&str>,
+    )?;
+    let liked = CheckMenuItem::with_id(
+        app,
+        "source:liked",
+        format!("    ♥ {liked_label}"),
+        liked_enabled,
+        local && liked_only,
         None::<&str>,
     )?;
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> =
-        vec![Box::new(youtube), Box::new(local_music)];
+        vec![Box::new(youtube), Box::new(local_music), Box::new(liked)];
     let mut removable = Vec::new();
     if !paths.is_empty() {
         items.push(Box::new(PredefinedMenuItem::separator(app)?));
@@ -740,9 +757,15 @@ fn choose_folder() -> Option<std::path::PathBuf> {
 }
 
 fn open_folder(app: &AppHandle, folder: std::path::PathBuf) {
+    open_scoped(app, folder, None);
+}
+
+/// Open a folder, as the whole folder (`Some(false)`), as Liked Songs
+/// (`Some(true)`), or however it was last left (`None`).
+fn open_scoped(app: &AppHandle, folder: std::path::PathBuf, liked_only: Option<bool>) {
     let core = app.state::<Arc<Core>>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = crate::local::Local::open(&core, folder).await {
+        if let Err(err) = crate::local::Local::open_scoped(&core, folder, liked_only).await {
             crate::macos::inform(&core.app, "Could not open that folder".into(), err);
         }
     });
@@ -1090,9 +1113,34 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     .find(|path| local.folder_present(path))
             });
             match target {
-                Some(path) if !core.is_local() => open_folder(app, std::path::PathBuf::from(path)),
-                // Already local, or nothing to play: undo AppKit's toggle.
+                Some(path) if !core.is_local() => {
+                    open_scoped(app, std::path::PathBuf::from(path), Some(false))
+                }
+                // Already local: leave Liked Songs for the whole folder.
+                _ if core.is_local() => {
+                    tauri::async_runtime::spawn_blocking(move || local.set_scope(&core, false));
+                }
+                // Nothing to play: undo AppKit's toggle.
                 _ => refresh(app),
+            }
+        }
+        "source:liked" => {
+            let core = app.state::<Arc<Core>>().inner().clone();
+            let local = core.local();
+            if core.is_local() {
+                tauri::async_runtime::spawn_blocking(move || local.set_scope(&core, true));
+            } else {
+                let target = store.get(|s| {
+                    s.local_folder
+                        .iter()
+                        .cloned()
+                        .chain(s.saved_folders().into_iter().map(|f| f.path))
+                        .find(|path| local.folder_present(path))
+                });
+                match target {
+                    Some(path) => open_scoped(app, std::path::PathBuf::from(path), Some(true)),
+                    None => refresh(app),
+                }
             }
         }
         "source:choose" => {

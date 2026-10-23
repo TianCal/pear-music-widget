@@ -163,10 +163,14 @@ fn relative(root: &Path, track: &Track) -> Option<String> {
 /// Write `bytes` to `path` via a synced temporary file and a rename, so a
 /// crash or a drive pulled mid-write never leaves an empty or half file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // A temp name per write, so two writes can never mix into one file — a
+    // mixed file reads as broken, and a broken drive file is never replaced.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let temp = path.with_extension("tmp");
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -276,6 +280,14 @@ impl Likes {
 
     pub fn is_disliked(&self, id: &str) -> bool {
         self.get(id) == Some(Rating::Dislike)
+    }
+
+    pub fn is_liked(&self, id: &str) -> bool {
+        self.get(id) == Some(Rating::Like)
+    }
+
+    pub fn liked_count(&self) -> usize {
+        self.by_id.values().filter(|r| **r == Rating::Like).count()
     }
 
     /// Set or clear (`None`) a rating in memory. Returns the write to perform

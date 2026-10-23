@@ -106,9 +106,16 @@ struct Session {
     /// sink while this is set means the track just ended.
     playing: bool,
     shuffle: bool,
+    /// Source → Liked Songs: `order` holds only liked tracks (plus the one
+    /// playing, kept until it ends so switching never cuts a song off).
+    liked_only: bool,
     repeat: String,
     volume: f64,
     muted: bool,
+    /// Whether the current track actually opened. `remember` saves only a
+    /// track that did, so a file that will not play never becomes the place
+    /// to resume.
+    started: bool,
     /// Whole second last pushed on `state`. The renderer interpolates between
     /// pushes, so the 250 ms tick only emits when this changes — the same once
     /// a second YouTube Music's POSITION_CHANGED gives.
@@ -118,6 +125,39 @@ struct Session {
 impl Session {
     fn current(&self) -> Option<&Track> {
         self.order.get(self.cursor).map(|&i| &self.tracks[i])
+    }
+
+    /// Whether advancing may land on `tracks[i]`: never a dislike, and under
+    /// Liked Songs only a like.
+    fn reachable(&self, i: usize) -> bool {
+        let id = &self.tracks[i].id;
+        !self.likes.is_disliked(id) && (!self.liked_only || self.likes.is_liked(id))
+    }
+
+    /// Rebuild `order` for the current scope, keeping the playing track where
+    /// it is in the sequence. Folder order, or under shuffle the existing
+    /// shuffled order with newly in-scope tracks shuffled onto the end.
+    fn rescope(&mut self) {
+        let current = self.order.get(self.cursor).copied();
+        let in_scope = |s: &Self, i: usize| {
+            Some(i) == current || !s.liked_only || s.likes.is_liked(&s.tracks[i].id)
+        };
+        let order: Vec<usize> = if self.shuffle {
+            let mut kept: Vec<usize> = self.order.iter().copied().filter(|&i| in_scope(self, i)).collect();
+            let held: HashSet<usize> = kept.iter().copied().collect();
+            let mut added: Vec<usize> = (0..self.tracks.len())
+                .filter(|i| !held.contains(i) && in_scope(self, *i))
+                .collect();
+            shuffle(&mut added);
+            kept.extend(added);
+            kept
+        } else {
+            (0..self.tracks.len()).filter(|&i| in_scope(self, i)).collect()
+        };
+        self.cursor = current
+            .and_then(|c| order.iter().position(|&i| i == c))
+            .unwrap_or(0);
+        self.order = order;
     }
 
     fn relative(&self, track: &Track) -> Option<String> {
@@ -312,6 +352,16 @@ impl Local {
     /// Scan `folder` and make it the source — from YouTube Music or from
     /// another folder — paused where it was last left. Nothing starts playing.
     pub async fn open(core: &Arc<Core>, folder: PathBuf) -> Result<usize, String> {
+        Self::open_scoped(core, folder, None).await
+    }
+
+    /// `open`, choosing Liked Songs (`Some(true)`) or the whole folder
+    /// (`Some(false)`) rather than whichever the folder was left in.
+    pub async fn open_scoped(
+        core: &Arc<Core>,
+        folder: PathBuf,
+        liked_only: Option<bool>,
+    ) -> Result<usize, String> {
         let scan_root = folder.clone();
         let (tracks, likes) = tauri::async_runtime::spawn_blocking(move || {
             let tracks = scan(&scan_root);
@@ -334,7 +384,7 @@ impl Local {
 
         let (handle, swapper) = (Arc::clone(core), Arc::clone(&local));
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            swapper.swap_in(&handle, folder, tracks, likes)
+            swapper.swap_in(&handle, folder, tracks, likes, liked_only)
         })
         .await;
         crate::tray::refresh(&core.app);
@@ -343,7 +393,14 @@ impl Local {
 
     /// Replace whatever is playing with `folder`, under `loading` so neither
     /// the ticker nor a command can land between the old session and the new.
-    fn swap_in(&self, core: &Arc<Core>, folder: PathBuf, tracks: Vec<Track>, likes: Likes) {
+    fn swap_in(
+        &self,
+        core: &Arc<Core>,
+        folder: PathBuf,
+        tracks: Vec<Track>,
+        likes: Likes,
+        liked_only: Option<bool>,
+    ) {
         let _loading = self.loading.lock().expect("loading lock");
         if self.is_active() {
             self.remember(core);
@@ -361,10 +418,38 @@ impl Local {
                 .position(|t| t.path.strip_prefix(&folder).is_ok_and(|rel| rel == Path::new(track)))?;
             Some((at, saved.position))
         });
-        let (cursor, position) = resumed.unwrap_or((0, 0.0));
+        let (mut cursor, mut position) = resumed.unwrap_or((0, 0.0));
+
+        // Liked Songs only if there is something liked to play.
+        if liked_only == Some(true) && likes.liked_count() == 0 {
+            crate::macos::inform(
+                &core.app,
+                "No liked songs in this folder yet".into(),
+                "Playing the whole folder. Like a song with the heart to add it to Liked Songs.".into(),
+            );
+        }
+        let liked_only = liked_only
+            .unwrap_or_else(|| resume.as_ref().is_some_and(|saved| saved.liked_only))
+            && likes.liked_count() > 0;
+        if liked_only && !likes.is_liked(&tracks[cursor].id) {
+            // The resume point is not a liked track: start at the first liked
+            // one after it, from its beginning.
+            let n = tracks.len();
+            if let Some(at) = (1..=n).map(|k| (cursor + k) % n).find(|&i| likes.is_liked(&tracks[i].id)) {
+                cursor = at;
+                position = 0.0;
+            }
+        }
+
+        let repeat = resume
+            .as_ref()
+            .and_then(|saved| saved.repeat.clone())
+            .filter(|mode| mode == "ONE")
+            .unwrap_or_else(|| "ALL".into());
+        let shuffled = resume.as_ref().is_some_and(|saved| saved.shuffle);
 
         let volume = core.snapshot().volume;
-        *self.session.lock().expect("local lock") = Some(Session {
+        let mut session = Session {
             root: folder,
             order: (0..tracks.len()).collect(),
             tracks,
@@ -372,11 +457,25 @@ impl Local {
             cursor,
             playing: false,
             shuffle: false,
-            repeat: "ALL".into(),
+            liked_only,
+            repeat: repeat.clone(),
             volume,
             muted: false,
+            started: false,
             shown_second: 0,
-        });
+        };
+        session.rescope();
+        if shuffled {
+            // The resume track first, the rest of the scope shuffled after it.
+            let current = session.order[session.cursor];
+            let mut rest: Vec<usize> = session.order.iter().copied().filter(|&i| i != current).collect();
+            shuffle(&mut rest);
+            session.order = std::iter::once(current).chain(rest).collect();
+            session.cursor = 0;
+            session.shuffle = true;
+        }
+        let cursor = session.cursor;
+        *self.session.lock().expect("local lock") = Some(session);
 
         core.store.update(|s| {
             s.source = Some("local".into());
@@ -388,8 +487,8 @@ impl Local {
             self.active.store(true, Ordering::SeqCst);
             state.status = "connected".into();
             state.status_message = String::new();
-            state.shuffle = false;
-            state.repeat = Some("ALL".into());
+            state.shuffle = shuffled;
+            state.repeat = Some(repeat.clone());
             state.muted = false;
             state.is_playing = false;
         });
@@ -402,25 +501,33 @@ impl Local {
         if !self.is_active() {
             return;
         }
-        let Some((root, track, present)) = self
+        let Some((root_path, track, liked_only, repeat, shuffled)) = self
             .with(|s| {
+                if !s.started {
+                    return None;
+                }
                 let track = s.current()?;
-                Some((s.root.to_string_lossy().into_owned(), s.relative(track)?, s.root.is_dir()))
+                Some((s.root.clone(), s.relative(track)?, s.liked_only, s.repeat.clone(), s.shuffle))
             })
             .flatten()
         else {
             return;
         };
         // An unplugged drive: whatever is "current" now is not a place anyone
-        // was listening to.
-        if !present {
+        // was listening to. Checked outside the session lock — the menus take
+        // it on the main thread, and a stalled mount can make this slow.
+        if !root_path.is_dir() {
             return;
         }
+        let root = root_path.to_string_lossy().into_owned();
         let position = self.position();
         core.store.update(|s| {
             if let Some(saved) = s.local_folders.iter_mut().find(|f| f.path == root) {
                 saved.track = Some(track.clone());
                 saved.position = position;
+                saved.liked_only = liked_only;
+                saved.repeat = Some(repeat.clone());
+                saved.shuffle = shuffled;
             }
         });
     }
@@ -516,7 +623,10 @@ impl Local {
             self.stop();
             return None;
         }
-        self.with(|s| s.playing = play && started);
+        self.with(|s| {
+            s.playing = play && started;
+            s.started = started;
+        });
         Some((track, started))
     }
 
@@ -524,6 +634,13 @@ impl Local {
     /// `started` is false for a track that would not open: it is shown, but
     /// not saved as the place to resume — that would overwrite the real one.
     fn publish(&self, core: &Arc<Core>, track: Track, playing: bool, started: bool) {
+        // A track kept in Liked Songs only because it was playing when the
+        // scope changed (or was unliked) is dropped once another one is up.
+        self.with(|s| {
+            if s.liked_only {
+                s.rescope();
+            }
+        });
         // Only what is already sized in memory: no image decode on the path
         // that starts the audio.
         let cover = self.cover_now(core, &track, crate::api::COVER_PX);
@@ -566,6 +683,9 @@ impl Local {
         if let Some(save) = save {
             save.write();
         }
+        // Only the playing track is rated, and it is always in `order`, so the
+        // scope needs no rebuild here; an unliked one leaves Liked Songs when
+        // `publish` rescopes after it ends.
         let like = now.map_or("INDIFFERENT", Rating::as_str);
         core.update(|state| {
             if state.song.as_ref().is_some_and(|song| song.video_id == current.id) {
@@ -591,12 +711,12 @@ impl Local {
         let mut last = None;
         for k in 1..=len {
             let next = (cursor as isize + step * k).rem_euclid(len) as usize;
-            // Disliked tracks are never reached by advancing; picking one from
-            // the queue still plays it.
-            let disliked = self
-                .with(|s| s.order.get(next).is_some_and(|&i| s.likes.is_disliked(&s.tracks[i].id)))
+            // Disliked tracks are never reached by advancing, nor unliked ones
+            // under Liked Songs; picking one from the queue still plays it.
+            let reachable = self
+                .with(|s| s.order.get(next).is_some_and(|&i| s.reachable(i)))
                 .unwrap_or(false);
-            if disliked {
+            if !reachable {
                 continue;
             }
             let Some((track, started)) = self.try_start(next, play, 0.0) else {
@@ -806,6 +926,41 @@ impl Local {
         }
     }
 
+    // ----------------------------------------------------------------- scope
+
+    /// For the Source menu: `(liked_only, liked count)` while a folder plays.
+    pub fn scope(&self) -> Option<(bool, usize)> {
+        if !self.is_active() {
+            return None;
+        }
+        self.with(|s| (s.liked_only, s.likes.liked_count()))
+    }
+
+    /// Source → Liked Songs or Local Music while a folder is already playing.
+    /// Nothing is cut off: a playing track outside the new scope stays pinned
+    /// and finishes, and the next track in scope follows.
+    /// Blocking: call off the main thread.
+    pub fn set_scope(&self, core: &Arc<Core>, liked_only: bool) {
+        let _loading = self.loading.lock().expect("loading lock");
+        let changed = self
+            .with(|s| {
+                if liked_only && s.likes.liked_count() == 0 {
+                    return false;
+                }
+                s.liked_only = liked_only;
+                s.rescope();
+                true
+            })
+            .unwrap_or(false);
+        if changed {
+            core.publish_local_queue();
+            self.remember(core);
+        }
+        // Always: AppKit toggled the checkmark when it was clicked, even when
+        // the switch was refused.
+        crate::tray::refresh(&core.app);
+    }
+
     // ----------------------------------------------------------------- trash
 
     /// The playing track, for the delete confirmation.
@@ -816,6 +971,9 @@ impl Local {
     /// Move `id` to the Trash and carry on with the track after it. Checked by
     /// id so a dialog answered after the track changed cannot trash the next.
     pub fn trash(&self, core: &Arc<Core>, id: &str) -> Result<(), String> {
+        // Under `loading` throughout: the rating write must not interleave
+        // with one from `rate`, nor the index rewrite below with a load.
+        let _loading = self.loading.lock().expect("loading lock");
         let Some(track) = self.track(id) else {
             return Err("That track is no longer in the folder".into());
         };
@@ -853,19 +1011,24 @@ impl Local {
             if s.cursor >= s.order.len() {
                 s.cursor = 0;
             }
-            Some((was_current, s.cursor, s.playing, s.order.is_empty()))
+            // Liked Songs emptied by this delete: the folder is still there,
+            // so fall back to all of it rather than leaving it.
+            if s.order.is_empty() && !s.tracks.is_empty() {
+                s.liked_only = false;
+                s.rescope();
+            }
+            Some((was_current, s.cursor, s.playing, s.tracks.is_empty()))
         });
 
         match next.flatten() {
-            Some((_, _, _, true)) => Local::close(core),
+            Some((_, _, _, true)) => self.close_locked(core),
             Some((true, cursor, playing, _)) => {
                 // The deleted file's slot now holds the track after it — unless
-                // that one is disliked, which advancing never lands on.
-                let _loading = self.loading.lock().expect("loading lock");
-                let disliked = self
-                    .with(|s| s.order.get(cursor).is_some_and(|&i| s.likes.is_disliked(&s.tracks[i].id)))
+                // that one is out of reach, which advancing never lands on.
+                let unreachable = self
+                    .with(|s| s.order.get(cursor).is_some_and(|&i| !s.reachable(i)))
                     .unwrap_or(false);
-                if disliked || (!self.load_locked(core, cursor, playing) && playing) {
+                if unreachable || (!self.load_locked(core, cursor, playing) && playing) {
                     self.advance_locked(core, cursor, 1, playing);
                 }
             }
@@ -970,22 +1133,30 @@ impl Local {
     /// keeping the playing track where it is.
     pub fn toggle_shuffle(&self, core: &Arc<Core>) {
         let shuffle = self.with(|s| {
+            let Some(&current) = s.order.get(s.cursor) else {
+                return s.shuffle;
+            };
             s.shuffle = !s.shuffle;
-            let current = s.order[s.cursor];
             if s.shuffle {
-                let mut rest: Vec<usize> = (0..s.tracks.len()).filter(|&i| i != current).collect();
+                // Within the scope: Liked Songs shuffles only liked tracks.
+                let mut rest: Vec<usize> = s
+                    .order
+                    .iter()
+                    .copied()
+                    .filter(|&i| i != current)
+                    .collect();
                 shuffle(&mut rest);
                 s.order = std::iter::once(current).chain(rest).collect();
                 s.cursor = 0;
             } else {
-                s.order = (0..s.tracks.len()).collect();
-                s.cursor = current;
+                s.rescope();
             }
             s.shuffle
         });
         if let Some(shuffle) = shuffle {
             core.update(|state| state.shuffle = shuffle);
             core.publish_local_queue();
+            self.remember(core);
         }
     }
 
@@ -997,17 +1168,28 @@ impl Local {
         });
         if let Some(mode) = mode {
             core.update(|state| state.repeat = Some(mode));
+            self.remember(core);
         }
     }
 
     /// Jump to a slot of the play order, verified by id like the remote path.
+    ///
+    /// Search covers the whole folder, so under Liked Songs a result can be
+    /// outside `order`. It is slotted in after the current track and played,
+    /// pinned like any out-of-scope track until the next one is up.
     pub fn play_id(&self, core: &Arc<Core>, index: Option<usize>, id: &str) -> bool {
         let found = self.with(|s| {
             let matches = |slot: usize| s.order.get(slot).is_some_and(|&i| s.tracks[i].id == id);
-            match index {
+            let slot = match index {
                 Some(slot) if matches(slot) => Some(slot),
                 _ => (0..s.order.len()).find(|&slot| matches(slot)),
-            }
+            };
+            slot.or_else(|| {
+                let at = s.tracks.iter().position(|t| t.id == id)?;
+                let slot = (s.cursor + 1).min(s.order.len());
+                s.order.insert(slot, at);
+                Some(slot)
+            })
         });
         match found.flatten() {
             Some(slot) => self.load(core, slot, true),
@@ -1488,6 +1670,81 @@ fn sidecar_in(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_with(likes_on: &[usize], name: &str) -> (Session, PathBuf) {
+        let root = std::env::temp_dir().join(format!("pmw-scope-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let tracks: Vec<Track> = (0..5)
+            .map(|i| Track {
+                id: format!("local-{i}"),
+                path: root.join(format!("{i}.flac")),
+                title: format!("T{i}"),
+                artist: "A".into(),
+                album: String::new(),
+                duration: 100.0,
+                has_art: false,
+                size: i as u64,
+            })
+            .collect();
+        let mut likes = Likes::load(&root, &tracks);
+        for &i in likes_on {
+            likes.set(&tracks[i], Some(Rating::Like)).unwrap().write();
+        }
+        let session = Session {
+            root: root.clone(),
+            order: (0..tracks.len()).collect(),
+            tracks,
+            likes,
+            cursor: 0,
+            playing: false,
+            shuffle: false,
+            liked_only: false,
+            repeat: "ALL".into(),
+            volume: 100.0,
+            muted: false,
+            started: false,
+            shown_second: 0,
+        };
+        (session, root)
+    }
+
+    #[test]
+    fn liked_songs_keeps_the_playing_track_until_it_ends() {
+        let (mut s, root) = session_with(&[1, 3], "pin");
+        s.cursor = 2; // playing track 2, not liked
+        s.liked_only = true;
+        s.rescope();
+        assert_eq!(s.order, vec![1, 2, 3]);
+        assert_eq!(s.order[s.cursor], 2);
+        assert!(!s.reachable(2) && s.reachable(1) && s.reachable(3));
+
+        // Once track 3 is up, track 2 drops out.
+        s.cursor = 2;
+        s.rescope();
+        assert_eq!(s.order, vec![1, 3]);
+        assert_eq!(s.order[s.cursor], 3);
+
+        // Back to the whole folder, still on track 3.
+        s.liked_only = false;
+        s.rescope();
+        assert_eq!(s.order, vec![0, 1, 2, 3, 4]);
+        assert_eq!(s.order[s.cursor], 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shuffled_liked_songs_stays_within_the_likes() {
+        let (mut s, root) = session_with(&[0, 2, 4], "shuffle");
+        s.liked_only = true;
+        s.rescope();
+        s.shuffle = true;
+        s.rescope();
+        let mut seen = s.order.clone();
+        seen.sort();
+        assert_eq!(seen, vec![0, 2, 4]);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn strips_year_prefix() {

@@ -63,6 +63,16 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
    stale embedded assets.
 7. **Renderer globals are shared.** Keep `bridge.js` inside its IIFE; duplicate
    top-level declarations across scripts can prevent both scripts from loading.
+8. **Every feature works in both sources.** YouTube Music and Local Music are
+   one card, so any control, menu item, panel or setting must be designed and
+   tested for both, or must say on screen why it is source-specific (Delete
+   is local only). The state you see should survive a switch or a relaunch in
+   both. A YouTube-only command reaching the local player silently doing
+   nothing is a bug, not a gap. Example: repeat-one is a YouTube Music mode
+   that the player itself keeps, so locally it has to replay at a natural end
+   *and* be saved per folder (`SavedFolder.repeat`) or a relaunch quietly
+   turns it off. Check `commands::local_command`, the Source-specific menus,
+   and `Core::is_local` paths before calling a feature done.
 
 ## API contract
 
@@ -149,7 +159,25 @@ panel open.
 
 ## Lyrics
 
-Lookup order:
+Two orders, chosen by `lyrics::fetch_lyrics` from the track id. The cache,
+expiry and miss handling are shared.
+
+**Local files** (`lookup_local`) have the real album and exact duration but
+no video id:
+
+1. LRCLib exact match with full tags and duration.
+2. Kugeci, only when the title or artist contains Han characters.
+3. LRCLib exact match with a cleaned title.
+4. LRCLib search, rejecting hits more than 3 s from the file's duration.
+5. YouTube Music: an InnerTube song search (direct, not through the API
+   server, so YouTube Music need not be running), matched on artist and title
+   with `artwork`'s folding and on duration within 3 s, then that video's timed
+   lyrics.
+
+Each tier continues past unsynced words, and the first plain block found is
+the fallback.
+
+**YouTube Music tracks** (`lookup_streamed`):
 
 1. YouTube Music timed lyrics, keyed by video ID, using the iOS Music client.
 2. LRCLib exact match with full metadata.
@@ -326,6 +354,21 @@ clears it. Advancing skips disliked tracks, but picking one from the queue still
 plays it. Disliking the playing track moves on. Queue rows carry `rating` (local
 only) so disliked rows render dimmed; keep `rating` in the renderers' identity
 strings or a change will not redraw.
+
+Liked Songs (`source:liked`) is a scope of Local Music, not a playlist file.
+`Session.liked_only` limits `order` to liked tracks through `Session::rescope`,
+which keeps the playing track pinned so switching never cuts a song off.
+`Session::reachable` is the one predicate for advancing: it excludes dislikes,
+and under Liked Songs anything not liked. `publish` rescopes, which drops a
+pinned track once another is playing. `rate` rescopes so a new like joins at
+once; an unliked track stays until it ends. Shuffle stays within the scope. The
+scope is saved per folder (`SavedFolder.liked_only`) and is ignored when a
+folder has no likes (opening it as Liked Songs then says so). Switching scope
+never cuts a song off: `set_scope` only rescopes, and an out-of-scope playing
+track finishes. `play_id` slots a search result from outside the scope in
+after the current track. Trashing the last song in Liked Songs falls back to
+the whole folder, and only a folder with no tracks left closes. Shuffle and
+repeat are saved per folder with the resume point.
 
 Delete is a local-only corner button (`CORNERS` entries marked `local`). It asks
 through a native `NSAlert` and moves the file and its `._` shadow to the Trash
