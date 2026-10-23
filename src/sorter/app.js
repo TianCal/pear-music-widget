@@ -64,6 +64,7 @@
       $("stats").textContent = `已筛 ${done} / ${view.total} · 喜欢 ${view.liked} · 不喜欢 ${view.disliked}`;
     }
     $("review").disabled = !view?.disliked;
+    $("reset").disabled = !(view?.liked || view?.disliked);
     $("review").textContent = view?.disliked ? `清理不喜欢的 (${view.disliked})…` : "清理不喜欢的…";
     $("undo").disabled = !view?.canUndo;
     $("skip").disabled = !view?.card || view.remaining < 2;
@@ -230,6 +231,8 @@
       $("title").textContent = view.card.title;
       $("subtitle").textContent = [view.card.artist, view.card.album].filter(Boolean).join(" — ");
       $("subtitle").title = view.card.file;
+      $("namesakes").hidden = !view.card.sameName;
+      $("namesakes").textContent = view.card.sameName ? `后面还有 ${view.card.sameName} 首同名歌` : "";
       $("dur").textContent = clock(view.card.duration);
       $("pos").textContent = "0:00";
       $("head").style.transition = "none";
@@ -392,6 +395,7 @@
 
   $("folder").onclick = chooseFolder;
   $("review").onclick = openSheet;
+  $("reset").onclick = () => invoke("sorter_reset_ratings");
   $("like").onclick = () => decide(true);
   $("dislike").onclick = () => decide(false);
   $("skip").onclick = skip;

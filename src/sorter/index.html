@@ -27,6 +27,7 @@
       <div class="meta">
         <h1 id="title"></h1>
         <p id="subtitle"></p>
+        <span class="namesakes" id="namesakes" hidden></span>
       </div>
 
       <div class="timeline" id="timeline" title="拖动跳到任意位置">
@@ -66,7 +67,10 @@
 
   <footer class="statusbar">
     <span id="stats"></span>
-    <button class="push small" id="review" disabled>清理不喜欢的…</button>
+    <div class="status-actions">
+      <button class="push small" id="reset" disabled>重置评分…</button>
+      <button class="push small" id="review" disabled>清理不喜欢的…</button>
+    </div>
   </footer>
 
   <div class="sheet-backdrop" id="sheet" hidden>

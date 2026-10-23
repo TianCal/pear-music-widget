@@ -89,6 +89,8 @@ struct Card {
     duration: f64,
     file: String,
     chorus: Option<Chorus>,
+    /// Other songs of the same name still to sort; they come straight after.
+    same_name: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -166,6 +168,13 @@ impl Sorter {
                     .expect("chorus lock")
                     .get(&track.id)
                     .cloned(),
+                same_name: {
+                    let key = title_key(&track.title);
+                    s.queue[1..]
+                        .iter()
+                        .filter(|&&j| !key.is_empty() && title_key(&s.tracks[j].title) == key)
+                        .count()
+                },
             }
         });
         View {
@@ -196,6 +205,48 @@ impl Sorter {
             .take(PREFETCH + 1)
             .map(|&i| s.tracks[i].clone())
             .collect()
+    }
+}
+
+/// A title without its bracketed notes, folded: 小酒窩, 小酒窝 (Live) and
+/// 小酒窝(feat.蔡卓妍)（粤语版） all give 小酒窝.
+fn title_key(title: &str) -> String {
+    let bare = title.split(['(', '（', '[', '【']).next().unwrap_or(title);
+    fast2s::convert(bare)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// The unrated tracks in folder order, except that each song's namesakes
+/// follow it directly, so versions of one song are judged side by side.
+fn queue_of(tracks: &[Track], likes: &Likes) -> Vec<usize> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    for (i, track) in tracks.iter().enumerate() {
+        if likes.get(&track.id).is_some() {
+            continue;
+        }
+        let key = title_key(&track.title);
+        match by_key.get(&key).filter(|_| !key.is_empty()) {
+            Some(&g) => groups[g].push(i),
+            None => {
+                by_key.insert(key, groups.len());
+                groups.push(vec![i]);
+            }
+        }
+    }
+    groups.into_iter().flatten().collect()
+}
+
+/// Write ratings, then have the player read them again if this folder is the
+/// one it has open, so its next save keeps them. Blocking IO.
+fn write_ratings(app: &AppHandle, save: crate::likes::Save, root: PathBuf) {
+    save.write();
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        let core = core.inner().clone();
+        core.local().reload_likes(&core, &root);
     }
 }
 
@@ -498,9 +549,7 @@ fn open_folder(app: &AppHandle, sorter: &Arc<Sorter>, root: PathBuf) -> Result<(
     emit(app, "sorter-view", sorter.view());
     let tracks = crate::local::scan(&root);
     let likes = Likes::load(&root, &tracks);
-    let queue = (0..tracks.len())
-        .filter(|&i| likes.get(&tracks[i].id).is_none())
-        .collect();
+    let queue = queue_of(&tracks, &likes);
     sorter.player.stop();
     *sorter.scanning.lock().expect("scanning lock") = None;
     let names = app.state::<Arc<Store>>().get(|s| s.artist_names.clone());
@@ -579,7 +628,7 @@ pub async fn sorter_choose_folder(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
     let sorter = runtime().ok_or_else(no_window)?;
-    let save = {
+    let saved = {
         let mut guard = sorter.session.lock().expect("session lock");
         let Some(s) = guard.as_mut() else {
             return Ok(());
@@ -597,10 +646,11 @@ pub fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
         // Rated in the player meanwhile: nothing left to decide.
         let (likes, tracks) = (&s.likes, &s.tracks);
         s.queue.retain(|&j| likes.get(&tracks[j].id).is_none());
-        save
+        save.map(|save| (save, s.root.clone()))
     };
-    if let Some(save) = save {
-        tauri::async_runtime::spawn_blocking(move || save.write());
+    if let Some((save, root)) = saved {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || write_ratings(&app, save, root));
     }
     present(&app, &sorter);
     Ok(())
@@ -636,12 +686,80 @@ pub fn sorter_undo(app: AppHandle) {
         let save = s.likes.set(&s.tracks[i], before);
         s.queue.retain(|&j| j != i);
         s.queue.insert(0, i);
-        save
+        save.map(|save| (save, s.root.clone()))
     };
-    if let Some(save) = save {
-        tauri::async_runtime::spawn_blocking(move || save.write());
+    if let Some((save, root)) = save {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || write_ratings(&app, save, root));
     }
     present(&app, &sorter);
+}
+
+/// Ask, then clear every like and dislike in the folder: all its songs go
+/// back in the queue. Cleared ratings are written as dated tombstones, as any
+/// cleared rating is, so the fallback copy cannot bring them back.
+#[tauri::command]
+pub fn sorter_reset_ratings(app: AppHandle) {
+    let Some(sorter) = runtime() else { return };
+    let counts = {
+        let guard = sorter.session.lock().expect("session lock");
+        guard.as_ref().map(|s| {
+            let count = |want| {
+                s.tracks
+                    .iter()
+                    .filter(|t| s.likes.get(&t.id) == Some(want))
+                    .count()
+            };
+            (s.root.clone(), count(Rating::Like), count(Rating::Dislike))
+        })
+    };
+    let Some((root, liked, disliked)) = counts else {
+        return;
+    };
+    if liked + disliked == 0 {
+        return;
+    }
+    let name = root.file_name().map_or_else(
+        || root.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let handle = app.clone();
+    crate::macos::confirm(
+        &app,
+        format!("Clear all ratings in “{name}”?"),
+        format!(
+            "{liked} liked and {disliked} disliked songs become unrated and go back in the queue. \
+             This cannot be undone."
+        ),
+        "Clear Ratings",
+        move || {
+            tauri::async_runtime::spawn_blocking(move || reset_ratings(&handle));
+        },
+    );
+}
+
+/// Blocking IO.
+fn reset_ratings(app: &AppHandle) {
+    let Some(sorter) = runtime() else { return };
+    let saved = {
+        let mut guard = sorter.session.lock().expect("session lock");
+        let Some(s) = guard.as_mut() else { return };
+        s.likes = Likes::load(&s.root, &s.tracks);
+        let rated: Vec<usize> = (0..s.tracks.len())
+            .filter(|&i| s.likes.get(&s.tracks[i].id).is_some())
+            .collect();
+        let mut last = None;
+        for i in rated {
+            last = s.likes.set(&s.tracks[i], None).or(last);
+        }
+        s.history.clear();
+        s.queue = queue_of(&s.tracks, &s.likes);
+        last.map(|save| (save, s.root.clone()))
+    };
+    if let Some((save, root)) = saved {
+        write_ratings(app, save, root);
+    }
+    present(app, &sorter);
 }
 
 #[tauri::command]
@@ -716,10 +834,12 @@ pub async fn sorter_trash(app: AppHandle, ids: Vec<String>) -> Result<usize, Str
         return Ok(0);
     }
     let worker = Arc::clone(&sorter);
-    let (moved, failed) =
-        tauri::async_runtime::spawn_blocking(move || trash_disliked(&worker, &ids))
-            .await
-            .map_err(|e| e.to_string())?;
+    let (moved, failed) = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || trash_disliked(&app, &worker, &ids)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     if !failed.is_empty() {
         emit(&app, "sorter-error", failed.join("\n"));
     }
@@ -728,7 +848,7 @@ pub async fn sorter_trash(app: AppHandle, ids: Vec<String>) -> Result<usize, Str
 }
 
 /// Blocking IO. Only what is still disliked: the answer may come after an undo.
-fn trash_disliked(sorter: &Sorter, ids: &[String]) -> (usize, Vec<String>) {
+fn trash_disliked(app: &AppHandle, sorter: &Sorter, ids: &[String]) -> (usize, Vec<String>) {
     let targets: Vec<Track> = {
         let guard = sorter.session.lock().expect("session lock");
         let Some(s) = guard.as_ref() else {
@@ -785,11 +905,50 @@ fn trash_disliked(sorter: &Sorter, ids: &[String]) -> (usize, Vec<String>) {
                 .filter_map(|&(i, r)| map[i].map(|j| (j, r)))
                 .collect();
             s.tracks.retain(|t| !moved.contains(&t.id));
-            last
+            last.map(|save| (save, s.root.clone()))
         })
     };
-    if let Some(save) = save {
-        save.write();
+    if let Some((save, root)) = save {
+        write_ratings(app, save, root);
     }
     (moved.len(), failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(n: usize, title: &str) -> Track {
+        Track {
+            id: format!("local-{n:016x}"),
+            path: PathBuf::from(format!("/nowhere/{n:02} {title}.flac")),
+            title: title.into(),
+            artist: "林俊杰".into(),
+            album: String::new(),
+            duration: 200.0,
+            has_art: false,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn versions_fold_to_one_key() {
+        assert_eq!(title_key("小酒窩"), "小酒窝");
+        assert_eq!(title_key("小酒窝(feat.蔡卓妍)（粤语版）"), "小酒窝");
+        assert_eq!(title_key("主角 (ft.MACHI)"), "主角");
+        assert_eq!(title_key("K-O"), "ko");
+    }
+
+    #[test]
+    fn namesakes_follow_the_first_of_them() {
+        let tracks = [
+            track(0, "小酒窩"),
+            track(1, "江南"),
+            track(2, "主角"),
+            track(3, "小酒窝 (Live)"),
+            track(4, "江南"),
+        ];
+        let likes = Likes::load(Path::new("/nowhere"), &tracks);
+        assert_eq!(queue_of(&tracks, &likes), vec![0, 3, 1, 4, 2]);
+    }
 }

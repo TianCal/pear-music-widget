@@ -300,6 +300,7 @@ fn main() {
             sorter::sorter_replay,
             sorter::sorter_disliked,
             sorter::sorter_trash,
+            sorter::sorter_reset_ratings,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Perch Player");

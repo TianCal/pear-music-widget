@@ -141,6 +141,16 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.meta .namesakes[hidden] { display: none; }
+.meta .namesakes {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--fill);
+  font-size: 11px;
+  color: var(--secondary);
+}
 .meta p {
   margin: 2px 0 0;
   color: var(--secondary);
@@ -401,3 +411,4 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   font-size: 12px;
   white-space: pre-line;
 }
+.status-actions { display: flex; gap: 6px; }

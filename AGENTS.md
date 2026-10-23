@@ -420,8 +420,14 @@ from its chorus. ← likes, → dislikes, ↓ skips.
   lines, then refines to the line that sings the title. Without synced lyrics
   it starts at 35%.
 - **Ratings.** Ratings are written through `likes.rs` and re-read before each
-  write. The player's in-memory `Likes` is not reloaded, so its next save can
-  overwrite them. This is accepted.
+  write. After every write (rate, undo, reset, trash), `Local::reload_likes`
+  re-reads the file if that folder is the one the player has open. Otherwise
+  the player's next save, made from what it loaded, would put back what was
+  changed here, a reset above all.
+- **Queue order.** The queue is folder order, except that songs sharing a
+  title (`title_key`: bracketed notes dropped, simplified, folded) follow the
+  first of them directly. **Reset ratings** clears every rating in the folder
+  as dated tombstones.
 - **Events and commands.** Events go only to the sorter window (`emit_to`)
   and are prefixed `sorter-`. Commands are prefixed `sorter_`.
 - **Remembered folder.** The last folder is stored apart, in

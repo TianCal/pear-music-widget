@@ -994,6 +994,35 @@ impl Local {
         crate::tray::refresh(&core.app);
     }
 
+    /// Read `root`'s ratings again after Sort Songs wrote them, so this
+    /// session's next save does not put back what was changed there. Does
+    /// nothing unless `root` is the open folder. Blocking IO.
+    pub fn reload_likes(&self, core: &Arc<Core>, root: &Path) {
+        let _loading = self.loading.lock().expect("loading lock");
+        let Some(current) = self
+            .with(|s| {
+                if s.root != root {
+                    return None;
+                }
+                s.likes = Likes::load(&s.root, &s.tracks);
+                s.rescope();
+                Some(s.current().map(|t| (t.id.clone(), s.likes.get(&t.id))))
+            })
+            .flatten()
+        else {
+            return;
+        };
+        if let Some((id, rating)) = current {
+            let like = rating.map_or("INDIFFERENT", Rating::as_str);
+            core.update(|state| {
+                if state.song.as_ref().is_some_and(|song| song.video_id == id) {
+                    state.like = Some(like.to_string());
+                }
+            });
+        }
+        core.publish_local_queue();
+    }
+
     // ----------------------------------------------------------------- trash
 
     /// The playing track, for the delete confirmation.
