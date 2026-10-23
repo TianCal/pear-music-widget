@@ -22,10 +22,12 @@ const PANELS = [
   { key: 'search', section: 'search', corner: 'cornerSearch' },
 ];
 
-/* Every button in the bar, in DOM order. The panels are a subset: repeat opens
-   nothing, so it is here and not in `PANELS`, and this is the list that decides
-   what is drawn and how wide a gutter the titles reserve. */
+/* Every button in the bar, in DOM order. The panels are a subset: repeat and
+   delete open nothing, so they are here and not in `PANELS`, and this is the
+   list that decides what is drawn and how wide a gutter the titles reserve.
+   `local` buttons exist only while a file from a folder is playing. */
 const CORNERS = [
+  { key: 'trash', node: 'cornerTrash', local: true },
   { key: 'repeat', node: 'cornerRepeat' },
   ...PANELS.map((panel) => ({ key: panel.key, node: panel.corner })),
 ];
@@ -37,6 +39,17 @@ const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 
  *  skin's set, because the widget and the dropdown can be on different ones. A
  *  skin with no entry has never been changed, so everything is on. */
 const cornersOf = (snapshot) => (snapshot.corners || {})[skinOf(snapshot)] || {};
+
+/** Whether the snapshot's track is a file rather than a stream. */
+const isLocal = (snapshot) => snapshot.song?.mediaType === 'LOCAL';
+
+/** The corner buttons this snapshot actually draws. */
+const shownCorners = (snapshot) => {
+  const corners = cornersOf(snapshot);
+  return CORNERS.filter(
+    (button) => corners[button.key] !== false && (!button.local || isLocal(snapshot)),
+  );
+};
 
 const el = {
   card: $('card'),
@@ -68,6 +81,7 @@ const el = {
   cornerLyrics: $('btn-lyrics'),
   cornerQueue: $('btn-queue'),
   cornerRepeat: $('btn-repeat'),
+  cornerTrash: $('btn-trash'),
   repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
   closeWidget: $('btn-close'),
@@ -329,14 +343,12 @@ const renderStatus = () => {
   // is answering — and each button can also be turned off from the menu.
   const offline = state.status !== 'connected';
   const corners = cornersOf(state);
+  const shown = offline ? [] : shownCorners(state);
   for (const button of CORNERS) {
-    el[button.node].hidden = offline || corners[button.key] === false;
+    el[button.node].hidden = !shown.includes(button);
   }
   // The gutter the titles reserve follows the buttons that are actually there.
-  document.body.style.setProperty(
-    '--corner-count',
-    String(offline ? 0 : CORNERS.filter((button) => corners[button.key] !== false).length),
-  );
+  document.body.style.setProperty('--corner-count', String(shown.length));
 
   // Only when the setting itself moved. Other chrome changes can call this
   // renderer too, and re-arming the countdown for any of them would extend the
@@ -864,6 +876,7 @@ const applyState = (next) => {
     songPresenceChanged ||
     skinChanged ||
     next.cornersAutohide !== state.cornersAutohide ||
+    isLocal(next) !== isLocal(state) ||
     CORNERS.some(({ key }) => nextCorners[key] !== previousCorners[key]);
 
   // Keep the level the user is actually setting while our own echoes drain.
@@ -1227,6 +1240,14 @@ const toggleQueue = () => {
 el.cornerQueue.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleQueue();
+});
+
+/* Asks first, natively, in Rust: the dialog names the file and the command
+   refuses if the track changed before the answer. Nothing optimistic here — a
+   file only leaves the queue once it is really in the Trash. */
+el.cornerTrash.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (isLocal(state)) send('trash');
 });
 
 /* Not a panel: it presses the player's repeat button and the bar stays as it
@@ -1802,18 +1823,32 @@ window.widget.onZoom((zoom) => {
   document.documentElement.style.setProperty('--radius', `${(12 / zoom).toFixed(2)}px`);
 });
 
-window.widget.onState(applyState);
-window.widget.onCover(applyCover);
-window.widget.onQueue(applyQueue);
-window.widget.onLyrics(applyLyrics);
+/* Channels that have heard a live event. Each event is a whole snapshot of its
+   channel, so once one has landed the cold-load reply below is older than what
+   is on screen — applying it anyway put a previous source's song on a card
+   already showing the new source's artwork and queue. */
+const heardLive = new Set();
+const live = (channel, apply) => (payload) => {
+  heardLive.add(channel);
+  apply(payload);
+};
+
+window.widget.onState(live('state', applyState));
+window.widget.onCover(live('cover', applyCover));
+window.widget.onQueue(live('queue', applyQueue));
+window.widget.onQueueArtReady(() => {
+  queueArtInView();
+  upnextArtInView();
+});
+window.widget.onLyrics(live('lyrics', applyLyrics));
 
 // One reply carries all four channels: a window loading from cold cannot wait a
 // track for the artwork to change.
 window.widget.getState().then((boot) => {
-  applyCover(boot.cover);
-  applyQueue(boot.queue);
-  applyLyrics(boot.lyrics);
-  applyState(boot.state);
+  if (!heardLive.has('cover')) applyCover(boot.cover);
+  if (!heardLive.has('queue')) applyQueue(boot.queue);
+  if (!heardLive.has('lyrics')) applyLyrics(boot.lyrics);
+  if (!heardLive.has('state')) applyState(boot.state);
 
   // The widget reopens the panel it was left showing. The main process has
   // already sized the window for it; this is what tells the page to draw it and

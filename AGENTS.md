@@ -28,6 +28,8 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/search.rs` | Search and queue parsing |
 | `src-tauri/src/lyrics.rs` | Lyrics lookup, matching, and LRC parsing |
 | `src-tauri/src/lyrics_cache.rs` | Memory and disk lyrics cache |
+| `src-tauri/src/local.rs` | Local-folder scanning and playback |
+| `src-tauri/src/artwork.rs` | Online covers for local files, disk cache |
 | `src-tauri/src/store.rs` | `settings.json` |
 | `src/bridge.js` | `window.widget` IPC wrapper and dragging |
 | `src/app.js` | Rendering and interaction |
@@ -37,13 +39,16 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 
 1. **All network access belongs in Rust.** The renderer's CSP intentionally
    blocks it. Rust returns covers as `data:` URLs so canvas sampling is not
-   cross-origin tainted. `lyrics.rs` is the only code allowed to contact a
-   non-localhost host.
+   cross-origin tainted. `lyrics.rs` and `artwork.rs` are the only code
+   allowed to contact a non-localhost host.
 2. **Keep the `state` event small.** It is emitted every second and must not
    contain cover, queue, or lyrics data. Those use separate change-only events;
-   `widget_state` combines them only for a cold window load.
+   `widget_state` combines them only for a cold window load. The renderer
+   skips any channel of that reply which has already heard a live event, since
+   the event is newer.
 3. **Queue artwork is request/reply data, not an event.** Each surface calls
-   `queue_art` only for visible rows. Keep `ImageCache::get` promotion and the
+   `queue_art` only for visible rows. The only queue-art event is the
+   payload-free `queue-art-ready` nudge, which makes surfaces ask again. Keep `ImageCache::get` promotion and the
    byte cap so scrolling does not evict the artwork it is returning to.
 4. **Run AppKit and menu work on the main thread.** Take one
    `AppHandle::run_on_main_thread` hop at the command boundary so ordered
@@ -217,6 +222,86 @@ gutter on the section rather than the scroller. Centre from each card's
 handler must stop propagation and map vertical deltas to horizontal movement so
 queue scrolling never changes volume. Do not enable scroll snapping; trackpad
 deltas are too small to cross snap thresholds reliably.
+
+## Local folders
+
+`local.rs` is a second source behind the same `Core` channels. While a folder
+is active, `Core::is_local` makes `handle_message`, `set_status`, `refresh_all`
+and the pollers stand down rather than closing the socket; leaving calls
+`leave_local` and `ws::retry`. YouTube-side writes go through
+`Core::update_remote`, which checks `is_local` inside the player lock;
+`Local::open` sets `active` inside that same lock. Checking only before an
+`.await` is not enough, because a reply already in flight lands after the
+folder took over. `commands.rs` routes every renderer command to
+the folder player first. Settings keep `source` and `localFolder` in `extra`.
+
+Audio is decoded in Rust (rodio/symphonia). **Never call `Sink::clear` or
+`Sink::try_seek`**: both wait for the audio callback, which a stream on a
+vanished device never runs again. Each track gets a fresh `Sink` and the old one
+is dropped; seeking reopens the file at the new position. The `OutputStream`
+lives on its own thread, opens on first use, and is reopened when its error
+callback fires or the default device changes (checked every two seconds
+and on each load). Loads do file IO: run them on blocking threads or the
+`local-tick` thread, never on the AppKit main thread or an async worker. `loading`
+is held across every load and seek; the ticker only `try_lock`s it, so it never
+sees the gap between sinks and advances twice. `close` and `toggle_play` take
+it too. Advancing tries each track at most once and publishes only the track
+that started (or the last failure), never each file it skipped. If the root is
+no longer a directory it stops at the first failure. Position is pushed on
+`state` once per whole second, like YouTube Music's.
+
+`scan` lists the folder (cheap) and reads tags only for files whose size or
+mtime differs from the index at
+`~/Library/Caches/pear-music-widget/library/<hash of root>.json`. Reading
+every tag on a cold USB drive takes several seconds. Track ids are
+`local-<hash of path>` so lyrics cache entries and timing overrides survive
+relaunches, and YouTube timed lyrics are skipped for them. Skip `._*`
+AppleDouble files. Untagged files take the first folder under the root as artist
+(not for files in the root itself) and the parent folder (minus a `YYYY - `
+prefix) as album; album tags containing `.com` or `www.` are rip-site
+watermarks and ignored.
+
+Tracks keep raw credits. `artistNames` maps credits for display, lyrics and
+cover lookups, for YouTube Music and local files alike; apply it on output
+(`Song::raw_artist` keeps the original) so a rename needs no rescan.
+`map_artist` tries the whole credit, then each separated credit. A rename calls
+`Core::remap_artists`, which forgets the current track's lyrics miss and the
+artwork misses made under the old name.
+
+Covers: embedded or sidecar art first, then `artwork::find` — iTunes album
+(TW, HK, US stores; TW credits Mandopop in Chinese), Deezer album, iTunes song,
+then YouTube Music song search through the API server (square
+`googleusercontent` art only). Accept a result only when artist and name match
+after `fold`; exact names outrank names that match only once bracketed notes
+are dropped. Look up asynchronously so playback never waits. **Cache a miss only
+when every provider answered**; a timeout, 403 or 429 says nothing about whether
+a cover exists. iTunes allows about 20 requests a minute: requests are spaced
+3.2 s apart, and only the TW and US stores are tried. One caller looks up an
+album at a time, and re-reads the cache once it has the slot. The playing track
+is `Priority::Now`; queue rows and next-track prefetch are `Background`, run one
+at a time, and yield their next iTunes slot while a `Now` lookup runs. Count a
+`Now` lookup as active only after it holds the album slot, or the two
+priorities deadlock. `queue_art` replies after 1.5 s with what is ready; lookups
+still running warm the cache for the renderer's next request. The disk cache is
+`~/Library/Caches/pear-music-widget/artwork`: `<key>.jpg` hits at 640 px,
+`<key>.miss` misses for a week (a day if YouTube Music could not be asked, an
+hour if a provider failed). `Priority::Now` carries an `Alive` check, tested
+before the slot, the permit and every request, so lookups for tracks you
+skipped past stop instead of queueing ahead of the current one. `queue_art`
+emits `queue-art-ready` when lookups that missed its reply have landed.
+Sized `data:` URLs share one byte-capped `ImageCache`, keyed by artwork key, so
+an album is resized once. Search rows use the cache only, never the network.
+
+Delete is a local-only corner button (`CORNERS` entries marked `local`). It asks
+through a native `NSAlert` and moves the file and its `._` shadow to the Trash
+with `NSFileManager`, never a permanent delete. The confirmation captures the
+track id, so an answer given after playback moved on trashes the file the
+dialog named, never whatever is playing by then. The confirm callback runs on
+the main thread and hands the move and the next load to a blocking thread.
+
+Debug builds optimise the decoder and image crates (`[profile.dev.package]`
+in `Cargo.toml`). Unoptimised, a cover resize takes ~270 ms and 24/96 FLAC
+decodes slowly enough to risk underruns.
 
 ## Volume
 

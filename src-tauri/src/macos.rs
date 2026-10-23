@@ -301,3 +301,137 @@ pub fn set_liquid_glass(window: &WebviewWindow, enabled: bool) {
         }
     });
 }
+
+unsafe fn ns_string(text: &str) -> *mut AnyObject {
+    let text = CString::new(text.replace('\0', "")).expect("NUL removed");
+    msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()]
+}
+
+/// Free-text entry, for names rather than numbers. `apply` gets the trimmed
+/// text, possibly empty, only when the first button is chosen.
+pub fn prompt_text(
+    app: &AppHandle,
+    title: String,
+    detail: String,
+    current: String,
+    apply: impl FnOnce(String) + Send + 'static,
+) {
+    let _ = app.run_on_main_thread(move || unsafe {
+        let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
+        let field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
+        let field: *mut AnyObject = msg_send![field, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(260.0, 24.0),
+        )];
+        let _: () = msg_send![alert, setMessageText: ns_string(&title)];
+        let _: () = msg_send![alert, setInformativeText: ns_string(&detail)];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string("Save")];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
+        let _: () = msg_send![field, setStringValue: ns_string(&current)];
+        let _: () = msg_send![alert, setAccessoryView: field];
+        let _: () = msg_send![field, release];
+
+        activate_app();
+        let response: isize = msg_send![alert, runModal];
+        let text: *mut AnyObject = msg_send![field, stringValue];
+        let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
+        let value = if utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(utf8).to_string_lossy().trim().to_string()
+        };
+        let _: () = msg_send![alert, release];
+        if response == 1000 {
+            apply(value);
+        }
+    });
+}
+
+/// A destructive yes/no. The confirming button is first so Return is not the
+/// safe choice by accident — macOS gives the first button the default key, so
+/// it is labelled with the action rather than "OK".
+pub fn confirm(
+    app: &AppHandle,
+    title: String,
+    detail: String,
+    action: &'static str,
+    apply: impl FnOnce() + Send + 'static,
+) {
+    let _ = app.run_on_main_thread(move || unsafe {
+        let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
+        // NSAlertStyleCritical: the caution badge over the app icon.
+        let _: () = msg_send![alert, setAlertStyle: 2usize];
+        let _: () = msg_send![alert, setMessageText: ns_string(&title)];
+        let _: () = msg_send![alert, setInformativeText: ns_string(&detail)];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string(action)];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
+        activate_app();
+        let response: isize = msg_send![alert, runModal];
+        let _: () = msg_send![alert, release];
+        if response == 1000 {
+            apply();
+        }
+    });
+}
+
+/// An accessory app's alert otherwise opens behind whatever is frontmost.
+unsafe fn activate_app() {
+    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    let _: () = msg_send![app, activateIgnoringOtherApps: true];
+}
+
+/// Move a file to the Trash of the volume it is on, recoverably — never a
+/// delete. On an external drive that is the drive's own `.Trashes`.
+pub fn trash(path: &std::path::Path) -> Result<(), String> {
+    unsafe {
+        let manager: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
+        let url: *mut AnyObject =
+            msg_send![class!(NSURL), fileURLWithPath: ns_string(&path.to_string_lossy())];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: bool = msg_send![
+            manager,
+            trashItemAtURL: url,
+            resultingItemURL: std::ptr::null_mut::<*mut AnyObject>(),
+            error: &mut error
+        ];
+        if ok {
+            return Ok(());
+        }
+        if error.is_null() {
+            return Err("The file could not be moved to the Trash".into());
+        }
+        let description: *mut AnyObject = msg_send![error, localizedDescription];
+        let utf8: *const std::ffi::c_char = msg_send![description, UTF8String];
+        Err(if utf8.is_null() {
+            "The file could not be moved to the Trash".into()
+        } else {
+            CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        })
+    }
+}
+
+/// A one-button notice, for failures the user asked to happen.
+pub fn inform(app: &AppHandle, title: String, detail: String) {
+    let _ = app.run_on_main_thread(move || unsafe {
+        let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
+        let _: () = msg_send![alert, setMessageText: ns_string(&title)];
+        let _: () = msg_send![alert, setInformativeText: ns_string(&detail)];
+        activate_app();
+        let _: isize = msg_send![alert, runModal];
+        let _: () = msg_send![alert, release];
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    /// `PMW_TRASH_DIR=/Volumes/X cargo test trash_moves -- --ignored`
+    #[test]
+    #[ignore]
+    fn trash_moves_a_file_out_of_place() {
+        let dir = std::env::var("PMW_TRASH_DIR").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+        let path = std::path::Path::new(&dir).join("pmw-trash-test.txt");
+        std::fs::write(&path, b"x").unwrap();
+        super::trash(&path).unwrap();
+        assert!(!path.exists());
+    }
+}

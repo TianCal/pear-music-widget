@@ -228,6 +228,18 @@ pub fn clear() {
     TOTAL_BYTES.store(0, Ordering::Relaxed);
 }
 
+/// Remove one track's record if it is a remembered miss.
+pub fn forget_miss(video_id: &str) {
+    if !matches!(load(video_id), Some(None)) {
+        return;
+    }
+    let _write = WRITES.lock().expect("lyrics cache writes");
+    if let Some(path) = path_for(video_id) {
+        let _ = fs::remove_file(path);
+    }
+    TOTAL_BYTES.store(measure(), Ordering::Relaxed);
+}
+
 /// Explicitly forget failed lookups without removing any found lyrics.
 pub fn clear_negative() {
     let _write = WRITES.lock().expect("lyrics cache writes");

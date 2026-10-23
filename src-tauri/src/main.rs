@@ -3,9 +3,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod artwork;
 mod commands;
 mod doctor;
 mod jyutping;
+mod local;
 mod lyrics;
 mod lyrics_cache;
 mod macos;
@@ -58,7 +60,7 @@ pub fn resync(app: &AppHandle) {
         return;
     };
     let core = core.inner().clone();
-    if core.status() != "connected" {
+    if core.status() != "connected" || core.is_local() {
         return;
     }
     tauri::async_runtime::spawn(async move { core.refresh_all().await });
@@ -101,6 +103,7 @@ fn spawn_pollers(core: Arc<Core>) {
             ticker.tick().await;
             let snapshot = like.snapshot();
             if snapshot.status != "connected"
+                || like.is_local()
                 || snapshot.song.is_none()
                 || !showing_anything(&like.app)
             {
@@ -111,7 +114,7 @@ fn spawn_pollers(core: Arc<Core>) {
                     .get("state")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                like.update(|player| player.like = state);
+                like.update_remote(|player| player.like = state);
             }
         }
     });
@@ -120,12 +123,12 @@ fn spawn_pollers(core: Arc<Core>) {
         let mut ticker = tokio::time::interval(PLAY_STATE_POLL);
         loop {
             ticker.tick().await;
-            if core.status() != "connected" || !showing_anything(&core.app) {
+            if core.status() != "connected" || core.is_local() || !showing_anything(&core.app) {
                 continue;
             }
             if let Ok(Some(song)) = core.api.song().await {
                 if let Some(paused) = song.get("isPaused").and_then(Value::as_bool) {
-                    core.update(|player| player.is_playing = !paused);
+                    core.update_remote(|player| player.is_playing = !paused);
                 }
             }
         }
@@ -191,12 +194,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(Arc::clone(&realtime));
     app.manage(Arc::new(WindowState::new()));
     app.manage(Arc::new(panel::PanelState::new()));
+    app.manage(Arc::new(local::Local::new()));
 
     window::create(&handle)?;
     panel::create(&handle)?;
     tray::create(&handle)?;
 
     ws::spawn(Arc::clone(&core), realtime);
+    local::Local::spawn_ticker(Arc::clone(&core));
+    local::Local::restore(&core);
     spawn_pollers(core);
 
     // Off the setup path: taking stock of the cache means a directory listing,

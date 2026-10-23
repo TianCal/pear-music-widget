@@ -69,6 +69,14 @@ pub fn open_app(app: AppHandle) -> Value {
 pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Value {
     let core = core(&app);
 
+    if core.is_local() {
+        // Loads and seeks open files: a blocking thread, not this async worker.
+        let payload = payload.unwrap_or(Value::Null);
+        return tauri::async_runtime::spawn_blocking(move || local_command(&core, &name, payload))
+            .await
+            .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }));
+    }
+
     if PLAYBACK_COMMANDS.contains(&name.as_str()) && core.status() == "offline" {
         crate::launch_music_app(&app);
         return json!({ "ok": true, "launched": true });
@@ -162,6 +170,60 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
     }
 }
 
+/// The same command names, answered by the folder player.
+fn local_command(core: &Arc<Core>, name: &str, payload: Value) -> Value {
+    let local = core.local();
+    let number = |key: &str| payload.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    match name {
+        "togglePlay" => local.toggle_play(core),
+        "next" => local.next(core),
+        "previous" => local.previous(core),
+        "seek" => local.seek(core, number("seconds")),
+        "volume" => local.set_volume(core, number("volume").round().clamp(0.0, 100.0)),
+        "toggleMute" => local.toggle_mute(core),
+        "shuffle" => local.toggle_shuffle(core),
+        "repeat" => local.cycle_repeat(core),
+        // Nothing to rate a file against.
+        "like" | "dislike" => {}
+        "trash" => confirm_trash(core),
+        other => return json!({ "ok": false, "error": format!("Unknown command {other}") }),
+    }
+    json!({ "ok": true })
+}
+
+/// Ask, natively, before moving the playing file to the Trash. The track is
+/// captured now, so an answer given after playback moved on trashes the file
+/// the dialog named — never whatever is playing by then.
+fn confirm_trash(core: &Arc<Core>) {
+    let Some(track) = core.local().current() else { return };
+    let artist = core.snapshot().song.map(|song| song.artist).unwrap_or_default();
+    let title = format!("Move “{}” to the Trash?", track.title);
+    let detail = format!(
+        "{}{}\n\n{}\n\nYou can put it back from the Trash on that drive.",
+        artist,
+        if track.album.is_empty() { String::new() } else { format!(" — {}", track.album) },
+        track.path.display()
+    );
+    let handle = Arc::clone(core);
+    crate::macos::confirm(&core.app, title, detail, "Move to Trash", move || {
+        // The callback runs on the main thread; moving files and loading the
+        // next track do not belong there.
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(err) = handle.local().trash(&handle, &track.id) {
+                crate::macos::inform(&handle.app, "Could not move it to the Trash".into(), err);
+            }
+        });
+    });
+}
+
+async fn local_jump(core: &Arc<Core>, index: Option<usize>, id: &str) -> Value {
+    let (core, id) = (Arc::clone(core), id.to_string());
+    let ok = tauri::async_runtime::spawn_blocking(move || core.local().play_id(&core, index, &id))
+        .await
+        .unwrap_or(false);
+    json!({ "ok": ok })
+}
+
 #[tauri::command]
 pub async fn search_tracks(app: AppHandle, query: String) -> Value {
     let query = query.trim().to_string();
@@ -170,6 +232,14 @@ pub async fn search_tracks(app: AppHandle, query: String) -> Value {
     }
 
     let core = core(&app);
+    if core.is_local() {
+        let local = core.local();
+        let names = core.store.get(|s| s.artist_names.clone());
+        let results = tauri::async_runtime::spawn_blocking(move || local.search(&query, &names))
+            .await
+            .unwrap_or_default();
+        return json!({ "ok": true, "results": results });
+    }
     let payload = match core.api.search(&query).await {
         Ok(payload) => payload,
         Err(err) => return json!({ "ok": false, "error": err.message }),
@@ -206,6 +276,9 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
         return json!({ "ok": false });
     }
     let core = core(&app);
+    if core.is_local() {
+        return local_jump(&core, None, &video_id).await;
+    }
 
     let before = search::queue_entries(core.api.queue().await.ok().flatten().as_ref()).len();
 
@@ -258,6 +331,9 @@ pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
         return json!({ "ok": false });
     }
     let core = core(&app);
+    if core.is_local() {
+        return local_jump(&core, None, &video_id).await;
+    }
     let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
 
     // Search forward from the playing track: the same id can appear earlier in
@@ -370,6 +446,15 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> V
         }
     }
 
+    if core.is_local() {
+        let art: Map<String, Value> = crate::local::Local::queue_art(&core, wanted, size)
+            .await
+            .into_iter()
+            .map(|(id, art)| (id, Value::String(art.to_string())))
+            .collect();
+        return json!({ "ok": true, "art": art });
+    }
+
     // One pass against the same keep-alive connection, the way the four-item
     // queue already resolved its thumbnails; most of these are cache hits.
     let resolved = future::join_all(wanted.into_iter().map(|id| {
@@ -405,6 +490,9 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> V
 #[tauri::command]
 pub async fn play_queue_index(app: AppHandle, index: usize, video_id: String) -> Value {
     let core = core(&app);
+    if core.is_local() {
+        return local_jump(&core, Some(index), &video_id).await;
+    }
     let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
 
     let matches = entries

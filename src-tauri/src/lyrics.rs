@@ -823,7 +823,11 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     // 1. YouTube Music's own lyrics, for the track the player is actually
     //    playing. Being keyed by the video id, this is the only tier that
     //    cannot come back with a different song's words, so it goes first.
-    let mut result = fetch_ytmusic(http, &song.video_id).await;
+    let mut result = if song.video_id.starts_with(crate::local::ID_PREFIX) {
+        None
+    } else {
+        fetch_ytmusic(http, &song.video_id).await
+    };
 
     // Unless they are unsynced. YouTube serves a plain block for a good part of
     // the catalogue, and LRCLib often has the same song *with* timings — a roll
@@ -884,6 +888,20 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     lyrics_cache::store(&song.video_id, &result);
 
     result
+}
+
+/// Forget one remembered miss, in memory and on disk — after the credit it
+/// was looked up under has been renamed. Found lyrics are kept.
+pub fn forget_miss(video_id: &str) {
+    {
+        let mut cache = CACHE.lock().expect("lyrics cache");
+        let (order, entries) = &mut *cache;
+        if matches!(entries.get(video_id), Some(None)) {
+            entries.remove(video_id);
+            order.retain(|id| id != video_id);
+        }
+    }
+    lyrics_cache::forget_miss(video_id);
 }
 
 pub fn clear_negative_cache() {

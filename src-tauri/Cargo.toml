@@ -26,6 +26,9 @@ tauri-plugin-single-instance = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 tokio-tungstenite = "0.29"
 window-vibrancy = "0.8"
+rodio = { version = "0.21.1", features = ["symphonia-aiff", "symphonia-alac"] }
+lofty = "0.24.0"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 
 # Only the handful of AppKit calls Tauri does not wrap: aspect ratio, window
 # alpha, window level and collection behaviour. Raw `msg_send!` rather than the
@@ -45,6 +48,40 @@ tauri-build = { version = "2", features = [] }
 # tray-icon >= 0.25.1.
 [patch.crates-io]
 tray-icon = { path = "vendor/tray-icon" }
+
+# Decoding and image work are hot loops that are 20x slower unoptimised: a
+# debug build otherwise spends ~270 ms per cover resize and risks audio
+# underruns on 24/96 FLAC. Optimising just these keeps our own code debuggable.
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+[profile.dev.package.rodio]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

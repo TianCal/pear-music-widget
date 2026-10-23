@@ -947,6 +947,13 @@ body.skin-stack .lyric {
   background: var(--hover);
 }
 
+/* Delete turns red only on hover — it is a dialog away from doing anything,
+   so it does not need to shout at rest. No extra spacing: the titles' gutter
+   is counted in whole button steps. */
+.corner.trash:hover {
+  color: #e5484d;
+}
+
 /* Repeat is deliberately never lit — no accent, no disc. Both of those say
    "this surface is open", which is true of the three panel toggles and never of
    this one, and the button only ever sits in one of two modes anyway: the glyph

@@ -497,6 +497,7 @@ fn corner_submenu(
         ("lyrics", "Lyrics", corners.lyrics),
         ("search", "Search", corners.search),
         ("repeat", "Repeat", corners.repeat),
+        ("trash", "Delete (local files)", corners.trash),
     ]
     .iter()
     .map(|(key, text, on)| {
@@ -552,6 +553,132 @@ fn corner_submenu(
 
 // -------------------------------------------------------------------- menus
 
+/// YouTube Music or a folder on disk. The folder entry names the folder last
+/// used so switching back is one click.
+fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
+    let core = app.state::<Arc<Core>>();
+    let local = core.is_local();
+    let folder = stored_folder(app);
+    let folder_label = folder
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|name| format!("Folder: {}", name.to_string_lossy()))
+        .unwrap_or_else(|| "Folder".into());
+    Submenu::with_items(
+        app,
+        "Source",
+        true,
+        &[
+            &CheckMenuItem::with_id(app, "source:youtube", "YouTube Music", true, !local, None::<&str>)?,
+            &CheckMenuItem::with_id(
+                app,
+                "source:folder",
+                folder_label,
+                folder.is_some(),
+                local,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "source:choose", "Choose Folder…", true, None::<&str>)?,
+        ],
+    )
+}
+
+fn stored_folder(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.state::<Arc<Store>>().get(|s| {
+        s.extra
+            .get("localFolder")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+    })
+}
+
+/// Display names for artist credits. The first item renames whoever is
+/// playing; below it every saved name, each opening the same prompt to edit or
+/// (left empty) remove it.
+fn artist_names_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
+    let core = app.state::<Arc<Core>>();
+    let raw = core
+        .snapshot()
+        .song
+        .map(|song| song.raw_artist)
+        .filter(|raw| !raw.trim().is_empty());
+    let rename_label = raw
+        .as_ref()
+        .map(|raw| format!("Rename “{}”…", ellipsize(raw, 28)))
+        .unwrap_or_else(|| "Rename Artist…".into());
+    let rename = MenuItem::with_id(app, "artistRename", rename_label, raw.is_some(), None::<&str>)?;
+
+    let names = core.store.get(|s| s.artist_names.clone());
+    let saved: Vec<MenuItem<tauri::Wry>> = names
+        .iter()
+        .map(|(from, to)| {
+            MenuItem::with_id(
+                app,
+                format!("artistName:{from}"),
+                format!("{from} → {to}"),
+                true,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<_>>()?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&rename];
+    if !saved.is_empty() {
+        refs.push(&separator);
+        refs.extend(saved.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>));
+    }
+    Submenu::with_items(app, "Artist Names", true, &refs)
+}
+
+/// Prompt for the name `from` should be shown as, then save and re-label.
+fn prompt_artist_name(app: &AppHandle, from: String) {
+    let core = app.state::<Arc<Core>>().inner().clone();
+    let current = core
+        .store
+        .get(|s| s.artist_names.get(&from).cloned())
+        .unwrap_or_else(|| from.clone());
+    crate::macos::prompt_text(
+        app,
+        format!("Show “{from}” as"),
+        "Used for display, lyrics and cover lookups, for YouTube Music and local files. Leave empty to remove.".into(),
+        current,
+        move |to| {
+            core.store.update(|s| {
+                if to.is_empty() || to == from {
+                    s.artist_names.remove(&from);
+                } else {
+                    s.artist_names.insert(from.clone(), to.clone());
+                }
+            });
+            core.remap_artists();
+        },
+    );
+}
+
+/// `choose folder` through osascript: the accessory app has no menu bar of its
+/// own to hang an NSOpenPanel on, and this keeps AppKit work off our thread.
+fn choose_folder() -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            r#"POSIX path of (choose folder with prompt "Choose a music folder")"#,
+        ])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !path.is_empty()).then(|| path.into())
+}
+
+fn open_folder(app: &AppHandle, folder: std::path::PathBuf) {
+    let core = app.state::<Arc<Core>>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = crate::local::Local::open(&core, folder).await {
+            eprintln!("local: {err}");
+        }
+    });
+}
+
 /// The menu-bar settings menu. Built fresh every time, so it can never show a
 /// stale checkbox.
 pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -598,6 +725,8 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 false,
                 None::<&str>,
             )?,
+            &source_submenu(app)?,
+            &artist_names_submenu(app)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(
                 app,
@@ -860,10 +989,35 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         }
         "lyricsCacheClear" => crate::lyrics_cache::clear(),
         "reconnect" => crate::ws::retry(app),
+        "artistRename" => {
+            let raw = app.state::<Arc<Core>>().snapshot().song.map(|song| song.raw_artist);
+            if let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) {
+                prompt_artist_name(app, raw);
+            }
+        }
+        "source:youtube" => {
+            // `close` waits out a load in progress; not on the menu's thread.
+            let core = app.state::<Arc<Core>>().inner().clone();
+            tauri::async_runtime::spawn_blocking(move || crate::local::Local::close(&core));
+        }
+        "source:folder" => match stored_folder(app) {
+            Some(folder) if !app.state::<Arc<Core>>().is_local() => open_folder(app, folder),
+            _ => refresh(app),
+        },
+        "source:choose" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(folder) = choose_folder() {
+                    open_folder(&handle, folder);
+                }
+            });
+        }
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
-            if let Some(rest) = other.strip_prefix("corner:") {
+            if let Some(from) = other.strip_prefix("artistName:") {
+                prompt_artist_name(app, from.to_string());
+            } else if let Some(rest) = other.strip_prefix("corner:") {
                 // `corner:<skin>:<button>`. The skin is in the id because the
                 // set is per skin and each menu edits the skin of the surface it
                 // belongs to — without it the dropdown's menu would toggle the
@@ -880,6 +1034,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                             "lyrics" => corners.lyrics = !corners.lyrics,
                             "search" => corners.search = !corners.search,
                             "repeat" => corners.repeat = !corners.repeat,
+                            "trash" => corners.trash = !corners.trash,
                             _ => {}
                         }
                         store.set_corners_for(skin, corners);

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::api::{Api, ErrorCode, COVER_PX};
 use crate::jyutping::Jyutping;
@@ -40,7 +40,12 @@ use crate::store::{SkinCorners, Store};
 pub struct Song {
     pub video_id: String,
     pub title: String,
+    /// The credit as shown — `artistNames` applied. Lyrics look this up.
     pub artist: String,
+    /// The credit as the source gave it, for the rename menu and for
+    /// re-applying `artistNames` after it changes.
+    #[serde(skip)]
+    pub raw_artist: String,
     pub album: String,
     pub song_duration: f64,
     pub image_src: Option<String>,
@@ -76,6 +81,7 @@ impl Song {
             video_id: video_id.to_string(),
             title: text("title", "Unknown title"),
             artist: text("artist", ""),
+            raw_artist: text("artist", ""),
             album: text("album", ""),
             song_duration: raw
                 .get("songDuration")
@@ -439,6 +445,85 @@ impl Core {
         self.player.lock().expect("player lock").status.clone()
     }
 
+    // ----------------------------------------------------------- local source
+
+    pub fn local(&self) -> Arc<crate::local::Local> {
+        self.app.state::<Arc<crate::local::Local>>().inner().clone()
+    }
+
+    /// While a folder is playing, YouTube Music's socket and pollers are
+    /// ignored rather than torn down, so going back is just a reconnect.
+    pub fn is_local(&self) -> bool {
+        self.app
+            .try_state::<Arc<crate::local::Local>>()
+            .is_some_and(|local| local.is_active())
+    }
+
+    /// The local counterpart of `apply_song`: the artwork is already in hand
+    /// and there is no like state to ask for.
+    pub fn show_local(self: &Arc<Self>, song: Song, cover: Option<Arc<str>>, playing: bool) {
+        self.cover_token.fetch_add(1, Ordering::SeqCst);
+        self.update(|state| {
+            state.song = Some(song);
+            state.position = 0.0;
+            state.like = None;
+            state.is_playing = playing;
+        });
+        self.set_cover(cover);
+        self.publish_local_queue();
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn(async move { core.refresh_lyrics().await });
+        crate::tray::refresh(&self.app);
+    }
+
+    pub fn publish_local_queue(&self) {
+        if self.queue_wanted() {
+            let names = self.store.get(|s| s.artist_names.clone());
+            self.set_queue(self.local().queue_view(&names));
+        }
+    }
+
+    /// `artistNames` changed: re-label the song, the queue and retry the
+    /// lyrics (and, for a file, the cover) a miss under the old name left out.
+    pub fn remap_artists(self: &Arc<Self>) {
+        let names = self.store.get(|s| s.artist_names.clone());
+        let mut renamed = None;
+        self.update(|state| {
+            if let Some(song) = state.song.as_mut() {
+                let artist = crate::store::map_artist(&names, &song.raw_artist);
+                if artist != song.artist {
+                    song.artist = artist;
+                    renamed = Some(song.video_id.clone());
+                }
+            }
+        });
+        if self.is_local() {
+            self.local().renamed(self);
+        }
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            core.refresh_queue().await;
+            if let Some(id) = renamed {
+                lyrics::forget_miss(&id);
+                core.refresh_lyrics().await;
+            }
+        });
+        crate::tray::refresh(&self.app);
+    }
+
+    /// Drop everything the folder put on screen before the socket reconnects.
+    pub fn leave_local(self: &Arc<Self>) {
+        self.update(|state| {
+            state.status = "connecting".into();
+            state.song = None;
+            state.is_playing = false;
+            state.position = 0.0;
+        });
+        self.set_cover(None);
+        self.set_queue(QueueView::empty());
+        self.set_lyrics(LyricsView::idle());
+    }
+
     /// Apply a patch and push to the renderers only when something actually
     /// changed. Both windows get the same snapshot.
     pub fn update(&self, patch: impl FnOnce(&mut PlayerState)) {
@@ -460,12 +545,24 @@ impl Core {
         let _ = self.app.emit("state", &next);
     }
 
+    /// `update` for writes that come from YouTube Music. Dropped once a folder
+    /// is the source — checked inside the player lock, and `Local::open` flips
+    /// the source inside the same lock, so a reply that was already in flight
+    /// when the folder took over can never land on the folder's track.
+    pub fn update_remote(&self, patch: impl FnOnce(&mut PlayerState)) {
+        self.update(|state| {
+            if !self.is_local() {
+                patch(state);
+            }
+        });
+    }
+
     // ------------------------------------------------------- heavy channels
 
     /// Each of these pushes only on a real change, and drops its lock before
     /// emitting: `emit` formats the payload once per webview, which is not work
     /// to be holding a lock the position tick wants through.
-    fn set_cover(&self, cover: Option<Arc<str>>) {
+    pub(crate) fn set_cover(&self, cover: Option<Arc<str>>) {
         {
             let mut held = self.cover.lock().expect("cover lock");
             if *held == cover {
@@ -476,7 +573,7 @@ impl Core {
         let _ = self.app.emit("cover", &cover);
     }
 
-    fn set_queue(&self, view: QueueView) {
+    pub(crate) fn set_queue(&self, view: QueueView) {
         {
             let mut held = self.queue.lock().expect("queue lock");
             if *held == view {
@@ -545,18 +642,26 @@ impl Core {
 
     /// Swap in a new song, then resolve its artwork and like state out of band.
     pub async fn apply_song(self: &Arc<Self>, raw: Option<&Value>) {
-        let song = Song::from_value(raw);
+        // Callers awaited the player to get here; a folder may have taken over
+        // meanwhile, and a stale YouTube track must not replace its track.
+        if self.is_local() {
+            return;
+        }
+        let song = Song::from_value(raw).map(|mut song| {
+            song.artist = self.store.get(|s| s.artist_name(&song.raw_artist));
+            song
+        });
         let current = self.player.lock().expect("player lock").song.clone();
 
         if song.as_ref().map(|s| &s.video_id) == current.as_ref().map(|s| &s.video_id) {
             // Same track: metadata may still have been enriched (album, duration).
             if let Some(song) = song {
-                self.update(|state| state.song = Some(song));
+                self.update_remote(|state| state.song = Some(song));
             }
             return;
         }
 
-        self.update(|state| {
+        self.update_remote(|state| {
             state.song = song.clone();
             state.position = 0.0;
             state.like = None;
@@ -581,7 +686,7 @@ impl Core {
                 .map(str::to_string)
         });
         self.set_cover(cover);
-        self.update(|state| state.like = like);
+        self.update_remote(|state| state.like = like);
 
         let core = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
@@ -625,18 +730,39 @@ impl Core {
             self.set_queue(QueueView::empty());
             return;
         }
+        if self.is_local() {
+            self.publish_local_queue();
+            return;
+        }
 
         let token = self.queue_token.fetch_add(1, Ordering::SeqCst) + 1;
         let Ok(Some(queue)) = self.api.queue().await else {
             return;
         };
+        if self.is_local() {
+            return;
+        }
         // One await inside the guarded region, so one check: if a newer refresh
         // started while this response was in flight, its result is the truth.
         if token != self.queue_token.load(Ordering::SeqCst) {
             return;
         }
 
-        self.set_queue(search::parse_queue(Some(&queue), QUEUE_MAX));
+        let mut view = search::parse_queue(Some(&queue), QUEUE_MAX);
+        let names = self.store.get(|s| s.artist_names.clone());
+        if !names.is_empty() {
+            let items: Vec<_> = view
+                .items
+                .iter()
+                .cloned()
+                .map(|mut track| {
+                    track.artist = crate::store::map_artist(&names, &track.artist);
+                    track
+                })
+                .collect();
+            view.items = Arc::from(items);
+        }
+        self.set_queue(view);
     }
 
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
@@ -707,12 +833,19 @@ impl Core {
     /// asked for once per connection or the loop would sit unlit until someone
     /// pressed it.
     pub async fn refresh_all(self: &Arc<Self>) {
+        if self.is_local() {
+            return;
+        }
         let (song, shuffle, volume, repeat) = tokio::join!(
             self.api.song(),
             self.api.shuffle_state(),
             self.api.volume_state(),
             self.api.repeat_mode()
         );
+        // The same race as `apply_song`: a folder opened while these were out.
+        if self.is_local() {
+            return;
+        }
 
         let song = song.ok().flatten();
         if let Some(song) = &song {
@@ -754,7 +887,7 @@ impl Core {
                 .or_else(|| reported.map(|value| calibration.reported_to_slider(value)))
         };
 
-        self.update(|state| {
+        self.update_remote(|state| {
             if let Some(shuffle) = shuffle {
                 state.shuffle = shuffle;
             }
@@ -781,7 +914,10 @@ impl Core {
     // -------------------------------------------------------------- realtime
 
     pub fn set_status(self: &Arc<Self>, status: &str, message: &str) {
-        self.update(|state| {
+        if self.is_local() {
+            return;
+        }
+        self.update_remote(|state| {
             state.status = status.to_string();
             state.status_message = message.to_string();
         });
@@ -791,7 +927,7 @@ impl Core {
             tauri::async_runtime::spawn(async move { core.refresh_all().await });
         } else if status != "connecting" {
             // Drop the queue too: it belongs to a player we can no longer see.
-            self.update(|state| state.is_playing = false);
+            self.update_remote(|state| state.is_playing = false);
             self.set_queue(QueueView::empty());
         }
 
@@ -799,6 +935,9 @@ impl Core {
     }
 
     pub async fn handle_message(self: &Arc<Self>, msg: &Value) {
+        if self.is_local() {
+            return;
+        }
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or_default();
         let number = |key: &str| msg.get(key).and_then(Value::as_f64);
         let flag = |key: &str| msg.get(key).and_then(Value::as_bool).unwrap_or(false);
@@ -807,7 +946,7 @@ impl Core {
             "PLAYER_INFO" => {
                 self.apply_song(msg.get("song")).await;
                 let volume = number("volume");
-                self.update(|state| {
+                self.update_remote(|state| {
                     state.is_playing = flag("isPlaying");
                     state.apply_position(number("position").unwrap_or(0.0));
                     if let Some(volume) = volume {
@@ -825,7 +964,7 @@ impl Core {
                     .get("song")
                     .and_then(|song| song.get("isPaused"))
                     .and_then(Value::as_bool);
-                self.update(|state| {
+                self.update_remote(|state| {
                     state.apply_position(number("position").unwrap_or(0.0));
                     if let Some(paused) = paused {
                         state.is_playing = !paused;
@@ -834,7 +973,7 @@ impl Core {
             }
             "PLAYER_STATE_CHANGED" => {
                 let position = number("position");
-                self.update(|state| {
+                self.update_remote(|state| {
                     state.is_playing = flag("isPlaying");
                     if let Some(position) = position {
                         state.apply_position(position);
@@ -843,7 +982,7 @@ impl Core {
             }
             "POSITION_CHANGED" => {
                 let position = number("position").unwrap_or(0.0);
-                self.update(|state| state.apply_position(position));
+                self.update_remote(|state| state.apply_position(position));
             }
             "VOLUME_CHANGED" => {
                 let reported = number("volume");
@@ -871,7 +1010,7 @@ impl Core {
                         .or_else(|| reported.map(|value| calibration.reported_to_slider(value)))
                 };
 
-                self.update(|state| {
+                self.update_remote(|state| {
                     if let Some(level) = level {
                         state.volume = level;
                     }
@@ -880,7 +1019,7 @@ impl Core {
             }
             "SHUFFLE_CHANGED" => {
                 let shuffle = flag("shuffle");
-                self.update(|state| state.shuffle = shuffle);
+                self.update_remote(|state| state.shuffle = shuffle);
             }
             // Fires for a press inside YouTube Music as well as for our own, so
             // this is what keeps the loop honest when the mode is changed
@@ -891,7 +1030,7 @@ impl Core {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 if repeat.is_some() {
-                    self.update(|state| state.repeat = repeat.clone());
+                    self.update_remote(|state| state.repeat = repeat.clone());
                 }
             }
             _ => {}

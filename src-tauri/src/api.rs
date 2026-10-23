@@ -145,14 +145,14 @@ fn at_most(src: &str, max: u32) -> Cow<'_, str> {
 ///
 /// Held as `Arc<str>`: the same string is handed to the state, to the event
 /// payload and back to the next cache hit, and none of them needs its own copy.
-struct ImageCache {
+pub(crate) struct ImageCache {
     order: VecDeque<String>,
     entries: HashMap<String, Arc<str>>,
     bytes: usize,
 }
 
 impl ImageCache {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             order: VecDeque::new(),
             entries: HashMap::new(),
@@ -165,7 +165,7 @@ impl ImageCache {
     /// were the playing cover and four upcoming rows; scrolling a queue is not
     /// — it walks past far more artwork than the cache holds, and without this
     /// the rows you are about to scroll back to are the first ones dropped.
-    fn get(&mut self, key: &str) -> Option<Arc<str>> {
+    pub(crate) fn get(&mut self, key: &str) -> Option<Arc<str>> {
         let hit = self.entries.get(key).cloned()?;
         if let Some(at) = self.order.iter().position(|held| held == key) {
             self.order.remove(at);
@@ -174,7 +174,7 @@ impl ImageCache {
         Some(hit)
     }
 
-    fn insert(&mut self, key: String, value: Arc<str>) {
+    pub(crate) fn insert(&mut self, key: String, value: Arc<str>) {
         self.bytes += key.len() + value.len();
         if let Some(replaced) = self.entries.insert(key.clone(), value) {
             self.bytes -= key.len() + replaced.len();

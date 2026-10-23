@@ -55,6 +55,9 @@ window.widget = {
   // Artwork for the queue rows a surface is showing. A command rather than an
   // event: a reply is formatted once, an event once per webview.
   queueArt: (ids, size) => invoke('queue_art', { ids, size }),
+  // Ids-free nudge that covers which missed a `queueArt` reply are now cached:
+  // ask again for whatever is on screen without art.
+  onQueueArtReady: (handler) => on('queue-art-ready', handler),
   setPanel: (which) => invoke('set_panel', { which }),
   contextMenu: () => invoke('context_menu'),
   hideWidget: () => invoke('hide_widget'),

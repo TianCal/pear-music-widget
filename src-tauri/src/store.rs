@@ -36,6 +36,8 @@ pub struct CornerButtons {
     pub lyrics: bool,
     pub search: bool,
     pub repeat: bool,
+    /// Move the playing file to the Trash. Drawn only for a local track.
+    pub trash: bool,
 }
 
 impl Default for CornerButtons {
@@ -45,6 +47,7 @@ impl Default for CornerButtons {
             lyrics: true,
             search: true,
             repeat: true,
+            trash: true,
         }
     }
 }
@@ -180,6 +183,11 @@ pub struct Settings {
     /// skin they sit right on top of the title.
     #[serde(rename = "cornersAutohide", default)]
     pub corners_autohide: f64,
+    /// Display names for artist credits, applied to YouTube Music and local
+    /// files alike: `{"Jaychou": "周杰伦"}`. Lyrics and cover lookups use the
+    /// mapped name, which is the point — providers match on the credited name.
+    #[serde(rename = "artistNames", default)]
+    pub artist_names: BTreeMap<String, String>,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -187,6 +195,13 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// The credit as it should be shown. The whole string is tried first, so a
+    /// mapping can name a collaboration; then each credit separately, keeping
+    /// the separators the source used.
+    pub fn artist_name(&self, artist: &str) -> String {
+        map_artist(&self.artist_names, artist)
+    }
+
     pub fn lyrics_offset_for(&self, video_id: Option<&str>) -> f64 {
         let offset = video_id
             .and_then(|id| self.lyrics_offsets_by_video.get(id))
@@ -224,9 +239,42 @@ impl Default for Settings {
             dropdown_panel: None,
             corners: SkinCorners::new(),
             corners_autohide: 0.0,
+            artist_names: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
     }
+}
+
+/// Credit separators YouTube Music and common tag writers use.
+static ARTIST_SEPARATORS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\s*(?:,|，|&|、|/|;|\bfeat\.?|\bft\.)\s*").expect("separator regex")
+});
+
+pub fn map_artist(names: &BTreeMap<String, String>, artist: &str) -> String {
+    let lookup = |credit: &str| {
+        let credit = credit.trim();
+        names
+            .iter()
+            .find(|(from, _)| from.trim().eq_ignore_ascii_case(credit))
+            .map(|(_, to)| to.clone())
+    };
+    if names.is_empty() || artist.trim().is_empty() {
+        return artist.to_string();
+    }
+    if let Some(whole) = lookup(artist) {
+        return whole;
+    }
+    let mut out = String::new();
+    let mut last = 0;
+    for sep in ARTIST_SEPARATORS.find_iter(artist) {
+        let credit = &artist[last..sep.start()];
+        out.push_str(&lookup(credit).unwrap_or_else(|| credit.to_string()));
+        out.push_str(sep.as_str());
+        last = sep.end();
+    }
+    let credit = &artist[last..];
+    out.push_str(&lookup(credit).unwrap_or_else(|| credit.to_string()));
+    out
 }
 
 pub struct Store {
@@ -370,4 +418,20 @@ mod tests {
         assert!(encoded.contains("\"jyutpingLyrics\":true"));
         assert!(encoded.contains("\"futureOption\":7"));
     }
+
+    #[test]
+    fn artist_names_map_whole_credits_and_parts() {
+        let names = BTreeMap::from([
+            ("Jaychou".to_string(), "周杰伦".to_string()),
+            ("JJ Lin".to_string(), "林俊杰".to_string()),
+        ]);
+        assert_eq!(map_artist(&names, "Jaychou"), "周杰伦");
+        assert_eq!(map_artist(&names, "jaychou"), "周杰伦");
+        assert_eq!(map_artist(&names, "JJ Lin, A-Mei"), "林俊杰, A-Mei");
+        assert_eq!(map_artist(&names, "Jaychou & JJ Lin"), "周杰伦 & 林俊杰");
+        // Substrings are not credits.
+        assert_eq!(map_artist(&names, "Jaychoux"), "Jaychoux");
+        assert_eq!(map_artist(&BTreeMap::new(), "Jaychou"), "Jaychou");
+    }
+
 }
