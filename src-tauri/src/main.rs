@@ -7,6 +7,7 @@ mod artwork;
 mod commands;
 mod doctor;
 mod jyutping;
+mod likes;
 mod local;
 mod lyrics;
 mod lyrics_cache;
@@ -69,6 +70,10 @@ pub fn resync(app: &AppHandle) {
 /// Quit for real. Windows hide rather than close, so something has to say when
 /// "hide" stops being the right answer.
 pub fn quit(app: &AppHandle) {
+    // Where the folder was left, so the next launch picks it back up.
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        core.local().remember(&core);
+    }
     if let Some(state) = app.try_state::<Arc<WindowState>>() {
         state.begin_quit();
     }
@@ -275,6 +280,10 @@ fn main() {
 
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } = event {
+            // Cmd-Q and logout come this way rather than through `quit`.
+            if let Some(core) = app.try_state::<Arc<Core>>() {
+                core.local().remember(&core);
+            }
             if let Some(state) = app.try_state::<Arc<WindowState>>() {
                 state.begin_quit();
             }

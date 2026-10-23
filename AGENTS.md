@@ -30,6 +30,7 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/lyrics_cache.rs` | Memory and disk lyrics cache |
 | `src-tauri/src/local.rs` | Local-folder scanning and playback |
 | `src-tauri/src/artwork.rs` | Online covers for local files, disk cache |
+| `src-tauri/src/likes.rs` | Local like/dislike, stored on the drive |
 | `src-tauri/src/store.rs` | `settings.json` |
 | `src/bridge.js` | `window.widget` IPC wrapper and dragging |
 | `src/app.js` | Rendering and interaction |
@@ -233,7 +234,24 @@ and the pollers stand down rather than closing the socket; leaving calls
 `Local::open` sets `active` inside that same lock. Checking only before an
 `.await` is not enough, because a reply already in flight lands after the
 folder took over. `commands.rs` routes every renderer command to
-the folder player first. Settings keep `source` and `localFolder` in `extra`.
+the folder player first.
+
+Settings keep `source` (`"local"` or YouTube), `localFolder` (the current
+folder) and `localFolders` (up to eight, most recent first, each with a resume
+track relative to the folder and a position). `saved_folders()` folds in an old
+lone `localFolder`. The Source submenu in the tray, dropdown and widget menus
+offers YouTube Music and Local Music, then a Recent Folders section. Local
+Music opens the last folder whose drive is mounted. A folder whose drive is not
+mounted stays listed but disabled. Menu IDs are `source:youtube`,
+`source:local`, `source:folder:<path>`, `source:forget:<path>` and
+`source:choose`. `Local::open` scans off-thread, then `swap_in` replaces the
+session under `loading`, remembering where the old folder was and resuming the
+new one paused. The resume point is saved on every track change, on pause, when
+switching away, and on quit (`quit` and `RunEvent::ExitRequested`), but only
+for a track that actually started and while the drive is mounted. A failed
+load must not overwrite the real place. The menus read mount state from
+`Local::folder_present`, which the ticker refreshes; never `stat` saved paths
+on the main thread. `rate` holds `loading`.
 
 Audio is decoded in Rust (rodio/symphonia). **Never call `Sink::clear` or
 `Sink::try_seek`**: both wait for the audio callback, which a stream on a
@@ -291,6 +309,23 @@ skipped past stop instead of queueing ahead of the current one. `queue_art`
 emits `queue-art-ready` when lookups that missed its reply have landed.
 Sized `data:` URLs share one byte-capped `ImageCache`, keyed by artwork key, so
 an album is resized once. Search rows use the cache only, never the network.
+
+Likes for local files live on the drive at `<root>/.pear-music/likes.json`, so
+they travel with the library. If the drive refuses a write they go to
+`~/Library/Application Support/pear-music-widget/likes/<folder key>.json`.
+**Always read both and merge by entry `at`, newest wins**; clearing a rating
+writes a dated tombstone so the merge cannot bring it back. Every save tries
+the drive first and retires the fallback once the drive accepts a write. A
+drive file that exists but will not parse is never overwritten. Writes are
+temp file + `sync_all` + rename, and happen outside the session lock
+(`Likes::set` returns a `Save`). Entries are keyed by relative path,
+with a size/duration/title/artist fingerprint that re-links a renamed or moved
+file. States reuse YouTube Music's `LIKE`/`DISLIKE`/`INDIFFERENT`, so the
+heart, its right-click and the menus work unchanged. Pressing the current state
+clears it. Advancing skips disliked tracks, but picking one from the queue still
+plays it. Disliking the playing track moves on. Queue rows carry `rating` (local
+only) so disliked rows render dimmed; keep `rating` in the renderers' identity
+strings or a change will not redraw.
 
 Delete is a local-only corner button (`CORNERS` entries marked `local`). It asks
 through a native `NSAlert` and moves the file and its `._` shadow to the Trash
@@ -357,7 +392,10 @@ for palette interpolation. `PMW_THEME=dark|light` pins appearance for testing.
 
 Settings live at
 `~/Library/Application Support/pear-music-widget/settings.json`, preserving the
-legacy Electron path and unknown keys.
+legacy Electron path and unknown keys. `Store::write` serialises the latest
+settings under its write lock, skips unchanged text, and writes via temp file,
+`sync_all` and rename: a truncated file would load as defaults and lose the
+token, sizes and saved folders.
 
 `corners` is keyed by skin. `corners_from_file` must continue accepting the old
 flat shape; a parse failure falls back to defaults and would also lose position,

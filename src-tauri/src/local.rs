@@ -36,6 +36,7 @@ use rodio::{DeviceTrait, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::api::ImageCache;
+use crate::likes::{Likes, Rating};
 use crate::search::{QueueTrack, QueueView, SearchResult};
 use crate::state::{Core, Song};
 
@@ -69,6 +70,9 @@ pub struct Track {
     /// Embedded picture or sidecar image found at scan time. Without one the
     /// file is never reopened for art — `artwork::find` is asked instead.
     pub has_art: bool,
+    /// Bytes on disk, from the listing. Part of the likes fingerprint.
+    #[serde(default)]
+    pub size: u64,
 }
 
 impl Track {
@@ -92,6 +96,8 @@ struct Session {
     /// is gone" and stop instead of walking the whole order.
     root: PathBuf,
     tracks: Vec<Track>,
+    /// Likes and dislikes, stored on the drive — see `likes.rs`.
+    likes: Likes,
     /// Play order as indexes into `tracks`; shuffled in place.
     order: Vec<usize>,
     /// Position in `order` of the current track.
@@ -112,6 +118,14 @@ struct Session {
 impl Session {
     fn current(&self) -> Option<&Track> {
         self.order.get(self.cursor).map(|&i| &self.tracks[i])
+    }
+
+    fn relative(&self, track: &Track) -> Option<String> {
+        track
+            .path
+            .strip_prefix(&self.root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().into_owned())
     }
 }
 
@@ -199,6 +213,9 @@ pub struct Local {
     /// see the gap between one sink and the next and advance a second time.
     loading: Mutex<()>,
     ticks: AtomicU64,
+    /// Whether each saved folder is mounted, refreshed by the ticker so the
+    /// menus never stat a possibly dead mount on the main thread.
+    present: Mutex<HashMap<String, bool>>,
     /// Sized, encoded artwork: `file:<path>@<px>` for a file's own art,
     /// `<artwork key>@<px>` for an online cover.
     images: Mutex<ImageCache>,
@@ -213,6 +230,7 @@ impl Local {
             playing: Mutex::new(None),
             loading: Mutex::new(()),
             ticks: AtomicU64::new(0),
+            present: Mutex::new(HashMap::new()),
             images: Mutex::new(ImageCache::new()),
         }
     }
@@ -291,24 +309,67 @@ impl Local {
 
     // ------------------------------------------------------------ lifecycle
 
-    /// Scan `folder` and take over playback, paused on the first track.
+    /// Scan `folder` and make it the source — from YouTube Music or from
+    /// another folder — paused where it was last left. Nothing starts playing.
     pub async fn open(core: &Arc<Core>, folder: PathBuf) -> Result<usize, String> {
         let scan_root = folder.clone();
-        let tracks = tauri::async_runtime::spawn_blocking(move || scan(&scan_root))
-            .await
-            .map_err(|err| err.to_string())?;
+        let (tracks, likes) = tauri::async_runtime::spawn_blocking(move || {
+            let tracks = scan(&scan_root);
+            let likes = Likes::load(&scan_root, &tracks);
+            (tracks, likes)
+        })
+        .await
+        .map_err(|err| err.to_string())?;
         if tracks.is_empty() {
             return Err(format!("No audio files in {}", folder.display()));
         }
         let count = tracks.len();
 
+        // Quiet the streaming player before ours takes over; two at once is
+        // never what anyone wants.
         let local = core.local();
+        if !local.is_active() && core.status() == "connected" && core.snapshot().is_playing {
+            let _ = core.api.toggle_play().await;
+        }
+
+        let (handle, swapper) = (Arc::clone(core), Arc::clone(&local));
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            swapper.swap_in(&handle, folder, tracks, likes)
+        })
+        .await;
+        crate::tray::refresh(&core.app);
+        Ok(count)
+    }
+
+    /// Replace whatever is playing with `folder`, under `loading` so neither
+    /// the ticker nor a command can land between the old session and the new.
+    fn swap_in(&self, core: &Arc<Core>, folder: PathBuf, tracks: Vec<Track>, likes: Likes) {
+        let _loading = self.loading.lock().expect("loading lock");
+        if self.is_active() {
+            self.remember(core);
+            self.stop();
+        }
+
+        let path = folder.to_string_lossy().into_owned();
+        let resume = core
+            .store
+            .get(|s| s.saved_folders().into_iter().find(|f| f.path == path));
+        let resumed = resume.as_ref().and_then(|saved| {
+            let track = saved.track.as_ref()?;
+            let at = tracks
+                .iter()
+                .position(|t| t.path.strip_prefix(&folder).is_ok_and(|rel| rel == Path::new(track)))?;
+            Some((at, saved.position))
+        });
+        let (cursor, position) = resumed.unwrap_or((0, 0.0));
+
         let volume = core.snapshot().volume;
-        *local.session.lock().expect("local lock") = Some(Session {
-            root: folder.clone(),
+        *self.session.lock().expect("local lock") = Some(Session {
+            root: folder,
             order: (0..tracks.len()).collect(),
             tracks,
-            cursor: 0,
+            likes,
+            cursor,
             playing: false,
             shuffle: false,
             repeat: "ALL".into(),
@@ -317,22 +378,14 @@ impl Local {
             shown_second: 0,
         });
 
-        // Quiet the streaming player before ours starts; two at once is never
-        // what anyone wants.
-        if !local.is_active() && core.status() == "connected" && core.snapshot().is_playing {
-            let _ = core.api.toggle_play().await;
-        }
-
         core.store.update(|s| {
-            s.extra.insert(
-                "localFolder".into(),
-                folder.to_string_lossy().to_string().into(),
-            );
-            s.extra.insert("source".into(), "local".into());
+            s.source = Some("local".into());
+            s.local_folder = Some(path.clone());
+            s.remember_folder(&path);
         });
         // Flipped inside the player lock: see `Core::update_remote`.
         core.update(|state| {
-            local.active.store(true, Ordering::SeqCst);
+            self.active.store(true, Ordering::SeqCst);
             state.status = "connected".into();
             state.status_message = String::new();
             state.shuffle = false;
@@ -340,10 +393,36 @@ impl Local {
             state.muted = false;
             state.is_playing = false;
         });
-        let (handle, loader) = (Arc::clone(core), Arc::clone(&local));
-        let _ = tauri::async_runtime::spawn_blocking(move || loader.load(&handle, 0, false)).await;
-        crate::tray::refresh(&core.app);
-        Ok(count)
+        self.load_at_locked(core, cursor, false, position);
+    }
+
+    /// Save the current track and position against the folder, so switching
+    /// away and back — or quitting — resumes here.
+    pub fn remember(&self, core: &Arc<Core>) {
+        if !self.is_active() {
+            return;
+        }
+        let Some((root, track, present)) = self
+            .with(|s| {
+                let track = s.current()?;
+                Some((s.root.to_string_lossy().into_owned(), s.relative(track)?, s.root.is_dir()))
+            })
+            .flatten()
+        else {
+            return;
+        };
+        // An unplugged drive: whatever is "current" now is not a place anyone
+        // was listening to.
+        if !present {
+            return;
+        }
+        let position = self.position();
+        core.store.update(|s| {
+            if let Some(saved) = s.local_folders.iter_mut().find(|f| f.path == root) {
+                saved.track = Some(track.clone());
+                saved.position = position;
+            }
+        });
     }
 
     /// Hand playback back to YouTube Music. Waits out a load in progress, so
@@ -360,13 +439,12 @@ impl Local {
         if !local.is_active() {
             return;
         }
+        local.remember(core);
         local.active.store(false, Ordering::SeqCst);
         local.stop();
         *local.output.lock().expect("output lock") = None;
         *local.session.lock().expect("local lock") = None;
-        core.store.update(|s| {
-            s.extra.insert("source".into(), "youtube".into());
-        });
+        core.store.update(|s| s.source = Some("youtube".into()));
         core.leave_local();
         crate::ws::retry(&core.app);
         crate::tray::refresh(&core.app);
@@ -374,15 +452,8 @@ impl Local {
 
     /// Resume the stored folder at launch, if that is where we were left.
     pub fn restore(core: &Arc<Core>) {
-        let (source, folder) = core.store.get(|s| {
-            (
-                s.extra.get("source").and_then(|v| v.as_str()).map(str::to_string),
-                s.extra
-                    .get("localFolder")
-                    .and_then(|v| v.as_str())
-                    .map(PathBuf::from),
-            )
-        });
+        let (source, folder) =
+            core.store.get(|s| (s.source.clone(), s.local_folder.as_ref().map(PathBuf::from)));
         let Some(folder) = folder.filter(|_| source.as_deref() == Some("local")) else {
             return;
         };
@@ -403,16 +474,27 @@ impl Local {
     }
 
     fn load_locked(&self, core: &Arc<Core>, cursor: usize, play: bool) -> bool {
-        let Some((track, started)) = self.try_start(cursor, play) else {
+        self.load_at_locked(core, cursor, play, 0.0)
+    }
+
+    fn load_at_locked(&self, core: &Arc<Core>, cursor: usize, play: bool, start: f64) -> bool {
+        let Some((track, started)) = self.try_start(cursor, play, start) else {
             return false;
         };
-        self.publish(core, track, play && started);
+        self.publish(core, track, play && started, started);
+        // Where the sink really is: a resume whose seek failed starts at 0,
+        // and showing the saved time would then save the wrong place on pause.
+        let position = self.position();
+        if started && position > 0.0 {
+            self.with(|s| s.shown_second = position as u64);
+            core.update(|state| state.position = position);
+        }
         started
     }
 
     /// Point the cursor at `cursor` and start it, publishing nothing. `None`
     /// when there is no such track or the folder has been closed meanwhile.
-    fn try_start(&self, cursor: usize, play: bool) -> Option<(Track, bool)> {
+    fn try_start(&self, cursor: usize, play: bool, start: f64) -> Option<(Track, bool)> {
         let track = self
             .with(|s| {
                 s.cursor = cursor.min(s.order.len().saturating_sub(1));
@@ -420,7 +502,7 @@ impl Local {
                 s.current().cloned()
             })
             .flatten()?;
-        let started = match self.start(&track, play, 0.0) {
+        let started = match self.start(&track, play, start) {
             Ok(()) => true,
             Err(err) => {
                 eprintln!("local: cannot play {}: {err}", track.path.display());
@@ -439,16 +521,63 @@ impl Local {
     }
 
     /// Tell both surfaces, once, which track is now loaded.
-    fn publish(&self, core: &Arc<Core>, track: Track, playing: bool) {
+    /// `started` is false for a track that would not open: it is shown, but
+    /// not saved as the place to resume — that would overwrite the real one.
+    fn publish(&self, core: &Arc<Core>, track: Track, playing: bool, started: bool) {
         // Only what is already sized in memory: no image decode on the path
         // that starts the audio.
         let cover = self.cover_now(core, &track, crate::api::COVER_PX);
         let missing = cover.is_none();
-        core.show_local(track.song(&names(core)), cover, playing);
+        let like = self.rating_of(&track.id).map_or("INDIFFERENT", Rating::as_str);
+        core.show_local(track.song(&names(core)), cover, playing, like);
         if missing {
             self.fetch_cover(core, track);
         }
         self.warm_next(core);
+        if started {
+            self.remember(core);
+        }
+    }
+
+    fn rating_of(&self, id: &str) -> Option<Rating> {
+        self.with(|s| s.likes.get(id)).flatten()
+    }
+
+    /// The heart and its right-click: pressing the state you are in clears it,
+    /// as YouTube Music's buttons do. Disliking the track that is playing moves
+    /// on, since a disliked track is one you have said you do not want to hear.
+    ///
+    /// Under `loading`, so the track rated is the one on screen — not the next
+    /// one a load in progress has already moved the cursor to.
+    pub fn rate(&self, core: &Arc<Core>, rating: Rating) {
+        let _loading = self.loading.lock().expect("loading lock");
+        let Some((current, now, save, cursor)) = self
+            .with(|s| {
+                let track = s.current()?.clone();
+                let now = s.likes.get(&track.id);
+                let next = if now == Some(rating) { None } else { Some(rating) };
+                let save = s.likes.set(&track, next);
+                Some((track, next, save, s.cursor))
+            })
+            .flatten()
+        else {
+            return;
+        };
+        if let Some(save) = save {
+            save.write();
+        }
+        let like = now.map_or("INDIFFERENT", Rating::as_str);
+        core.update(|state| {
+            if state.song.as_ref().is_some_and(|song| song.video_id == current.id) {
+                state.like = Some(like.to_string());
+            }
+        });
+        core.publish_local_queue();
+
+        let playing = self.with(|s| s.playing).unwrap_or(false);
+        if now == Some(Rating::Dislike) && playing {
+            self.advance_locked(core, cursor, 1, true);
+        }
     }
 
     /// Step through the order from `cursor` by `step` until a track plays,
@@ -462,11 +591,19 @@ impl Local {
         let mut last = None;
         for k in 1..=len {
             let next = (cursor as isize + step * k).rem_euclid(len) as usize;
-            let Some((track, started)) = self.try_start(next, play) else {
+            // Disliked tracks are never reached by advancing; picking one from
+            // the queue still plays it.
+            let disliked = self
+                .with(|s| s.order.get(next).is_some_and(|&i| s.likes.is_disliked(&s.tracks[i].id)))
+                .unwrap_or(false);
+            if disliked {
+                continue;
+            }
+            let Some((track, started)) = self.try_start(next, play, 0.0) else {
                 return;
             };
             if started {
-                self.publish(core, track, play);
+                self.publish(core, track, play, true);
                 return;
             }
             last = Some(track);
@@ -474,8 +611,14 @@ impl Local {
                 break;
             }
         }
-        if let Some(track) = last {
-            self.publish(core, track, false);
+        match last {
+            Some(track) => self.publish(core, track, false, false),
+            // Everything else is disliked: stop rather than replay it.
+            None => {
+                self.stop();
+                self.with(|s| s.playing = false);
+                core.update(|state| state.is_playing = false);
+            }
         }
     }
 
@@ -539,7 +682,7 @@ impl Local {
         self.images.lock().expect("images lock").get(key)
     }
 
-    fn remember(&self, key: String, art: Arc<str>) {
+    fn remember_art(&self, key: String, art: Arc<str>) {
         self.images.lock().expect("images lock").insert(key, art);
     }
 
@@ -567,7 +710,7 @@ impl Local {
             return Some(hit);
         }
         let art = read_art(&track.path, size)?;
-        self.remember(key, art.clone());
+        self.remember_art(key, art.clone());
         Some(art)
     }
 
@@ -599,7 +742,7 @@ impl Local {
         .await
         .ok()
         .flatten()?;
-        self.remember(format!("{key}@{size}"), url.clone());
+        self.remember_art(format!("{key}@{size}"), url.clone());
         Some(url)
     }
 
@@ -677,6 +820,9 @@ impl Local {
             return Err("That track is no longer in the folder".into());
         };
         crate::macos::trash(&track.path)?;
+        if let Some(save) = self.with(|s| s.likes.forget(&track)).flatten() {
+            save.write();
+        }
         // The AppleDouble shadow exFAT keeps beside it is meaningless alone.
         if let (Some(dir), Some(name)) = (track.path.parent(), track.path.file_name()) {
             let shadow = dir.join(format!("._{}", name.to_string_lossy()));
@@ -713,10 +859,14 @@ impl Local {
         match next.flatten() {
             Some((_, _, _, true)) => Local::close(core),
             Some((true, cursor, playing, _)) => {
-                // The deleted file's slot now holds the track after it.
+                // The deleted file's slot now holds the track after it — unless
+                // that one is disliked, which advancing never lands on.
                 let _loading = self.loading.lock().expect("loading lock");
-                if !self.load_locked(core, cursor, playing) && playing {
-                    self.advance_locked(core, cursor, 1, true);
+                let disliked = self
+                    .with(|s| s.order.get(cursor).is_some_and(|&i| s.likes.is_disliked(&s.tracks[i].id)))
+                    .unwrap_or(false);
+                if disliked || (!self.load_locked(core, cursor, playing) && playing) {
+                    self.advance_locked(core, cursor, 1, playing);
                 }
             }
             _ => core.publish_local_queue(),
@@ -764,6 +914,9 @@ impl Local {
         }
         self.with(|s| s.playing = !playing);
         core.update(|state| state.is_playing = !playing);
+        if playing {
+            self.remember(core);
+        }
     }
 
     pub fn next(&self, core: &Arc<Core>) {
@@ -864,8 +1017,37 @@ impl Local {
 
     // ------------------------------------------------------------- realtime
 
+    /// Last known mount state of a saved folder; unknown counts as present.
+    pub fn folder_present(&self, path: &str) -> bool {
+        self.present.lock().expect("present lock").get(path).copied().unwrap_or(true)
+    }
+
+    fn refresh_present(&self, core: &Arc<Core>) {
+        let folders = core.store.get(|s| s.saved_folders());
+        let present: HashMap<String, bool> = folders
+            .into_iter()
+            .map(|f| {
+                let here = Path::new(&f.path).is_dir();
+                (f.path, here)
+            })
+            .collect();
+        let changed = {
+            let mut held = self.present.lock().expect("present lock");
+            let changed = *held != present;
+            *held = present;
+            changed
+        };
+        if changed {
+            crate::tray::refresh(&core.app);
+        }
+    }
+
     fn tick(&self, core: &Arc<Core>) {
+        if self.ticks.load(Ordering::Relaxed) % DEVICE_CHECK_TICKS == 0 {
+            self.refresh_present(core);
+        }
         if !self.is_active() {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
             return;
         }
         // A load is swapping sinks: what we would read is the gap between them.
@@ -937,6 +1119,7 @@ impl Local {
                         artist: crate::store::map_artist(names, &track.artist),
                         duration: clock(track.duration),
                         art: Some(Arc::from(track.id.as_str())),
+                        rating: s.likes.get(&track.id).map(Rating::as_str),
                     }
                 })
                 .collect(),
@@ -988,7 +1171,7 @@ impl Local {
                     }
                     let (key, bytes) = crate::artwork::cached(&wanted)?;
                     let url = crate::artwork::data_url(&crate::artwork::resize(&bytes, size)?);
-                    self.remember(format!("{key}@{size}"), url.clone());
+                    self.remember_art(format!("{key}@{size}"), url.clone());
                     Some(url)
                 });
                 SearchResult {
@@ -1071,9 +1254,15 @@ struct Indexed {
 }
 
 /// `~/Library/Caches/pear-music-widget/library/<hash of root>.json`.
+/// A stable file-name-safe name for a folder, shared by the library index and
+/// the likes fallback.
+pub fn folder_key(root: &Path) -> String {
+    id_for(root).trim_start_matches(ID_PREFIX).to_string()
+}
+
 fn index_path(root: &Path) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    let name = id_for(root).trim_start_matches(ID_PREFIX).to_string();
+    let name = folder_key(root);
     PathBuf::from(home)
         .join("Library/Caches/pear-music-widget/library")
         .join(format!("{name}.json"))
@@ -1155,6 +1344,7 @@ pub fn scan(root: &Path) -> Vec<Track> {
         .map(|entry| {
             let mut track = entry.track.clone();
             track.has_art |= track.path.parent().is_some_and(|dir| with_sidecar.contains(dir));
+            track.size = entry.size;
             track
         })
         .collect();
@@ -1236,6 +1426,7 @@ fn untagged_track(root: &Path, path: &Path) -> Track {
         album: album_from_dir(&parent),
         duration: 0.0,
         has_art: false,
+        size: 0,
     }
 }
 

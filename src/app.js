@@ -536,7 +536,7 @@ const renderUpNext = () => {
   // The queue changes about once a track. Tearing the cards down and building
   // them again — images and all — on every position tick was most of what this
   // surface cost while a track played.
-  const identity = `${current}\n${items.map((item) => item.videoId).join('\n')}`;
+  const identity = `${current}\n${items.map((item) => `${item.videoId}:${item.rating || ''}`).join('\n')}`;
   if (identity === upnextRendered) {
     paintArt();
     return;
@@ -551,6 +551,7 @@ const renderUpNext = () => {
     // strength — they are as readable as anything else in the list, and dimming
     // them made the strip look half broken.
     if (at === current) card.className += ' now';
+    if (item.rating === 'DISLIKE') card.className += ' disliked';
     card.type = 'button';
     // Both: the slot index is what a jump takes, the id is what verifies it.
     card.dataset.slot = String(item.index);
@@ -640,7 +641,7 @@ const renderQueue = () => {
   el.queueNote.textContent = note;
   el.queueNote.hidden = !note;
 
-  const identity = `${current}\n${items.map((item) => item.videoId).join('\n')}`;
+  const identity = `${current}\n${items.map((item) => `${item.videoId}:${item.rating || ''}`).join('\n')}`;
   if (identity === queueRendered) {
     paintArt();
     return;
@@ -653,6 +654,7 @@ const renderQueue = () => {
     const row = document.createElement('button');
     row.className = 'queue-item';
     if (at === current) row.className += ' now';
+    if (item.rating === 'DISLIKE') row.className += ' disliked';
     row.type = 'button';
     // Both: the slot index is what the jump takes, the id is what verifies it.
     row.dataset.slot = String(item.index);

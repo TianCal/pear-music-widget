@@ -45,6 +45,10 @@ pub struct QueueTrack {
     /// renderer asks for the rows it is actually showing. See `queue_art`.
     #[serde(skip)]
     pub art: Option<Arc<str>>,
+    /// `LIKE` / `DISLIKE` for a rated local file, so rows can show it. Absent
+    /// for YouTube Music, whose queue does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<&'static str>,
 }
 
 /// The whole queue: every slot that names a track, and which of them is playing.
@@ -283,6 +287,7 @@ fn queue_track(index: usize, renderer: Option<&Value>) -> Option<QueueTrack> {
         artist,
         duration: runs_text(renderer.get("lengthText")).trim().to_string(),
         art: queue_art_of(renderer),
+        rating: None,
     })
 }
 

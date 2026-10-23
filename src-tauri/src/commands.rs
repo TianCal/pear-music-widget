@@ -183,8 +183,8 @@ fn local_command(core: &Arc<Core>, name: &str, payload: Value) -> Value {
         "toggleMute" => local.toggle_mute(core),
         "shuffle" => local.toggle_shuffle(core),
         "repeat" => local.cycle_repeat(core),
-        // Nothing to rate a file against.
-        "like" | "dislike" => {}
+        "like" => local.rate(core, crate::likes::Rating::Like),
+        "dislike" => local.rate(core, crate::likes::Rating::Dislike),
         "trash" => confirm_trash(core),
         other => return json!({ "ok": false, "error": format!("Unknown command {other}") }),
     }

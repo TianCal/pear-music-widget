@@ -1228,6 +1228,13 @@ body.panel .close-widget {
   background: var(--hover);
 }
 
+/* A disliked local file: still in the list and still playable by picking it,
+   but advancing skips it, so it reads as set aside. */
+.queue-item.disliked,
+.upnext-item.disliked {
+  opacity: 0.45;
+}
+
 .queue-item.now {
   background: var(--hover);
 }

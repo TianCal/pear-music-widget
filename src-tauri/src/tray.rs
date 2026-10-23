@@ -553,44 +553,113 @@ fn corner_submenu(
 
 // -------------------------------------------------------------------- menus
 
-/// YouTube Music or a folder on disk. The folder entry names the folder last
-/// used so switching back is one click.
+/// How a recent folder is named in the menu: its own name and the folder or
+/// drive it sits in, so `Music — Crucial X6` reads as a place on a disk rather
+/// than as a second music service.
+fn folder_label(path: &str) -> String {
+    let path = std::path::Path::new(path);
+    let own = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    match path.parent().and_then(|p| p.file_name()) {
+        Some(parent) => format!("{own} — {}", parent.to_string_lossy()),
+        None => own,
+    }
+}
+
+/// The two sources — YouTube Music and Local Music — then the recent folders
+/// Local Music can play, Choose Folder… to add one and Remove from List to drop
+/// one. Local Music itself picks up the folder last played. A folder whose
+/// drive is not mounted stays listed, disabled, so plugging the drive back in
+/// brings it back without choosing it again. Shown in all three menus.
 fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
     let core = app.state::<Arc<Core>>();
     let local = core.is_local();
-    let folder = stored_folder(app);
-    let folder_label = folder
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|name| format!("Folder: {}", name.to_string_lossy()))
-        .unwrap_or_else(|| "Folder".into());
-    Submenu::with_items(
-        app,
-        "Source",
-        true,
-        &[
-            &CheckMenuItem::with_id(app, "source:youtube", "YouTube Music", true, !local, None::<&str>)?,
-            &CheckMenuItem::with_id(
-                app,
-                "source:folder",
-                folder_label,
-                folder.is_some(),
-                local,
-                None::<&str>,
-            )?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "source:choose", "Choose Folder…", true, None::<&str>)?,
-        ],
-    )
-}
+    let (folders, current) = core
+        .store
+        .get(|s| (s.saved_folders(), s.local_folder.clone()));
+    let paths: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
+    let local_player = core.local();
+    // What Local Music switches to: the folder last played if its drive is
+    // here, otherwise the most recent one that is.
+    let target = current
+        .iter()
+        .chain(paths.iter())
+        .find(|path| local_player.folder_present(path))
+        .cloned();
+    let local_label = match (&target, paths.is_empty()) {
+        (Some(_), _) | (None, true) => "Local Music".to_string(),
+        (None, false) => "Local Music (not connected)".to_string(),
+    };
 
-fn stored_folder(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app.state::<Arc<Store>>().get(|s| {
-        s.extra
-            .get("localFolder")
-            .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from)
-    })
+    let youtube = CheckMenuItem::with_id(app, "source:youtube", "YouTube Music", true, !local, None::<&str>)?;
+    let local_music = CheckMenuItem::with_id(
+        app,
+        "source:local",
+        local_label,
+        target.is_some() || local,
+        local,
+        None::<&str>,
+    )?;
+    let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> =
+        vec![Box::new(youtube), Box::new(local_music)];
+    let mut removable = Vec::new();
+    if !paths.is_empty() {
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "source:recentLabel",
+            "Recent Folders",
+            false,
+            None::<&str>,
+        )?));
+    }
+    for path in &paths {
+        let label = folder_label(path);
+        let label = &label;
+        let connected = local_player.folder_present(path);
+        let active = local && current.as_deref() == Some(path.as_str());
+        let text = if connected {
+            label.clone()
+        } else {
+            format!("{label} (not connected)")
+        };
+        items.push(Box::new(CheckMenuItem::with_id(
+            app,
+            format!("source:folder:{path}"),
+            text,
+            connected,
+            active,
+            None::<&str>,
+        )?));
+        if !active {
+            removable.push(MenuItem::with_id(
+                app,
+                format!("source:forget:{path}"),
+                label.as_str(),
+                true,
+                None::<&str>,
+            )?);
+        }
+    }
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    items.push(Box::new(MenuItem::with_id(
+        app,
+        "source:choose",
+        "Choose Folder…",
+        true,
+        None::<&str>,
+    )?));
+    if !removable.is_empty() {
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = removable
+            .iter()
+            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+            .collect();
+        items.push(Box::new(Submenu::with_items(app, "Remove from List", true, &refs)?));
+    }
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
+    Submenu::with_items(app, "Source", true, &refs)
 }
 
 /// Display names for artist credits. The first item renames whoever is
@@ -674,7 +743,7 @@ fn open_folder(app: &AppHandle, folder: std::path::PathBuf) {
     let core = app.state::<Arc<Core>>().inner().clone();
     tauri::async_runtime::spawn(async move {
         if let Err(err) = crate::local::Local::open(&core, folder).await {
-            eprintln!("local: {err}");
+            crate::macos::inform(&core.app, "Could not open that folder".into(), err);
         }
     });
 }
@@ -804,6 +873,8 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
+            &source_submenu(app)?,
+            &PredefinedMenuItem::separator(app)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity), store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -839,6 +910,8 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         app,
         &[
+            &source_submenu(app)?,
+            &PredefinedMenuItem::separator(app)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyrics_submenu(
                 app,
@@ -996,14 +1069,32 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             }
         }
         "source:youtube" => {
-            // `close` waits out a load in progress; not on the menu's thread.
             let core = app.state::<Arc<Core>>().inner().clone();
-            tauri::async_runtime::spawn_blocking(move || crate::local::Local::close(&core));
+            if core.is_local() {
+                // `close` waits out a load in progress; not on the menu's thread.
+                tauri::async_runtime::spawn_blocking(move || crate::local::Local::close(&core));
+            } else {
+                // Already the source; undo AppKit's toggle of the checkmark.
+                refresh(app);
+            }
         }
-        "source:folder" => match stored_folder(app) {
-            Some(folder) if !app.state::<Arc<Core>>().is_local() => open_folder(app, folder),
-            _ => refresh(app),
-        },
+
+        "source:local" => {
+            let core = app.state::<Arc<Core>>().inner().clone();
+            let local = core.local();
+            let target = store.get(|s| {
+                s.local_folder
+                    .iter()
+                    .cloned()
+                    .chain(s.saved_folders().into_iter().map(|f| f.path))
+                    .find(|path| local.folder_present(path))
+            });
+            match target {
+                Some(path) if !core.is_local() => open_folder(app, std::path::PathBuf::from(path)),
+                // Already local, or nothing to play: undo AppKit's toggle.
+                _ => refresh(app),
+            }
+        }
         "source:choose" => {
             let handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -1015,7 +1106,25 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
-            if let Some(from) = other.strip_prefix("artistName:") {
+            if let Some(path) = other.strip_prefix("source:folder:") {
+                let core = app.state::<Arc<Core>>();
+                let current = store.get(|s| s.local_folder.clone());
+                // Already the source: nothing to switch, but the menu's
+                // checkmark was just toggled by AppKit, so put it back.
+                if core.is_local() && current.as_deref() == Some(path) {
+                    refresh(app);
+                } else {
+                    open_folder(app, std::path::PathBuf::from(path));
+                }
+            } else if let Some(path) = other.strip_prefix("source:forget:") {
+                store.update(|s| {
+                    s.local_folders.retain(|f| f.path != path);
+                    if s.local_folder.as_deref() == Some(path) {
+                        s.local_folder = None;
+                    }
+                });
+                refresh(app);
+            } else if let Some(from) = other.strip_prefix("artistName:") {
                 prompt_artist_name(app, from.to_string());
             } else if let Some(rest) = other.strip_prefix("corner:") {
                 // `corner:<skin>:<button>`. The skin is in the id because the
@@ -1301,4 +1410,12 @@ mod tests {
         );
         assert!(mixed.chars().map(columns).sum::<usize>() <= NOW_PLAYING_COLUMNS);
     }
+
+    #[test]
+    fn recent_folders_name_the_place_they_are_in() {
+        assert_eq!(folder_label("/Volumes/Crucial X6/Music"), "Music — Crucial X6");
+        assert_eq!(folder_label("/Users/me/Podcasts"), "Podcasts — me");
+        assert_eq!(folder_label("/"), "/");
+    }
+
 }

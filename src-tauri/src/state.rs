@@ -461,12 +461,18 @@ impl Core {
 
     /// The local counterpart of `apply_song`: the artwork is already in hand
     /// and there is no like state to ask for.
-    pub fn show_local(self: &Arc<Self>, song: Song, cover: Option<Arc<str>>, playing: bool) {
+    pub fn show_local(
+        self: &Arc<Self>,
+        song: Song,
+        cover: Option<Arc<str>>,
+        playing: bool,
+        like: &'static str,
+    ) {
         self.cover_token.fetch_add(1, Ordering::SeqCst);
         self.update(|state| {
             state.song = Some(song);
             state.position = 0.0;
-            state.like = None;
+            state.like = Some(like.to_string());
             state.is_playing = playing;
         });
         self.set_cover(cover);

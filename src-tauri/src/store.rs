@@ -188,6 +188,17 @@ pub struct Settings {
     /// mapped name, which is the point — providers match on the credited name.
     #[serde(rename = "artistNames", default)]
     pub artist_names: BTreeMap<String, String>,
+    /// `"local"` while a folder is the source, else YouTube Music.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The folder playing, or last played.
+    #[serde(rename = "localFolder", default)]
+    pub local_folder: Option<String>,
+    /// Folders offered in the Source menu, most recent first, each with the
+    /// place to resume. Paths are absolute; a drive that is not mounted keeps
+    /// its entry and is shown as not connected.
+    #[serde(rename = "localFolders", default)]
+    pub local_folders: Vec<SavedFolder>,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -240,8 +251,58 @@ impl Default for Settings {
             corners: SkinCorners::new(),
             corners_autohide: 0.0,
             artist_names: BTreeMap::new(),
+            source: None,
+            local_folder: None,
+            local_folders: Vec::new(),
             extra: BTreeMap::new(),
         }
+    }
+}
+
+/// A folder the Source menu offers, and where to pick it back up.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedFolder {
+    pub path: String,
+    /// The track to resume, relative to `path`.
+    #[serde(default)]
+    pub track: Option<String>,
+    #[serde(default)]
+    pub position: f64,
+}
+
+/// Most folders the Source menu keeps.
+pub const SAVED_FOLDERS_MAX: usize = 8;
+
+impl Settings {
+    /// Saved folders, with a `localFolder` from before the list existed folded
+    /// in, so upgrading does not lose it.
+    pub fn saved_folders(&self) -> Vec<SavedFolder> {
+        let mut folders = self.local_folders.clone();
+        if let Some(path) = &self.local_folder {
+            if !folders.iter().any(|f| &f.path == path) {
+                folders.push(SavedFolder {
+                    path: path.clone(),
+                    ..SavedFolder::default()
+                });
+            }
+        }
+        folders
+    }
+
+    /// Put `path` first, keeping its resume point, and cap the list.
+    pub fn remember_folder(&mut self, path: &str) {
+        let mut folders = self.saved_folders();
+        let entry = folders
+            .iter()
+            .position(|f| f.path == path)
+            .map(|at| folders.remove(at))
+            .unwrap_or_else(|| SavedFolder {
+                path: path.to_string(),
+                ..SavedFolder::default()
+            });
+        folders.insert(0, entry);
+        folders.truncate(SAVED_FOLDERS_MAX);
+        self.local_folders = folders;
     }
 }
 
@@ -280,6 +341,10 @@ pub fn map_artist(names: &BTreeMap<String, String>, artist: &str) -> String {
 pub struct Store {
     path: PathBuf,
     settings: Mutex<Settings>,
+    /// Held across a write, with the text last written. Each write serialises
+    /// the *latest* settings, so writers racing each other cannot leave an
+    /// older snapshot on disk, and an unchanged file is not rewritten.
+    written: Mutex<String>,
 }
 
 /// `~/Library/Application Support/pear-music-widget` — the literal directory the
@@ -302,6 +367,7 @@ impl Store {
         Self {
             path,
             settings: Mutex::new(settings),
+            written: Mutex::new(String::new()),
         }
     }
 
@@ -313,23 +379,38 @@ impl Store {
     /// Mutate and persist. Failing to write is logged, never fatal: the widget
     /// stays usable on a read-only disk, it just forgets across launches.
     pub fn update(&self, edit: impl FnOnce(&mut Settings)) {
-        let snapshot = {
-            let mut settings = self.settings.lock().expect("settings lock");
-            edit(&mut settings);
-            settings.clone()
-        };
-        if let Err(err) = self.write(&snapshot) {
+        edit(&mut self.settings.lock().expect("settings lock"));
+        if let Err(err) = self.write() {
             eprintln!("[store] failed to persist settings: {err}");
         }
     }
 
-    fn write(&self, settings: &Settings) -> std::io::Result<()> {
+    /// Temporary file, sync, rename: a crash or power loss mid-write leaves the
+    /// previous file intact instead of a truncated one, which `load` would
+    /// replace with defaults — losing the token, sizes and saved folders.
+    fn write(&self) -> std::io::Result<()> {
+        let mut written = self.written.lock().expect("settings write lock");
+        let text = {
+            let settings = self.settings.lock().expect("settings lock");
+            serde_json::to_string_pretty(&*settings)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?
+        };
+        if *written == text {
+            return Ok(());
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string_pretty(settings)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        std::fs::write(&self.path, text)
+        let temp = self.path.with_extension("json.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&temp, &self.path)?;
+        *written = text;
+        Ok(())
     }
 
     /// The corner buttons for one skin. A skin with no entry yet is at its
@@ -432,6 +513,39 @@ mod tests {
         // Substrings are not credits.
         assert_eq!(map_artist(&names, "Jaychoux"), "Jaychoux");
         assert_eq!(map_artist(&BTreeMap::new(), "Jaychou"), "Jaychou");
+    }
+
+
+    #[test]
+    fn remembered_folders_move_to_the_front_and_keep_their_place() {
+        let mut settings = Settings::default();
+        settings.local_folder = Some("/Volumes/A/Music".into());
+        settings.remember_folder("/Volumes/B/Podcasts");
+        assert_eq!(settings.local_folders[0].path, "/Volumes/B/Podcasts");
+        assert_eq!(settings.local_folders[1].path, "/Volumes/A/Music");
+
+        settings.local_folders[1].track = Some("Album/a.flac".into());
+        settings.local_folders[1].position = 42.0;
+        settings.remember_folder("/Volumes/A/Music");
+        assert_eq!(settings.local_folders[0].path, "/Volumes/A/Music");
+        assert_eq!(settings.local_folders[0].position, 42.0);
+        assert_eq!(settings.local_folders.len(), 2);
+
+        for i in 0..20 {
+            settings.remember_folder(&format!("/tmp/{i}"));
+        }
+        assert_eq!(settings.local_folders.len(), SAVED_FOLDERS_MAX);
+    }
+
+    #[test]
+    fn source_fields_read_from_the_old_loose_keys() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"source":"local","localFolder":"/Volumes/X/Music"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.source.as_deref(), Some("local"));
+        assert_eq!(settings.saved_folders()[0].path, "/Volumes/X/Music");
+        assert!(!settings.extra.contains_key("source"));
     }
 
 }
