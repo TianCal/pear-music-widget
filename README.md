@@ -1,4 +1,7 @@
-# Pear Music Widget
+# Perch Player
+
+Formerly Pear Music Widget. The bundle id, settings and caches keep the old
+`pear-music-widget` names, so an upgrade keeps everything.
 
 A floating now-playing widget and menu-bar player for macOS, with two sources:
 
@@ -158,7 +161,7 @@ The app is ad-hoc signed but not notarised. If macOS blocks the first launch,
 right-click the app and choose **Open**, or run:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Pear Music Widget.app"
+xattr -dr com.apple.quarantine "/Applications/Perch Player.app"
 ```
 
 Requires Apple Silicon. Built and tested on macOS 26.

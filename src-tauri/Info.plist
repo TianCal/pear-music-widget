@@ -11,6 +11,6 @@
 	<string></string>
 	<!-- Quitting YouTube Music is an Apple event, so macOS asks once. -->
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Pear Music Widget asks YouTube Music to quit when you choose “Quit with YouTube Music”.</string>
+	<string>Perch Player asks YouTube Music to quit when you choose “Quit with YouTube Music”.</string>
 </dict>
 </plist>

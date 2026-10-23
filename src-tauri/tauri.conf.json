@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Pear Music Widget",
+  "productName": "Perch Player",
   "version": "1.11.0",
   "identifier": "com.litian.pear-music-widget",
   "build": {

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Pear Music Sorter</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="titlebar" data-tauri-drag-region>
+    <span class="title" data-tauri-drag-region>筛选歌曲</span>
+    <button class="folder" id="folder" title="选择音乐文件夹">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.25c0-.97.78-1.75 1.75-1.75h3l1.5 1.5h5c.97 0 1.75.78 1.75 1.75v5.5c0 .97-.78 1.75-1.75 1.75h-9.5c-.97 0-1.75-.78-1.75-1.75z"/></svg>
+      <span id="folder-name">选择文件夹</span>
+    </button>
+  </header>
+
+  <main id="main">
+    <section class="card" id="card" hidden>
+      <div class="cover-wrap">
+        <div class="cover" id="cover" title="左键喜欢 · 右键不喜欢">
+          <svg class="placeholder" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l11-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+          <img id="cover-img" alt="" hidden>
+          <div class="stamp like">喜欢</div>
+          <div class="stamp dislike">不喜欢</div>
+        </div>
+      </div>
+      <div class="meta">
+        <h1 id="title"></h1>
+        <p id="subtitle"></p>
+      </div>
+
+      <div class="timeline" id="timeline" title="拖动跳到任意位置">
+        <div class="track" id="track"><div class="clip" id="clip"></div><div class="played" id="played"></div><div class="head" id="head"></div></div>
+        <div class="times"><span id="pos">0:00</span><span id="chorus-label">正在找副歌…</span><span id="dur">0:00</span></div>
+      </div>
+      <div class="lyrics" id="lyrics"><div class="lyrics-lines" id="lyrics-lines"></div></div>
+
+      <div class="decide">
+        <button class="choice like" id="like" title="喜欢（← 或左键点封面）">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.7c0 5.6-7.5 10.2-7.5 10.2z"/></svg>
+          <span>喜欢</span><kbd>←</kbd>
+        </button>
+        <div class="transport">
+          <button class="round" id="undo" title="撤销（⌘Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+          <button class="round big" id="play" title="播放/暂停（空格）"><svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
+          <button class="round" id="replay" title="回到副歌（R）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4v5h5"/></svg></button>
+        </div>
+        <button class="choice dislike" id="dislike" title="不喜欢（→ 或右键点封面）">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          <span>不喜欢</span><kbd>→</kbd>
+        </button>
+      </div>
+      <button class="choice skip" id="skip" title="跳过，先不决定（↓）">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        <span>跳过</span><kbd>↓</kbd>
+      </button>
+    </section>
+
+    <section class="empty" id="empty" hidden>
+      <div class="glyph" id="empty-glyph"></div>
+      <h2 id="empty-title"></h2>
+      <p id="empty-detail"></p>
+      <button class="push" id="empty-action"></button>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="stats"></span>
+    <button class="push small" id="review" disabled>清理不喜欢的…</button>
+  </footer>
+
+  <div class="sheet-backdrop" id="sheet" hidden>
+    <div class="sheet" role="dialog" aria-labelledby="sheet-title">
+      <h2 id="sheet-title">清理不喜欢的歌</h2>
+      <p class="hint">勾选的歌会被移到废纸篓，之后还能从废纸篓放回原处。</p>
+      <label class="all"><input type="checkbox" id="check-all" checked> 全选</label>
+      <ul id="sheet-list"></ul>
+      <div class="sheet-buttons">
+        <button class="push" id="sheet-cancel">取消</button>
+        <button class="push destructive" id="sheet-trash">移到废纸篓</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

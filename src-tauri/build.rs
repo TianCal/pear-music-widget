@@ -16,9 +16,17 @@ const MARGIN: f64 = 100.0; // Big Sur icons float inside a transparent margin
 const RADIUS: f64 = 185.0; // ~22.4% of the visible square
 const SS: u32 = 3; // supersampling factor for anti-aliasing
 
-// Warm red -> orange, matching the widget's default accent.
-const TOP: [f64; 3] = [255.0, 90.0, 110.0];
-const BOTTOM: [f64; 3] = [255.0, 138.0, 74.0];
+// A vinyl record on a dark tile, with a pear-shaped coral label.
+const BACKGROUND: [f64; 3] = [44.0, 44.0, 42.0];
+const DISC: [f64; 3] = [68.0, 68.0, 65.0];
+const GROOVE: [f64; 3] = [95.0, 94.0, 90.0];
+const LABEL: [f64; 3] = [240.0, 153.0, 123.0];
+const DISC_RADIUS: f64 = 318.0;
+const GROOVES: [f64; 3] = [286.0, 250.0, 214.0];
+const GROOVE_WIDTH: f64 = 5.0;
+/// The spindle hole sits in the pear's wide lower half, as on a real label.
+const HOLE_DROP: f64 = 30.0;
+const HOLE_RADIUS: f64 = 16.0;
 
 fn write_png(path: &Path, width: u32, height: u32, pixels: &[u8]) {
     if let Some(parent) = path.parent() {
@@ -48,54 +56,67 @@ fn render_app_icon() -> Vec<u8> {
     let c = SIZE as f64 / 2.0;
     let half = (SIZE as f64 - MARGIN * 2.0) / 2.0;
 
-    // Play triangle: equilateral-ish, optically centred (nudged right of centre).
-    let tri_h = 300.0f64;
-    let tri_w = 260.0f64;
-    let tri_cx = c + 26.0;
-    let in_triangle = |x: f64, y: f64| -> bool {
-        let dy = y - c;
-        if dy.abs() > tri_h / 2.0 {
-            return false;
-        }
-        let edge = tri_cx - tri_w / 2.0 + (1.0 - dy.abs() / (tri_h / 2.0)) * tri_w;
-        x >= tri_cx - tri_w / 2.0 && x <= edge
+    // Painted back to front; each layer is (signed distance at a point, colour).
+    let layers = |x: f64, y: f64| -> [(f64, [f64; 3]); 4] {
+        let r = (x - c).hypot(y - c);
+        // Grooves: thin rings across the record, between label and rim.
+        let groove = GROOVES
+            .iter()
+            .map(|g| (r - g).abs() - GROOVE_WIDTH / 2.0)
+            .fold(f64::INFINITY, f64::min);
+        [
+            (r - DISC_RADIUS, DISC),
+            (groove.max(r - DISC_RADIUS), GROOVE),
+            (pear_sdf(x - c, y - c), LABEL),
+            ((x - c).hypot(y - c - HOLE_DROP) - HOLE_RADIUS, BACKGROUND),
+        ]
     };
 
     let samples = (SS * SS) as f64;
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let mut body_coverage = 0.0;
-            let mut glyph_coverage = 0.0;
-
+            let mut alpha = 0.0;
+            let mut colour = [0.0f64; 3];
             for sy in 0..SS {
                 for sx in 0..SS {
                     let fx = x as f64 + (sx as f64 + 0.5) / SS as f64;
                     let fy = y as f64 + (sy as f64 + 0.5) / SS as f64;
-                    if rounded_rect_sdf(fx, fy, c, half, RADIUS) <= 0.0 {
-                        body_coverage += 1.0;
+                    if rounded_rect_sdf(fx, fy, c, half, RADIUS) > 0.0 {
+                        continue;
                     }
-                    if in_triangle(fx, fy) {
-                        glyph_coverage += 1.0;
+                    let mut here = BACKGROUND;
+                    for (distance, paint) in layers(fx, fy) {
+                        if distance <= 0.0 {
+                            here = paint;
+                        }
+                    }
+                    alpha += 1.0;
+                    for ch in 0..3 {
+                        colour[ch] += here[ch];
                     }
                 }
             }
-
-            let body = body_coverage / samples;
-            if body == 0.0 {
+            if alpha == 0.0 {
                 continue;
             }
-
-            let t = y as f64 / SIZE as f64;
-            let glyph = (glyph_coverage / samples).min(body);
             let i = ((y * SIZE + x) * 4) as usize;
             for ch in 0..3 {
-                let base = TOP[ch] + (BOTTOM[ch] - TOP[ch]) * t;
-                pixels[i + ch] = (base * (1.0 - glyph) + 255.0 * glyph).round() as u8;
+                pixels[i + ch] = (colour[ch] / alpha).round() as u8;
             }
-            pixels[i + 3] = (body * 255.0).round() as u8;
+            pixels[i + 3] = (alpha / samples * 255.0).round() as u8;
         }
     }
     pixels
+}
+
+/// A pear standing upright around the origin: a small circle on a large one,
+/// blended with a smooth minimum so the waist curves in rather than pinching.
+fn pear_sdf(x: f64, y: f64) -> f64 {
+    let top = x.hypot(y + 62.0) - 64.0;
+    let bottom = x.hypot(y - 42.0) - 98.0;
+    let k = 46.0;
+    let h = (0.5 + 0.5 * (bottom - top) / k).clamp(0.0, 1.0);
+    bottom * (1.0 - h) + top * h - k * h * (1.0 - h)
 }
 
 // ------------------------------------------------------------ menu-bar icons

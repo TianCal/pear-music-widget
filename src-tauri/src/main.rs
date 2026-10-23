@@ -14,6 +14,7 @@ mod lyrics_cache;
 mod macos;
 mod panel;
 mod search;
+mod sorter;
 mod state;
 mod store;
 mod tray;
@@ -149,6 +150,11 @@ fn spawn_pollers(core: Arc<Core>) {
 
 fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
     match event {
+        // Sort Songs is an ordinary window: closing it destroys it, and the
+        // runtime behind it goes too, so it costs nothing while closed.
+        WindowEvent::CloseRequested { .. } if label == sorter::LABEL => {}
+        WindowEvent::Destroyed if label == sorter::LABEL => sorter::closed(app),
+
         // A widget should hide, not disappear: closing would leave the tray menu
         // holding a destroyed window and the app running with nothing to show.
         WindowEvent::CloseRequested { api, .. } => {
@@ -283,9 +289,20 @@ fn main() {
             commands::hide_panel,
             commands::retry,
             commands::quit,
+            sorter::sorter_view,
+            sorter::sorter_extras,
+            sorter::sorter_choose_folder,
+            sorter::sorter_rate,
+            sorter::sorter_skip,
+            sorter::sorter_undo,
+            sorter::sorter_toggle_play,
+            sorter::sorter_seek,
+            sorter::sorter_replay,
+            sorter::sorter_disliked,
+            sorter::sorter_trash,
         ])
         .build(tauri::generate_context!())
-        .expect("failed to start Pear Music Widget");
+        .expect("failed to start Perch Player");
 
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } = event {

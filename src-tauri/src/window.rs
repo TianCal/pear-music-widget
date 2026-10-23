@@ -397,7 +397,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .unwrap_or_else(|| default_position(app, size));
 
     let window = WebviewWindowBuilder::new(app, WIDGET, WebviewUrl::App("index.html".into()))
-        .title("Pear Music Widget")
+        .title("Perch Player")
         .inner_size(size.0, size.1)
         .position(position.x, position.y)
         .decorations(false)

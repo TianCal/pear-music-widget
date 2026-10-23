@@ -127,7 +127,7 @@ DMG_BASENAME="$(basename "${DMG_FILES[0]}")"
 ARCH="${DMG_BASENAME%.dmg}"
 ARCH="${ARCH##*_${NEXT}_}"
 ASSET_DIR="$TAURI_DIR/target/release/upload"
-ASSET="$ASSET_DIR/Pear.Music.Widget_${NEXT}_${ARCH}.dmg"
+ASSET="$ASSET_DIR/Perch.Player_${NEXT}_${ARCH}.dmg"
 mkdir -p "$ASSET_DIR"
 ditto "${DMG_FILES[0]}" "$ASSET"
 

@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAURI_DIR="$REPO_ROOT/src-tauri"
-APP_NAME="Pear Music Widget.app"
+APP_NAME="Perch Player.app"
 INSTALL_DIR="${PMW_INSTALL_DIR:-/Applications}"
 DESTINATION="$INSTALL_DIR/$APP_NAME"
 
@@ -66,7 +66,7 @@ for _ in 1 2 3 4 5; do
   sleep 1
 done
 if pgrep -x pear-music-widget >/dev/null 2>&1; then
-  echo "error: Pear Music Widget did not quit" >&2
+  echo "error: Perch Player did not quit" >&2
   exit 1
 fi
 

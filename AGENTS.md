@@ -32,9 +32,11 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/artwork.rs` | Online covers for local files, disk cache |
 | `src-tauri/src/likes.rs` | Local like/dislike, stored on the drive |
 | `src-tauri/src/store.rs` | `settings.json` |
+| `src-tauri/src/sorter/` | Sort Songs window: chorus finding, clip player, ratings |
 | `src/bridge.js` | `window.widget` IPC wrapper and dragging |
 | `src/app.js` | Rendering and interaction |
 | `src/palette.js` | Cover colour extraction |
+| `src/sorter/` | Sort Songs page (its own HTML, CSS and JS) |
 
 ## Non-negotiable rules
 
@@ -391,6 +393,39 @@ the main thread and hands the move and the next load to a blocking thread.
 Debug builds optimise the decoder and image crates (`[profile.dev.package]`
 in `Cargo.toml`). Unoptimised, a cover resize takes ~270 ms and 24/96 FLAC
 decodes slowly enough to risk underruns.
+
+## Sort Songs
+
+Tray → **Sort Songs…** (`sorter::open`) pauses whatever is playing, in either
+source, and opens a window that plays each unrated song of a local folder
+from its chorus. ← likes, → dislikes, ↓ skips.
+
+- **No cost while closed.** The runtime (session, player, HTTP client) is
+  built by `open` and lives in `sorter::RUNTIME`. The window is destroyed on
+  close, not hidden (`CloseRequested` is not prevented for `sorter::LABEL`).
+  `Destroyed` drops the runtime. The player's ticker holds only a `Weak`, so
+  it exits too, and the output stream's thread with it. Spawned work checks
+  `runtime()` before playing anything.
+- **Activation policy.** It is `Regular` while the window is open, so the
+  window gets a Dock icon and keyboard focus, and `Accessory` again after it
+  closes.
+- **Own player.** It has its own player (`sorter/player.rs`) under the same
+  rules as `local.rs`: fresh decoder and `Sink` per start, never
+  `Sink::clear` or `Sink::try_seek`. Play starts at the chorus and runs to the
+  end of the song. Nothing loops or advances on its own.
+- **Lyrics one at a time.** Lookups go through `lyrics::fetch_lyrics`, one at
+  a time (`Sorter::lookup`). Run side by side, providers time out and the
+  failures are cached as misses for a week. A miss is retried once after 3 s.
+- **Finding the chorus.** `sorter/chorus.rs` scores repeated blocks of synced
+  lines, then refines to the line that sings the title. Without synced lyrics
+  it starts at 35%.
+- **Ratings.** Ratings are written through `likes.rs` and re-read before each
+  write. The player's in-memory `Likes` is not reloaded, so its next save can
+  overwrite them. This is accepted.
+- **Events and commands.** Events go only to the sorter window (`emit_to`)
+  and are prefixed `sorter-`. Commands are prefixed `sorter_`.
+- **Remembered folder.** The last folder is stored apart, in
+  `~/Library/Application Support/pear-music-sorter/settings.json`.
 
 ## Volume
 

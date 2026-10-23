@@ -758,7 +758,7 @@ fn prompt_artist_name(app: &AppHandle, from: String) {
 
 /// `choose folder` through osascript: the accessory app has no menu bar of its
 /// own to hang an NSOpenPanel on, and this keeps AppKit work off our thread.
-fn choose_folder() -> Option<std::path::PathBuf> {
+pub fn choose_folder() -> Option<std::path::PathBuf> {
     let output = std::process::Command::new("osascript")
         .args([
             "-e",
@@ -833,6 +833,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             )?,
             &source_submenu(app)?,
             &artist_names_submenu(app)?,
+            &MenuItem::with_id(app, "sortSongs", "Sort Songs…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(
                 app,
@@ -1176,6 +1177,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 }
             });
         }
+        "sortSongs" => crate::sorter::open(app),
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
@@ -1439,7 +1441,7 @@ fn refresh_now(app: &AppHandle) {
 
     let tooltip = match &snapshot.song {
         Some(song) => format!("{} — {}", song.title, song.artist),
-        None => format!("Pear Music Widget — {}", status_label(&snapshot.status)),
+        None => format!("Perch Player — {}", status_label(&snapshot.status)),
     };
     let _ = tray.set_tooltip(Some(tooltip));
 

@@ -64,7 +64,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         PANEL,
         WebviewUrl::App("index.html?mode=panel".into()),
     )
-    .title("Pear Music Widget")
+    .title("Perch Player")
     .inner_size(size.0, size.1)
     .decorations(false)
     .transparent(true)

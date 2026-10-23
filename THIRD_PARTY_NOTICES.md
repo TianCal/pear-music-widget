@@ -2,7 +2,7 @@
 
 ## canto-hk-g2p 2.6.1
 
-Pear Music Widget includes a Python-free subset of
+Perch Player includes a Python-free subset of
 [`canto-hk-g2p`](https://github.com/typangaa/canto-hk-g2p), copyright 2026
 canto-g2p contributors, under the Apache License 2.0. The unmodified upstream
 license and notice are retained under `src-tauri/vendor/canto-hk-g2p-core/`.
