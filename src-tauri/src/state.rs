@@ -21,7 +21,7 @@
 //! comes back in a command reply — see `commands::queue_art`.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -366,9 +366,22 @@ pub struct Core {
     /// The same, for the queue panel. The skin half of "is anyone looking" is
     /// answered from the store instead — see `queue_wanted`.
     queue_wanted_by: Mutex<HashSet<String>>,
+    /// Window labels currently on screen, told by whoever shows or hides one.
+    /// While this is empty — nearly all the time, for a menu-bar app — the
+    /// per-second `state` push is not emitted and the queue and lyrics are not
+    /// fetched; showing a surface catches it up. See `set_on_screen`.
+    on_screen: Mutex<HashSet<String>>,
+    /// A queue or lyrics refresh was skipped because nobody could see it.
+    queue_stale: AtomicBool,
+    lyrics_stale: AtomicBool,
     cover_token: AtomicU64,
     queue_token: AtomicU64,
     lyrics_token: AtomicU64,
+    /// Woken whenever a lookup is superseded, so the old one is dropped at its
+    /// next await instead of finishing a whole chain of requests for a track
+    /// that is no longer playing. A dropped lookup caches nothing, so it can
+    /// never leave a miss behind for a song it did not finish asking about.
+    lyrics_superseded: tokio::sync::Notify,
     /// Guards background display conversion independently of network fetches.
     /// A setting change or new source invalidates work already in flight.
     lyrics_style_token: AtomicU64,
@@ -419,10 +432,69 @@ impl Core {
             // Seeding from the same store entry is what stops that first paint
             // being an empty list corrected a round trip later.
             queue_wanted_by: Mutex::new(queue_wanted_by),
+            on_screen: Mutex::new(HashSet::new()),
+            queue_stale: AtomicBool::new(false),
+            lyrics_stale: AtomicBool::new(false),
             cover_token: AtomicU64::new(0),
             queue_token: AtomicU64::new(0),
             lyrics_token: AtomicU64::new(0),
+            lyrics_superseded: tokio::sync::Notify::new(),
             lyrics_style_token: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether any surface is on screen.
+    pub fn showing(&self) -> bool {
+        !self.on_screen.lock().expect("screen lock").is_empty()
+    }
+
+    /// Of `labels`, whether any belongs to a surface that is on screen.
+    fn any_on_screen(&self, labels: &HashSet<String>) -> bool {
+        let on_screen = self.on_screen.lock().expect("screen lock");
+        labels.iter().any(|label| on_screen.contains(label))
+    }
+
+    /// A surface was shown or hidden. Call on the same path as the `show` or
+    /// `hide` itself: reading `is_visible` back right after a setter can still
+    /// report the old answer.
+    ///
+    /// Coming on screen catches up on what was skipped while hidden: the
+    /// latest `state` (whose emits were dropped), and the queue and lyrics if
+    /// a track change left them stale.
+    pub fn set_on_screen(self: &Arc<Self>, label: &str, shown: bool) {
+        let woke = {
+            let mut on_screen = self.on_screen.lock().expect("screen lock");
+            let was_empty = on_screen.is_empty();
+            if shown {
+                on_screen.insert(label.to_string()) && was_empty
+            } else {
+                on_screen.remove(label);
+                false
+            }
+        };
+        // The widget's document reports hidden even on screen, so it cannot
+        // tell for itself when to stop its progress loop; this tells it.
+        let _ = self
+            .app
+            .emit("on-screen", serde_json::json!({ "label": label, "shown": shown }));
+        if !shown {
+            return;
+        }
+        if woke {
+            let _ = self.app.emit("state", &self.snapshot());
+        }
+        let queue = self.queue_stale.swap(false, Ordering::SeqCst);
+        let lyrics = self.lyrics_stale.swap(false, Ordering::SeqCst);
+        if queue || lyrics {
+            let core = Arc::clone(self);
+            tauri::async_runtime::spawn(async move {
+                if queue {
+                    core.refresh_queue().await;
+                }
+                if lyrics {
+                    core.refresh_lyrics().await;
+                }
+            });
         }
     }
 
@@ -483,6 +555,10 @@ impl Core {
     }
 
     pub fn publish_local_queue(&self) {
+        if !self.showing() {
+            self.queue_stale.store(true, Ordering::SeqCst);
+            return;
+        }
         if self.queue_wanted() {
             let names = self.store.get(|s| s.artist_names.clone());
             self.set_queue(self.local().queue_view(&names));
@@ -553,6 +629,10 @@ impl Core {
             Some(player.clone())
         });
         let Some(next) = next else { return };
+        // Nobody to draw it; `set_on_screen` sends the latest when one shows.
+        if !self.showing() {
+            return;
+        }
         let _ = self.app.emit("state", &next);
     }
 
@@ -712,13 +792,20 @@ impl Core {
     ///
     /// The skin half is answered from the store, because a skin is a property of
     /// the surface rather than something the renderer has to report.
+    ///
+    /// Either way only while a surface is on screen: a hidden Stack card draws
+    /// nothing, and `set_on_screen` refreshes it when it comes back.
     fn queue_wanted(&self) -> bool {
+        if !self.showing() {
+            return false;
+        }
         if crate::window::skin_shows_queue(&crate::window::skin_of(&self.store))
             || crate::window::skin_shows_queue(&crate::window::panel_skin_of(&self.store))
         {
             return true;
         }
-        !self.queue_wanted_by.lock().expect("queue lock").is_empty()
+        let open = self.queue_wanted_by.lock().expect("queue lock").clone();
+        self.any_on_screen(&open)
     }
 
     pub fn set_queue_wanted(&self, label: &str, wanted: bool) {
@@ -737,6 +824,12 @@ impl Core {
     /// version this replaced: a full queue's worth of `data:` URLs would be
     /// megabytes on an event, and the two surfaces want different sizes anyway.
     pub async fn refresh_queue(self: &Arc<Self>) {
+        // Hidden: keep what is drawn rather than flash it empty, and refetch
+        // when a surface shows.
+        if !self.showing() {
+            self.queue_stale.store(true, Ordering::SeqCst);
+            return;
+        }
         if !self.queue_wanted() {
             self.set_queue(QueueView::empty());
             return;
@@ -779,25 +872,35 @@ impl Core {
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
     /// lyrics panel is actually open.
     pub async fn refresh_lyrics(self: &Arc<Self>) {
-        let wanted = !self
-            .lyrics_wanted_by
-            .lock()
-            .expect("lyrics lock")
-            .is_empty();
+        let open = self.lyrics_wanted_by.lock().expect("lyrics lock").clone();
+        // A lyrics panel left open on a hidden widget: nobody is reading, so
+        // no lookup — the panel catches up when the widget shows again.
+        if !open.is_empty() && !self.any_on_screen(&open) {
+            self.lyrics_stale.store(true, Ordering::SeqCst);
+            return;
+        }
+        let wanted = !open.is_empty();
         let song = self.player.lock().expect("player lock").song.clone();
 
+        let token = self.lyrics_token.fetch_add(1, Ordering::SeqCst) + 1;
+        self.lyrics_superseded.notify_waiters();
         let Some(song) = song.filter(|_| wanted) else {
             self.set_lyrics(LyricsView::idle());
             return;
         };
 
-        let token = self.lyrics_token.fetch_add(1, Ordering::SeqCst) + 1;
         self.set_lyrics(LyricsView {
             state: "loading".into(),
             lyrics: None,
         });
 
-        let result = lyrics::fetch_lyrics(self.api.client(), &song).await;
+        // Created before the lookup starts, so a newer request's
+        // `notify_waiters` reaches it even before its first poll.
+        let superseded = self.lyrics_superseded.notified();
+        let result = tokio::select! {
+            result = lyrics::fetch_lyrics(self.api.client(), &song) => result,
+            () = superseded => return,
+        };
 
         // A newer request, or the track moved on while we were waiting.
         if token != self.lyrics_token.load(Ordering::SeqCst) {
@@ -928,10 +1031,18 @@ impl Core {
         if self.is_local() {
             return;
         }
+        let mut changed = false;
         self.update_remote(|state| {
+            changed = state.status != status || state.status_message != message;
             state.status = status.to_string();
             state.status_message = message.to_string();
         });
+        // Background reconnects report the same `offline` every backoff cycle;
+        // the queue is already gone and rebuilding the tray menu (icon decode,
+        // a whole NSMenu tree on the main thread) would change nothing.
+        if !changed && status != "connected" {
+            return;
+        }
 
         if status == "connected" {
             let core = Arc::clone(self);

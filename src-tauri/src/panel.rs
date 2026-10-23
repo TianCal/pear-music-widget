@@ -211,6 +211,7 @@ pub fn dismiss(app: &AppHandle) {
 
 pub fn hide(app: &AppHandle, panel: &WebviewWindow) {
     let _ = panel.hide();
+    crate::on_screen(app, PANEL, false);
     collapse(app, panel);
     let state = state(app);
     state.visible.store(false, Ordering::SeqCst);
@@ -295,6 +296,7 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
     window::apply_zoom_to(app, &panel, rect);
     state.visible.store(true, Ordering::SeqCst);
     let _ = panel.show();
+    crate::on_screen(app, PANEL, true);
     let _ = panel.set_focus();
     // Nothing was on screen a moment ago, so the pollers were standing down.
     crate::resync(app);

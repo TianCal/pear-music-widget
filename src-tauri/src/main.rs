@@ -46,12 +46,19 @@ const PLAY_STATE_POLL: Duration = Duration::from_secs(5);
 /// both surfaces are hidden — which, for a menu-bar app, is nearly all the
 /// time. Skipping the tick costs nothing in accuracy because showing either
 /// surface resyncs it first; see `resync`.
+///
+/// Read from `Core`'s own record rather than asking each window: `is_visible`
+/// is an AppKit round trip, and the pollers ask on every tick.
 fn showing_anything(app: &AppHandle) -> bool {
-    [WIDGET, PANEL].iter().any(|label| {
-        app.get_webview_window(label)
-            .and_then(|window| window.is_visible().ok())
-            .unwrap_or(false)
-    })
+    app.try_state::<Arc<Core>>().is_some_and(|core| core.showing())
+}
+
+/// Record that the surface `label` was just shown or hidden. Every `show` and
+/// `hide` of the widget or the dropdown goes through here as well.
+pub fn on_screen(app: &AppHandle, label: &str, shown: bool) {
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        core.set_on_screen(label, shown);
+    }
 }
 
 /// Pull the player's ground truth now. Called whenever a surface comes back on
@@ -155,6 +162,7 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
             api.prevent_close();
             if let Some(window) = app.get_webview_window(label) {
                 let _ = window.hide();
+                on_screen(app, label, false);
             }
         }
 
@@ -213,7 +221,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Off the setup path: taking stock of the cache means a directory listing,
     // and it may evict — neither belongs in front of the first paint.
     let cap = store.get(|s| s.lyrics_cache_mb);
-    tauri::async_runtime::spawn(async move { lyrics_cache::configure(cap) });
+    tauri::async_runtime::spawn_blocking(move || lyrics_cache::configure(cap));
 
     Ok(())
 }
@@ -246,6 +254,7 @@ fn main() {
             // A second launch should surface the widget, not start a second one.
             if let Some(window) = app.get_webview_window(WIDGET) {
                 let _ = window.show();
+                on_screen(app, WIDGET, true);
                 resync(app);
             }
         }))

@@ -99,6 +99,15 @@ The WebSocket close path is the reliable offline signal: a cached token lets
 `ensure_token()` succeed without touching the server. Show `connecting` only on
 the first attempt or a manual retry; background reconnects should not flicker.
 
+`Core::set_on_screen` records which surfaces are showing; every `show`/`hide`
+of the widget or dropdown must call `crate::on_screen`. While nothing shows,
+`state` is not emitted and queue/lyrics refreshes only mark themselves stale;
+coming on screen emits the latest snapshot and runs the stale refreshes. The
+widget learns its own visibility from the `on-screen` event, since its
+`document.hidden` is always true. A superseded lyrics lookup is dropped at its
+next await (it caches nothing). Settings writes from the main thread or an
+async worker use `Store::update_soon`.
+
 Retrying tears down the socket and clears the queue, so `launch_music_app`
 requests a retry only when disconnected. `Realtime::request_retry` must wake
 backoff and close an established socket. Pollers stand down while both surfaces
@@ -286,7 +295,8 @@ Audio is decoded in Rust (rodio/symphonia). **Never call `Sink::clear` or
 `Sink::try_seek`**: both wait for the audio callback, which a stream on a
 vanished device never runs again. Each track gets a fresh `Sink` and the old one
 is dropped; seeking reopens the file at the new position. The `OutputStream`
-lives on its own thread, opens on first use, and is reopened when its error
+lives on its own thread, opens when something plays (a paused load only
+parks the track at a position, `Local::parked`), closes after 30 s paused, and is reopened when its error
 callback fires or the default device changes (checked every two seconds
 and on each load). Loads do file IO: run them on blocking threads or the
 `local-tick` thread, never on the AppKit main thread or an async worker. `loading`

@@ -175,13 +175,6 @@ fn size_for_skin(store: &Store, skin: &str) -> (f64, f64) {
     }
 }
 
-/// Remember the current width against the skin that is showing.
-fn remember_size(store: &Store, skin: &str, width: f64) {
-    store.update(|s| {
-        s.sizes.insert(skin.to_string(), StoredSize { width });
-    });
-}
-
 // ----------------------------------------------------------------- geometry
 
 /// Work areas in logical points, which is what the store and every size in this
@@ -453,6 +446,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         window.open_devtools();
     }
     let _ = window.show();
+    crate::on_screen(app, WIDGET, true);
 
     Ok(window)
 }
@@ -535,13 +529,15 @@ pub fn schedule_persist(app: &AppHandle) {
         let store = app.state::<Arc<Store>>().inner().clone();
         let rect = bounds_of(&window);
 
-        store.update(|s| {
+        // One write, not one per field, and off this async worker.
+        let skin = skin_of(&store);
+        store.update_soon(|s| {
             s.bounds = Some(Position {
                 x: rect.x.round(),
                 y: rect.y.round(),
-            })
+            });
+            s.sizes.insert(skin, StoredSize { width: rect.width.round() });
         });
-        remember_size(&store, &skin_of(&store), rect.width.round());
     });
 }
 
@@ -645,7 +641,7 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
     let size = base_for(&skin);
     let position = default_position(app, size);
 
-    store.update(|s| {
+    store.update_soon(|s| {
         s.sizes.remove(&skin);
         s.bounds = Some(position);
     });

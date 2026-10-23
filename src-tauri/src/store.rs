@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -394,6 +394,23 @@ impl Store {
         if let Err(err) = self.write() {
             eprintln!("[store] failed to persist settings: {err}");
         }
+    }
+
+    /// `update` for callers on the AppKit main thread or an async worker. The
+    /// edit applies now; the fsync'd write runs on a thread of its own, where
+    /// a slow disk stalls nobody. Writes always serialise the latest settings
+    /// under the write lock, so concurrent ones still leave the newest on
+    /// disk, and quitting writes synchronously (`Local::remember` via `quit`).
+    pub fn update_soon(self: &Arc<Self>, edit: impl FnOnce(&mut Settings)) {
+        edit(&mut self.settings.lock().expect("settings lock"));
+        let store = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("settings-write".into())
+            .spawn(move || {
+                if let Err(err) = store.write() {
+                    eprintln!("[store] failed to persist settings: {err}");
+                }
+            });
     }
 
     /// Temporary file, sync, rename: a crash or power loss mid-write leaves the

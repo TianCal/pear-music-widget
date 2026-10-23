@@ -162,13 +162,26 @@ fn status_label(status: &str) -> &str {
     }
 }
 
+/// Run a short-lived helper without waiting for it, and reap it when it exits.
+/// A dropped `Child` is never waited on, so each one would otherwise linger as
+/// a zombie until the app quits.
+fn spawn_detached(command: &mut Command) {
+    if let Ok(mut child) = command.spawn() {
+        let _ = std::thread::Builder::new()
+            .name("reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+}
+
 pub fn open_music_app() {
     let script = MUSIC_APPS
         .iter()
         .map(|name| format!("open -a \"{name}\""))
         .collect::<Vec<_>>()
         .join(" || ");
-    let _ = Command::new("sh").arg("-c").arg(script).spawn();
+    spawn_detached(Command::new("sh").arg("-c").arg(script));
 }
 
 /// Ask the music app to quit, then run `done` — whether or not it worked.
@@ -973,6 +986,7 @@ pub fn show_widget(app: &AppHandle) {
     };
     if !widget.is_visible().unwrap_or(false) {
         let _ = widget.show();
+        crate::on_screen(app, WIDGET, true);
         // The pollers stand down while nothing is on screen, so a widget coming
         // back could be showing a stale glyph.
         crate::resync(app);
@@ -1008,6 +1022,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             if let Some(widget) = &widget {
                 if widget.is_visible().unwrap_or(false) {
                     let _ = widget.hide();
+                    crate::on_screen(app, WIDGET, false);
                 } else {
                     show_widget(app);
                 }
@@ -1016,11 +1031,12 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "hideWidget" => {
             if let Some(widget) = &widget {
                 let _ = widget.hide();
+                crate::on_screen(app, WIDGET, false);
             }
         }
         "alwaysOnTop" => {
             let next = !store.get(|s| s.always_on_top);
-            store.update(|s| s.always_on_top = next);
+            store.update_soon(|s| s.always_on_top = next);
             if let Some(widget) = &widget {
                 let _ = widget.set_always_on_top(next);
                 crate::macos::follow_everywhere(widget, next);
@@ -1028,7 +1044,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         }
         "liquidGlass" => {
             let next = !store.get(|s| s.liquid_glass);
-            store.update(|s| s.liquid_glass = next);
+            store.update_soon(|s| s.liquid_glass = next);
             for label in [WIDGET, crate::window::PANEL] {
                 if let Some(window) = app.get_webview_window(label) {
                     crate::macos::set_liquid_glass(&window, next);
@@ -1052,14 +1068,14 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         }
         "simplifyLyrics" => {
             let next = !store.get(|s| s.simplify_lyrics);
-            store.update(|s| s.simplify_lyrics = next);
+            store.update_soon(|s| s.simplify_lyrics = next);
             // Re-derived rather than refetched, and pushed straight away: the
             // panel you turned this on from is the one you want it to change.
             app.state::<Arc<Core>>().restyle_lyrics();
         }
         "jyutpingLyrics" => {
             let next = !store.get(|s| s.jyutping_lyrics);
-            store.update(|s| s.jyutping_lyrics = next);
+            store.update_soon(|s| s.jyutping_lyrics = next);
             app.state::<Arc<Core>>().restyle_lyrics();
         }
         // Finder rather than a reveal: the point of the item is to look through
@@ -1067,7 +1083,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "lyricsCacheOpen" => {
             let dir = crate::lyrics_cache::dir();
             let _ = std::fs::create_dir_all(&dir);
-            let _ = Command::new("open").arg(dir).spawn();
+            spawn_detached(Command::new("open").arg(dir));
         }
         "lyricsCacheClearNegative" => {
             let handle = app.clone();
@@ -1084,7 +1100,15 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 }
             });
         }
-        "lyricsCacheClear" => crate::lyrics_cache::clear(),
+        // Thousands of files at the larger caps: a blocking thread's work, not
+        // the menu's.
+        "lyricsCacheClear" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::lyrics_cache::clear();
+                refresh(&handle);
+            });
+        }
         "reconnect" => crate::ws::retry(app),
         "artistRename" => {
             let raw = app.state::<Arc<Core>>().snapshot().song.map(|song| song.raw_artist);
@@ -1166,7 +1190,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     open_folder(app, std::path::PathBuf::from(path));
                 }
             } else if let Some(path) = other.strip_prefix("source:forget:") {
-                store.update(|s| {
+                store.update_soon(|s| {
                     s.local_folders.retain(|f| f.path != path);
                     if s.local_folder.as_deref() == Some(path) {
                         s.local_folder = None;
@@ -1204,21 +1228,21 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 }
             } else if let Some(mb) = other.strip_prefix("lyricsCache:") {
                 if let Ok(mb) = mb.parse::<f64>() {
-                    store.update(|s| s.lyrics_cache_mb = mb);
+                    store.update_soon(|s| s.lyrics_cache_mb = mb);
                     // Shrinking the cap evicts, which is a directory listing and
                     // a run of deletes — not work for the menu's own thread.
-                    tauri::async_runtime::spawn(async move { crate::lyrics_cache::configure(mb) });
+                    tauri::async_runtime::spawn_blocking(move || crate::lyrics_cache::configure(mb));
                 }
             } else if let Some(secs) = other.strip_prefix("cornerFade:") {
                 if let Ok(secs) = secs.parse::<f64>() {
-                    store.update(|s| s.corners_autohide = secs);
+                    store.update_soon(|s| s.corners_autohide = secs);
                     app.state::<Arc<Core>>()
                         .update(|state| state.corners_autohide = secs);
                 }
             } else if let Some(pct) = other.strip_prefix("tint:") {
                 if let Ok(pct) = pct.parse::<f64>() {
                     let tint = pct / 100.0;
-                    store.update(|s| s.tint = tint);
+                    store.update_soon(|s| s.tint = tint);
                     // The wash is mixed in the renderer, so the strength has to
                     // reach it like any other piece of state.
                     app.state::<Arc<Core>>().update(|state| state.tint = tint);
@@ -1226,7 +1250,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else if let Some(ms) = other.strip_prefix("lyricsOffset:") {
                 if let Ok(ms) = ms.parse::<f64>() {
                     let offset = ms / 1000.0;
-                    store.update(|s| s.lyrics_offset = offset);
+                    store.update_soon(|s| s.lyrics_offset = offset);
                     app.state::<Arc<Core>>().update(|_| {});
                 }
             } else if let Some(action) = other.strip_prefix("songTime:") {
@@ -1244,12 +1268,12 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                                 refresh(&handle);
                             });
                         } else if value == "default" {
-                            store.update(|s| {
+                            store.update_soon(|s| {
                                 s.lyrics_offsets_by_video.remove(id);
                             });
                         } else if let Ok(ms) = value.parse::<i32>() {
                             if LYRIC_OFFSETS.iter().any(|(choice, _)| *choice == ms) {
-                                store.update(|s| {
+                                store.update_soon(|s| {
                                     s.lyrics_offsets_by_video
                                         .insert(id.to_string(), f64::from(ms) / 1000.0);
                                 });
@@ -1262,7 +1286,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 let handle = app.clone();
                 crate::macos::prompt_opacity(app, store.get(|s| s.opacity), move |opacity| {
                     let store = handle.state::<Arc<Store>>().inner().clone();
-                    store.update(|s| s.opacity = opacity);
+                    store.update_soon(|s| s.opacity = opacity);
                     if let Some(widget) = handle.get_webview_window(WIDGET) {
                         crate::macos::set_alpha(&widget, opacity);
                     }
@@ -1271,7 +1295,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             } else if let Some(pct) = other.strip_prefix("opacity:") {
                 if let Ok(pct) = pct.parse::<f64>() {
                     let opacity = pct / 100.0;
-                    store.update(|s| s.opacity = opacity);
+                    store.update_soon(|s| s.opacity = opacity);
                     if let Some(widget) = &widget {
                         crate::macos::set_alpha(widget, opacity);
                     }

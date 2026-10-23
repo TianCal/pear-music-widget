@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::api::{COVER_PX, THUMB_PX};
@@ -387,7 +387,7 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
             }
         });
         if stored != remembered {
-            core.store.update(|s| {
+            core.store.update_soon(|s| {
                 if dropdown {
                     s.dropdown_panel = remembered;
                 } else {
@@ -397,7 +397,8 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
         }
     }
 
-    // Resizing a window is AppKit work; IPC arrives on a worker thread.
+    // Resizing a window is AppKit work, queued as one hop so it stays in order
+    // with the setters it posts (see AGENTS.md, main-thread rules).
     let (handle, target, panel) = (app.clone(), window.clone(), which.clone());
     let _ = app.run_on_main_thread(move || {
         if target.label() == PANEL {
@@ -432,7 +433,7 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
 /// lands after the queue moved is applied to whatever row now holds that id, or
 /// to none at all.
 #[tauri::command]
-pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> Value {
+pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> ArtReply {
     let core = core(&app);
     let size = size.unwrap_or(THUMB_PX).clamp(THUMB_PX, COVER_PX);
 
@@ -447,12 +448,12 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> V
     }
 
     if core.is_local() {
-        let art: Map<String, Value> = crate::local::Local::queue_art(&core, wanted, size)
+        let art = crate::local::Local::queue_art(&core, wanted, size)
             .await
             .into_iter()
-            .map(|(id, art)| (id, Value::String(art.to_string())))
+            .map(|(id, art)| (id, SharedStr(art)))
             .collect();
-        return json!({ "ok": true, "art": art });
+        return ArtReply { ok: true, art };
     }
 
     // One pass against the same keep-alive connection, the way the four-item
@@ -467,13 +468,32 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> V
     }))
     .await;
 
-    let art: Map<String, Value> = resolved
+    let art = resolved
         .into_iter()
         .flatten()
-        .map(|(id, art)| (id, Value::String(art.to_string())))
+        .map(|(id, art)| (id, SharedStr(art)))
         .collect();
 
-    json!({ "ok": true, "art": art })
+    ArtReply { ok: true, art }
+}
+
+/// `queue_art`'s reply. Typed rather than a `Value` so the cached `data:` URLs
+/// are serialised straight from their shared buffers: a `Value::String` would
+/// copy each one — tens of KB, up to `QUEUE_ART_MAX` of them — per request.
+#[derive(serde::Serialize)]
+pub struct ArtReply {
+    ok: bool,
+    art: std::collections::BTreeMap<String, SharedStr>,
+}
+
+/// An `Arc<str>` that serialises as the string it holds (serde's `rc` feature
+/// is not enabled).
+pub struct SharedStr(Arc<str>);
+
+impl serde::Serialize for SharedStr {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
 }
 
 /// Jump to a queue slot the caller can see.
@@ -540,6 +560,7 @@ pub fn context_menu(app: AppHandle, window: WebviewWindow) {
 pub fn hide_widget(app: AppHandle) {
     if let Some(widget) = app.get_webview_window(WIDGET) {
         let _ = widget.hide();
+        crate::on_screen(&app, WIDGET, false);
     }
 }
 

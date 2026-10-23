@@ -47,6 +47,10 @@ const TICK: Duration = Duration::from_millis(250);
 /// Ticks between checks that the system output device is still the one the
 /// stream was opened on. CoreAudio keeps a stream on its original device.
 const DEVICE_CHECK_TICKS: u64 = 8;
+/// Ticks paused before the sink and the output stream are let go. A running
+/// stream mixes silence at full rate and holds a sleep assertion in
+/// coreaudiod, so a folder left paused must not keep it open. 30 s.
+const PARK_AFTER_TICKS: u64 = 120;
 /// "Previous" within this many seconds of the start goes back a track; later
 /// it restarts the one playing, as every player does.
 const RESTART_AFTER: f64 = 3.0;
@@ -245,10 +249,16 @@ impl Playing {
 pub struct Local {
     active: AtomicBool,
     session: Mutex<Option<Session>>,
-    /// Opened on first use, not at launch: a YouTube-only user should never
-    /// hold CoreAudio open.
+    /// Opened when something actually plays, and closed again once playback
+    /// has been paused for `PARK_AFTER_TICKS`: neither a YouTube-only user nor
+    /// a folder restored paused should hold CoreAudio open.
     output: Mutex<Option<Output>>,
     playing: Mutex<Option<Playing>>,
+    /// Where a paused track stands when no sink holds it: loaded paused, or
+    /// paused long enough to be let go. Pressing play reopens it from here.
+    parked: Mutex<Option<f64>>,
+    /// Consecutive ticks spent paused, counted up to `PARK_AFTER_TICKS`.
+    idle_ticks: AtomicU64,
     /// Held across a whole load. The ticker only *tries* it, so it can never
     /// see the gap between one sink and the next and advance a second time.
     loading: Mutex<()>,
@@ -268,6 +278,8 @@ impl Local {
             session: Mutex::new(None),
             output: Mutex::new(None),
             playing: Mutex::new(None),
+            parked: Mutex::new(None),
+            idle_ticks: AtomicU64::new(0),
             loading: Mutex::new(()),
             ticks: AtomicU64::new(0),
             present: Mutex::new(HashMap::new()),
@@ -296,11 +308,14 @@ impl Local {
     }
 
     fn position(&self) -> f64 {
-        self.playing
-            .lock()
-            .expect("playing lock")
-            .as_ref()
-            .map_or(0.0, Playing::position)
+        if let Some(playing) = self.playing.lock().expect("playing lock").as_ref() {
+            return playing.position();
+        }
+        self.parked().unwrap_or(0.0)
+    }
+
+    fn parked(&self) -> Option<f64> {
+        *self.parked.lock().expect("parked lock")
     }
 
     /// A mixer on a live stream for the current default device, reopening the
@@ -315,6 +330,10 @@ impl Local {
 
     /// Decode `track` from `start` seconds into a new sink and swap it in,
     /// dropping (never clearing) the old one. Blocking file IO.
+    ///
+    /// Paused, the file is only opened to prove it decodes and the track is
+    /// parked: nothing touches the output, so restoring a folder at launch
+    /// does not start a stream that would idle until someone pressed play.
     fn start(&self, track: &Track, play: bool, start: f64) -> Result<(), String> {
         let file = std::fs::File::open(&track.path).map_err(|e| e.to_string())?;
         let mut source = rodio::Decoder::try_from(file).map_err(|e| e.to_string())?;
@@ -322,14 +341,18 @@ impl Local {
         if start > 0.0 && source.try_seek(Duration::from_secs_f64(start)).is_ok() {
             offset = start;
         }
+        self.idle_ticks.store(0, Ordering::Relaxed);
+        if !play {
+            *self.playing.lock().expect("playing lock") = None;
+            *self.parked.lock().expect("parked lock") = Some(offset);
+            return Ok(());
+        }
         let mixer = self.mixer().ok_or("No audio output device")?;
         let sink = Sink::connect_new(&mixer);
         sink.set_volume(self.level());
-        if !play {
-            sink.pause();
-        }
         sink.append(source);
         *self.playing.lock().expect("playing lock") = Some(Playing { sink, offset });
+        *self.parked.lock().expect("parked lock") = None;
         Ok(())
     }
 
@@ -345,6 +368,16 @@ impl Local {
     fn stop(&self) {
         // Dropping, not `clear()`: see the module note.
         *self.playing.lock().expect("playing lock") = None;
+        *self.parked.lock().expect("parked lock") = None;
+    }
+
+    /// Let a paused track go: remember where it stands, drop its sink and
+    /// close the output stream. Called under `loading`.
+    fn park(&self) {
+        let position = self.position();
+        *self.playing.lock().expect("playing lock") = None;
+        *self.parked.lock().expect("parked lock") = Some(position);
+        *self.output.lock().expect("output lock") = None;
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -1045,8 +1078,9 @@ impl Local {
         let _loading = self.loading.lock().expect("loading lock");
         let Some(playing) = self.with(|s| s.playing) else { return };
         // A sink on a dead or no-longer-default device would "resume" in
-        // silence: restart it on a live one at the same place instead.
-        if !playing && !self.output_live() {
+        // silence, and a parked track has no sink at all: (re)start it on a
+        // live output at the same place instead.
+        if !playing && (self.parked().is_some() || !self.output_live()) {
             let position = self.position();
             let Some(track) = self.with(|s| s.current().cloned()).flatten() else { return };
             if self.start(&track, true, position).is_ok() {
@@ -1225,12 +1259,14 @@ impl Local {
     }
 
     fn tick(&self, core: &Arc<Core>) {
+        // Idle ticks come every `DEVICE_CHECK_TICKS` already (`spawn_ticker`),
+        // so each one checks the mounts.
+        if !self.is_active() {
+            self.refresh_present(core);
+            return;
+        }
         if self.ticks.load(Ordering::Relaxed) % DEVICE_CHECK_TICKS == 0 {
             self.refresh_present(core);
-        }
-        if !self.is_active() {
-            self.ticks.fetch_add(1, Ordering::Relaxed);
-            return;
         }
         // A load is swapping sinks: what we would read is the gap between them.
         let Ok(_loading) = self.loading.try_lock() else { return };
@@ -1256,7 +1292,16 @@ impl Local {
         // on from here on whatever is the default now.
         let check = self.ticks.fetch_add(1, Ordering::Relaxed) % DEVICE_CHECK_TICKS == 0;
         let loaded = self.playing.lock().expect("playing lock").is_some();
-        let stale = check && loaded && !self.output_live();
+
+        // Paused for a while: let the stream go rather than mix silence.
+        if playing {
+            self.idle_ticks.store(0, Ordering::Relaxed);
+        } else if self.idle_ticks.fetch_add(1, Ordering::Relaxed) + 1 == PARK_AFTER_TICKS {
+            self.park();
+            return;
+        }
+
+        let stale = check && loaded && playing && !self.output_live();
         if stale {
             if let Some(track) = self.with(|s| s.current().cloned()).flatten() {
                 let _ = self.start(&track, playing, position);
@@ -1274,11 +1319,16 @@ impl Local {
 
     /// Its own thread rather than an async task: a tick may load the next
     /// track, which is file IO.
+    ///
+    /// With no folder open there is nothing to advance, only mounts to watch
+    /// for the menus, so the thread wakes every two seconds rather than four
+    /// times a second — most people using only YouTube Music never open one.
     pub fn spawn_ticker(core: Arc<Core>) {
         let _ = std::thread::Builder::new()
             .name("local-tick".into())
             .spawn(move || loop {
-                std::thread::sleep(TICK);
+                let idle = !core.local().is_active();
+                std::thread::sleep(if idle { TICK * DEVICE_CHECK_TICKS as u32 } else { TICK });
                 core.local().tick(&core);
             });
     }
