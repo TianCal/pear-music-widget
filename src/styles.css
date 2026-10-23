@@ -1304,9 +1304,19 @@ body.panel .close-widget {
 
 .queue-eq i {
   width: 2px;
+  height: 11px;
   border-radius: 1px;
   background: var(--accent);
+  /* Scaled rather than resized: animating height re-laid out the row on every
+     frame, forever. A transform is composited and costs no layout. */
+  transform-origin: bottom;
   animation: queue-bounce 900ms ease-in-out infinite alternate;
+}
+
+/* Paused playback holds the bars where they are instead of bouncing to
+   nothing. */
+body:not(.is-playing) .queue-eq i {
+  animation-play-state: paused;
 }
 
 .queue-eq i:nth-child(2) {
@@ -1319,10 +1329,10 @@ body.panel .close-widget {
 
 @keyframes queue-bounce {
   from {
-    height: 3px;
+    transform: scaleY(0.2727);
   }
   to {
-    height: 11px;
+    transform: scaleY(1);
   }
 }
 

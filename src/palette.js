@@ -139,6 +139,8 @@
       // How much colour there is per pixel looked at, rather than in total.
       rate: opaque ? vivid / opaque : 0,
       lightness: opaque ? lightnessSum / opaque : 0.5,
+      // Nothing opaque at all is a draw that painted nothing, not a cover.
+      blank: !opaque,
     };
   };
 
@@ -195,13 +197,14 @@
    * something unrelated.
    */
   const spread = (data) => {
-    const { buckets, sat, rate, lightness } = histogram(data);
+    const { buckets, sat, rate, lightness, blank } = histogram(data);
 
     if (rate < MIN_COLOUR_RATE) {
       // Genuinely greyscale artwork. Keep the app's accent so the transport
       // still reads, but let the card stay as colourless as the cover.
       return {
         greyscale: true,
+        blank,
         lightness,
         hues: [
           { hue: FALLBACK.h, sat: 0.08 },
@@ -327,9 +330,12 @@
    */
   const extract = (dataUrl, strength = 1) =>
     new Promise((resolve) => {
-      const done = (palette) => {
-        sampledFrom = dataUrl;
-        sampled = palette;
+      // A failed decode or a blank draw is remembered as nothing at all: both
+      // usually mean a hidden webview had no bitmap yet, and caching that
+      // answer would stop the re-sample on becoming visible from correcting it.
+      const done = (palette, keep = true) => {
+        sampledFrom = keep ? dataUrl : null;
+        sampled = keep ? palette : null;
         resolve(build(palette, strength));
       };
       if (!dataUrl) return done(FALLBACK_PALETTE);
@@ -341,9 +347,10 @@
         try {
           ctx.clearRect(0, 0, SAMPLE, SAMPLE);
           ctx.drawImage(img, 0, 0, SAMPLE, SAMPLE);
-          done(spread(ctx.getImageData(0, 0, SAMPLE, SAMPLE).data));
+          const palette = spread(ctx.getImageData(0, 0, SAMPLE, SAMPLE).data);
+          done(palette, !palette.blank);
         } catch {
-          done(FALLBACK_PALETTE);
+          done(FALLBACK_PALETTE, false);
         }
       };
 
@@ -358,10 +365,10 @@
       // resolved while the dropdown was closed came up pink in the dropdown and
       // its real colour in the widget.
       if (typeof img.decode === 'function') {
-        img.decode().then(measure, () => done(FALLBACK_PALETTE));
+        img.decode().then(measure, () => done(FALLBACK_PALETTE, false));
       } else {
         img.onload = measure;
-        img.onerror = () => done(FALLBACK_PALETTE);
+        img.onerror = () => done(FALLBACK_PALETTE, false);
       }
     });
 

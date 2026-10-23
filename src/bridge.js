@@ -64,6 +64,7 @@ window.widget = {
   onPanelCollapsed: (handler) => on('panel-collapsed', handler),
   onPanelRestore: (handler) => on('panel-restore', handler),
   onZoom: (handler) => on('zoom', handler),
+  onOnScreen: (handler) => on('on-screen', handler),
   retry: () => invoke('retry'),
   quit: () => invoke('quit'),
 };

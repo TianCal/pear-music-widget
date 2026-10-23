@@ -227,9 +227,15 @@ const setupMarquee = (span, { intro = false } = {}) => {
   }
 };
 
-/** Recalculate the resting title width without replaying its intro pass. */
+/** Recalculate the resting title width without replaying its intro pass.
+ *  Coalesced to one frame: each pass writes then measures, so a burst of
+ *  calls — a window resize fires many — would force a layout per call. */
+let marqueesPending = false;
 const refreshMarquees = () => {
+  if (marqueesPending) return;
+  marqueesPending = true;
   requestAnimationFrame(() => {
+    marqueesPending = false;
     setupMarquee(el.title);
     setupMarquee(el.subtitle);
   });
@@ -503,25 +509,48 @@ const wantArt = (ids, size) => {
     const reply = await window.widget.queueArt([...batch.ids], batch.size);
     if (!reply?.ok) return;
 
-    let landed = false;
+    const landed = new Set();
     for (const [id, art] of Object.entries(reply.art || {})) {
       cacheArt(id, art);
-      landed = true;
+      landed.add(id);
     }
     // Written straight into whatever is on screen rather than re-rendering: a
     // reply usually lands mid-scroll, and rebuilding would fight the drag that
     // asked for it.
-    if (landed) paintArt();
+    if (landed.size) paintArt(landed);
   }, 120);
 };
 
-/** Fill in any `<img data-art>` whose artwork has since arrived. */
-const paintArt = () => {
+/** Fill in any still-empty `<img data-art>` among the `ids` that just arrived.
+ *  Read straight from the map rather than through `artOf`: promoting every
+ *  row in the DOM would make the cache's order mean nothing. An image that
+ *  already has a picture keeps it — reading `src` back would only resolve a
+ *  data URL to compare it with the one it already is. */
+const paintArt = (ids) => {
   for (const img of document.querySelectorAll('img[data-art]')) {
-    const art = artOf(img.dataset.art);
-    if (art && img.src !== art) img.src = art;
+    if (img.hasAttribute('src') || !ids.has(img.dataset.art)) continue;
+    const art = state.art.get(img.dataset.art);
+    if (art) img.src = art;
   }
 };
+
+/** Ids of the rows in `rows[from, to)` whose image is still empty. A row keeps
+ *  its picture after the cache has evicted it, so asking again would fetch
+ *  artwork that is already on screen. The image is each row's first child. */
+const unpaintedIds = (rows, from, to) => {
+  const ids = [];
+  for (let at = Math.max(0, from); at < Math.min(rows.length, to); at += 1) {
+    if (!rows[at].firstElementChild.hasAttribute('src')) ids.push(rows[at].dataset.videoId);
+  }
+  return ids;
+};
+
+/** What a list draws from each item. The playing slot is left out on purpose:
+ *  it moves once a track, and rebuilding every row — up to 500 of them — to
+ *  move one marker was the whole cost of a track change. The title and artist
+ *  are in because a rename of an artist re-sends the queue with new text. */
+const queueIdentity = (items) =>
+  items.map((item) => `${item.videoId}:${item.rating || ''}:${item.title}\t${item.artist}`).join('\n');
 
 /** What is currently drawn, so an unchanged queue is left alone. */
 let upnextRendered = null;
@@ -538,9 +567,16 @@ const renderUpNext = () => {
   // The queue changes about once a track. Tearing the cards down and building
   // them again — images and all — on every position tick was most of what this
   // surface cost while a track played.
-  const identity = `${current}\n${items.map((item) => `${item.videoId}:${item.rating || ''}`).join('\n')}`;
+  const identity = queueIdentity(items);
   if (identity === upnextRendered) {
-    paintArt();
+    // Same list, so at most the playing mark moves — and only then is it worth
+    // measuring anything to re-centre.
+    const was = el.upnextGrid.querySelector(':scope > .now');
+    const now = el.upnextGrid.children[current] || null;
+    if (was === now) return;
+    was?.classList.remove('now');
+    now?.classList.add('now');
+    centreUpNext();
     return;
   }
   upnextRendered = identity;
@@ -581,6 +617,10 @@ const renderUpNext = () => {
     el.upnextGrid.append(card);
   });
 
+  centreUpNext();
+};
+
+const centreUpNext = () => {
   // Centre the playing track rather than parking it at the left edge, so what
   // has just played sits to its left and what is coming to its right — with
   // three columns that puts it in the middle one. Clamped at zero, so the start
@@ -589,7 +629,7 @@ const renderUpNext = () => {
   // Measured off the card rather than computed from a column width: the column
   // is a percentage of the content box less the gap, and guessing at that
   // drifts further with every column.
-  const now = el.upnextGrid.children[current ?? 0];
+  const now = el.upnextGrid.children[state.queue.current ?? 0];
   if (now) {
     const centred = now.offsetLeft + now.offsetWidth / 2 - el.upnextGrid.clientWidth / 2;
     el.upnextGrid.scrollLeft = Math.max(0, centred);
@@ -599,16 +639,15 @@ const renderUpNext = () => {
 
 /** Artwork for the cards on screen, plus a screenful either side. */
 const upnextArtInView = () => {
-  const cards = [...el.upnextGrid.children];
+  // Indexed live rather than copied: this runs on every scroll event, and only
+  // a screenful of the list is wanted.
+  const cards = el.upnextGrid.children;
   if (!cards.length) return;
   // Two cards to a column, so a screenful is four and the step is one card's
   // width plus the gap.
   const step = (cards[0].offsetWidth || 140) + 8;
   const first = Math.floor(el.upnextGrid.scrollLeft / step) * 2;
-  wantArt(
-    cards.slice(Math.max(0, first - 4), first + 12).map((card) => card.dataset.videoId),
-    128,
-  );
+  wantArt(unpaintedIds(cards, first - 4, first + 12), 128);
 };
 
 el.upnextGrid.addEventListener('scroll', upnextArtInView, { passive: true });
@@ -631,7 +670,37 @@ el.upnext.addEventListener(
 /** What the panel has drawn, so scrolling it does not rebuild it. */
 let queueRendered = null;
 
-const renderQueue = () => {
+/** The equaliser on the playing row, its duration on every other. */
+const setQueueTail = (row, item, playing) => {
+  row.querySelector(':scope > .queue-eq, :scope > .queue-dur')?.remove();
+  if (playing) {
+    const eq = document.createElement('span');
+    eq.className = 'queue-eq';
+    eq.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+    row.append(eq);
+  } else if (item?.duration) {
+    const dur = document.createElement('span');
+    dur.className = 'queue-dur';
+    dur.textContent = item.duration;
+    row.append(dur);
+  }
+};
+
+/** Scroll the playing row to the middle of the panel. */
+const centreQueue = () => {
+  const now = el.queueList.querySelector(':scope > .now');
+  if (now) {
+    el.queueList.scrollTop = now.offsetTop - el.queueList.clientHeight / 2 + now.offsetHeight / 2;
+  }
+};
+
+/** Which item the panel's `.now` row is, so moving it knows what to restore. */
+let queueNowAt = null;
+
+/** `centre` asks for the playing row in the middle even if nothing changed —
+ *  opening the panel does, rather than coming back wherever the last browse
+ *  left it. */
+const renderQueue = ({ centre = false } = {}) => {
   if (el.queue.hidden) return;
 
   // The note is the panel's only text now that the head is gone, and it earns
@@ -643,13 +712,33 @@ const renderQueue = () => {
   el.queueNote.textContent = note;
   el.queueNote.hidden = !note;
 
-  const identity = `${current}\n${items.map((item) => `${item.videoId}:${item.rating || ''}`).join('\n')}`;
+  const identity = queueIdentity(items);
   if (identity === queueRendered) {
-    paintArt();
+    // Same list: hand the playing mark and its equaliser over to the new row.
+    // Not re-centred on a track change — the user's scroll position is theirs.
+    const rows = el.queueList.children;
+    if (queueNowAt !== current) {
+      const was = rows[queueNowAt];
+      if (was) {
+        was.classList.remove('now');
+        setQueueTail(was, items[queueNowAt], false);
+      }
+      const now = rows[current];
+      if (now) {
+        now.classList.add('now');
+        setQueueTail(now, items[current], true);
+      }
+      queueNowAt = current;
+    }
+    if (centre) {
+      centreQueue();
+      queueArtInView();
+    }
     return;
   }
   const first = queueRendered === null;
   queueRendered = identity;
+  queueNowAt = current;
 
   el.queueList.replaceChildren();
   items.forEach((item, at) => {
@@ -681,45 +770,27 @@ const renderQueue = () => {
 
     text.append(name, artist);
     row.append(img, text);
-
-    if (at === current) {
-      const eq = document.createElement('span');
-      eq.className = 'queue-eq';
-      eq.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
-      row.append(eq);
-    } else if (item.duration) {
-      const dur = document.createElement('span');
-      dur.className = 'queue-dur';
-      dur.textContent = item.duration;
-      row.append(dur);
-    }
+    setQueueTail(row, item, at === current);
 
     el.queueList.append(row);
   });
 
-  // Centre the playing track. On the first draw only — after that the user's
-  // scroll position is theirs, and a track change should not yank the list out
-  // from under a browse.
-  const now = el.queueList.querySelector('.queue-item.now');
-  if (now && first) {
-    el.queueList.scrollTop = now.offsetTop - el.queueList.clientHeight / 2 + now.offsetHeight / 2;
-  }
+  // Centre the playing track. On the first draw or an open only — after that
+  // the user's scroll position is theirs, and a track change should not yank
+  // the list out from under a browse.
+  if (first || centre) centreQueue();
   queueArtInView();
 };
 
 /** Artwork for the rows on screen, plus a screenful either side. */
 const queueArtInView = () => {
-  const rows = [...el.queueList.children];
+  // Indexed live rather than copied, as in the strip: this runs per scroll event.
+  const rows = el.queueList.children;
   if (!rows.length) return;
   const row = rows[0].offsetHeight || 40;
   const first = Math.floor(el.queueList.scrollTop / row);
   const visible = Math.ceil(el.queueList.clientHeight / row);
-  wantArt(
-    rows
-      .slice(Math.max(0, first - visible), first + visible * 2)
-      .map((node) => node.dataset.videoId),
-    128,
-  );
+  wantArt(unpaintedIds(rows, first - visible, first + visible * 2), 128);
 };
 
 el.queueList.addEventListener('scroll', queueArtInView, { passive: true });
@@ -751,6 +822,8 @@ const renderControls = () => {
     written.play = state.isPlaying;
     el.playIcon.firstElementChild.setAttribute('href', state.isPlaying ? '#i-pause' : '#i-play');
     el.play.title = state.isPlaying ? 'Pause' : 'Play';
+    // The queue's equaliser holds still while paused.
+    document.body.classList.toggle('is-playing', !!state.isPlaying);
   }
 
   el.shuffle.classList.toggle('on', !!state.shuffle);
@@ -838,11 +911,18 @@ new ResizeObserver((entries) => {
 // almost every callback rediscovering the same pixel. Ten updates a second are
 // comfortably faster than the rail can move, while keeping lyric cues within
 // 100 ms. Direct state and pointer changes still render immediately below.
-// The loop stops as soon as playback pauses or the surface is hidden.
+// The loop stops as soon as playback pauses or the surface is hidden. The
+// dropdown can ask `document.hidden`; the widget is a non-activating window
+// whose document reports hidden even while it is on screen (gating on it left
+// the playhead and synced lyrics stepping once a second), so Rust tells it.
 const PROGRESS_TICK_MS = 100;
 let ticking = false;
+/** Whether the widget window is on screen, told by Rust (`on-screen`) since
+ *  its `document.hidden` cannot say. Unused by the dropdown. */
+let widgetOnScreen = true;
 
-const shouldTick = () => !document.hidden && (clock.playing || seeking);
+const shouldTick = () =>
+  (IS_PANEL ? !document.hidden : widgetOnScreen) && (clock.playing || seeking);
 
 const tick = () => {
   renderProgress();
@@ -1238,10 +1318,9 @@ const toggleQueue = () => {
   }
   if (searching) resetSearch(false);
   // Re-centred on the playing track each time it is opened, rather than coming
-  // back wherever the last browse left it.
-  queueRendered = null;
+  // back wherever the last browse left it. Only a changed list is rebuilt.
   setPanel('queue');
-  renderQueue();
+  renderQueue({ centre: true });
 };
 
 el.cornerQueue.addEventListener('click', (event) => {
@@ -1826,6 +1905,12 @@ el.setupOpen.addEventListener('click', () => {
 // The page is authored at a fixed base size and scaled by the main process, so
 // the CSS corner radius has to shrink as the zoom grows to stay flush with the
 // window's own native rounding.
+window.widget.onOnScreen(({ label, shown }) => {
+  if (IS_PANEL || label !== 'widget') return;
+  widgetOnScreen = shown;
+  if (shown) bumpProgress();
+});
+
 window.widget.onZoom((zoom) => {
   document.documentElement.style.setProperty('--radius', `${(12 / zoom).toFixed(2)}px`);
 });
@@ -1864,9 +1949,6 @@ window.widget.getState().then((boot) => {
   else if (!IS_PANEL && boot.panel === 'queue') toggleQueue();
 });
 
-window.addEventListener('resize', () => {
-  setupMarquee(el.title);
-  setupMarquee(el.subtitle);
-});
+window.addEventListener('resize', refreshMarquees);
 
 bumpProgress();
