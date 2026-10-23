@@ -294,16 +294,30 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     let which = which.filter(|which| !which.is_empty());
     let core = core(&app);
 
-    // The widget comes back up showing whatever it was left showing — the lyrics
-    // or the queue, both modes you left open. Not a search: that is a query you
-    // have finished with. Not the dropdown either: it is a menu that collapses
-    // on blur by design.
-    if window.label() != PANEL {
+    // Each surface comes back up showing whatever it was left showing — the
+    // lyrics or the queue, both modes you left open. Not a search: that is a
+    // query you have finished with. Only while connected: going offline closes
+    // the panel on its own, and that is not you choosing to close it.
+    if core.status() == "connected" {
         let remembered = which
             .clone()
             .filter(|which| window::panel_is_restorable(which));
-        if core.store.get(|s| s.panel.clone()) != remembered {
-            core.store.update(|s| s.panel = remembered);
+        let dropdown = window.label() == PANEL;
+        let stored = core.store.get(|s| {
+            if dropdown {
+                s.dropdown_panel.clone()
+            } else {
+                s.panel.clone()
+            }
+        });
+        if stored != remembered {
+            core.store.update(|s| {
+                if dropdown {
+                    s.dropdown_panel = remembered;
+                } else {
+                    s.panel = remembered;
+                }
+            });
         }
     }
 
@@ -317,8 +331,10 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
         }
     });
 
-    core.set_lyrics_wanted(window.label(), which.as_deref() == Some("lyrics"));
-    core.set_queue_wanted(window.label(), which.as_deref() == Some("queue"));
+    // A hidden dropdown keeps its panel but wants nothing; showing it asks again.
+    let watching = window.label() != PANEL || crate::panel::is_visible(&app);
+    core.set_lyrics_wanted(window.label(), watching && which.as_deref() == Some("lyrics"));
+    core.set_queue_wanted(window.label(), watching && which.as_deref() == Some("queue"));
 
     let spawned = Arc::clone(&core);
     tauri::async_runtime::spawn(async move {
@@ -426,24 +442,6 @@ pub fn context_menu(app: AppHandle, window: WebviewWindow) {
             let _ = target.popup_menu(&menu);
         }
     });
-}
-
-#[tauri::command]
-pub fn set_skin(app: AppHandle, skin: String) -> Value {
-    if !window::SKINS.contains(&skin.as_str()) {
-        return json!({ "ok": false });
-    }
-    crate::tray::set_skin(&app, &skin);
-    json!({ "ok": true })
-}
-
-#[tauri::command]
-pub fn set_panel_skin(app: AppHandle, skin: String) -> Value {
-    if !window::SKINS.contains(&skin.as_str()) {
-        return json!({ "ok": false });
-    }
-    crate::tray::set_panel_skin(&app, &skin);
-    json!({ "ok": true })
 }
 
 /// The widget's own close button. Exactly what "Hide widget" in the menu does —

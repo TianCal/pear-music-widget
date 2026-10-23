@@ -137,44 +137,63 @@ pub fn set_expanded(app: &AppHandle, panel: &WebviewWindow, which: Option<&str>)
     resize(app, panel);
 }
 
-/// Switching the dropdown's skin changes its natural size.
-pub fn apply_panel_skin(app: &AppHandle, skin: &str) {
-    let store = app.state::<Arc<Store>>().inner().clone();
-    store.update(|s| s.panel_skin = skin.to_string());
+pub fn is_visible(app: &AppHandle) -> bool {
+    state(app).visible.load(Ordering::SeqCst)
+}
 
-    if let Some(panel) = app.get_webview_window(PANEL) {
-        // The natural size changed, so the collapsed rect is what the zoom
-        // follows — never the geometry the window still reports.
-        let rect = resize(app, &panel);
-        let size = size_of(app);
-        window::apply_zoom_to(app, &panel, Rect { width: size.0, height: size.1, ..rect });
+fn expanded_by(app: &AppHandle) -> Option<String> {
+    state(app).expanded_by.lock().expect("panel lock").clone()
+}
+
+/// Tell `Core` whether the dropdown's open panel is worth fetching for.
+fn set_wanted(app: &AppHandle, open: Option<&str>) {
+    if let Some(core) = app.try_state::<Arc<Core>>() {
+        core.set_lyrics_wanted(PANEL, open == Some("lyrics"));
+        core.set_queue_wanted(PANEL, open == Some("queue"));
     }
 }
 
-/// A dropdown that reopened mid-search would be showing a stale query, so the
-/// renderer is told to tear its panel down too.
+/// Put the dropdown's panel away as it hides. The queue and lyrics stay open
+/// so the next drop shows them again at once; they only stop being fetched.
+/// A search is torn down: a dropdown that reopened mid-search would be showing
+/// a stale query, so the renderer is told to tear its panel down too.
 fn collapse(app: &AppHandle, panel: &WebviewWindow) {
-    let had_panel = state(app)
-        .expanded_by
-        .lock()
-        .expect("panel lock")
-        .is_some();
-    if !had_panel {
+    // The renderer tears its panel down locally when it gets `panel-collapsed`
+    // and never calls `set_panel(null)`, so nothing else would ever clear these.
+    // A hidden dropdown would go on pulling lyrics — and, worse, a `/queue` GET
+    // on every track change — for as long as it stayed hidden. Cleared here
+    // because this is where the truth is.
+    set_wanted(app, None);
+
+    let Some(open) = expanded_by(app) else {
+        return;
+    };
+    if window::panel_is_restorable(&open) {
         return;
     }
     set_expanded(app, panel, None);
-
-    // The renderer tears its panel down locally when it gets `panel-collapsed`
-    // and never calls `set_panel(null)`, so nothing else would ever clear these.
-    // The dropdown would go on pulling lyrics — and, worse, a `/queue` GET on
-    // every track change — for the rest of the process, for a panel dismissed
-    // once. Cleared here because this is where the truth is.
-    if let Some(core) = app.try_state::<Arc<Core>>() {
-        core.set_lyrics_wanted(PANEL, false);
-        core.set_queue_wanted(PANEL, false);
-    }
-
     let _ = app.emit_to(PANEL, "panel-collapsed", ());
+}
+
+/// Before the dropdown shows: reopen the panel it was last left showing if it
+/// is not still open, and ask for its data again either way.
+fn restore(app: &AppHandle) {
+    let open = expanded_by(app).or_else(|| {
+        let connected = app
+            .try_state::<Arc<Core>>()
+            .is_some_and(|core| core.status() == "connected");
+        let remembered = app
+            .state::<Arc<Store>>()
+            .get(|s| s.dropdown_panel.clone())
+            .filter(|which| window::panel_is_restorable(which))
+            .filter(|_| connected)?;
+        // Sized here, before the window is on screen, so it drops at its full
+        // height; the renderer's own `set_panel` then finds nothing to do.
+        *state(app).expanded_by.lock().expect("panel lock") = Some(remembered.clone());
+        let _ = app.emit_to(PANEL, "panel-restore", remembered.clone());
+        Some(remembered)
+    });
+    set_wanted(app, open.as_deref());
 }
 
 /// Put the dropdown away wherever it happens to be, without the toggle's second
@@ -234,11 +253,17 @@ fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) -> Rect {
     let x = (anchor_x - size.0 / 2.0).clamp(min_x.min(max_x), max_x.max(min_x)).round();
     let y = (icon.y + icon.height + GAP_BELOW_MENU_BAR).round();
 
+    let extra = expanded_by(app)
+        .as_deref()
+        .and_then(window::panel_height)
+        .unwrap_or(0.0);
+    let height = size.1 + extra;
+    let max_y = area.y + area.height - height;
     let rect = Rect {
         x,
-        y,
+        y: y.min(max_y.max(area.y)).round(),
         width: size.0,
-        height: size.1,
+        height,
     };
     window::set_bounds(app, panel, rect);
     rect
@@ -265,6 +290,7 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
         return;
     }
 
+    restore(app);
     let rect = position(app, &panel, icon);
     window::apply_zoom_to(app, &panel, rect);
     state.visible.store(true, Ordering::SeqCst);

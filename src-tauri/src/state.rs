@@ -928,8 +928,8 @@ mod tests {
 
     fn playback_state() -> PlayerState {
         let mut state = PlayerState::new(
-            "classic".into(),
-            "classic".into(),
+            "stack".into(),
+            "stack".into(),
             true,
             1.0,
             0.0,

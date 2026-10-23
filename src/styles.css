@@ -523,10 +523,9 @@ body.panel .resize-edges {
   color: var(--accent);
 }
 
-/* Hidden in both skins: Stack has no room in its centred transport, and Classic
-   trades it for the larger cover — six controls want 186px of a 180px column,
-   five want 156px. The button stays in the markup so restoring it is one line
-   and `renderControls` needs no special case. */
+/* Hidden: Stack has no room in its centred transport. The button stays in the
+   markup so restoring it is one line and `renderControls` needs no special
+   case. */
 #btn-shuffle {
   display: none;
 }
@@ -636,8 +635,7 @@ body.panel .resize-edges {
    turns into the volume for as long as the wheel is turning, then hands itself
    back. No new chrome, and nothing moves.
 
-   Hidden by default and revealed per skin below: Classic peeks its own slider,
-   and two readouts for one change would be one too many. */
+   Hidden by default and revealed for Stack below. */
 .seek-vol {
   position: absolute;
   inset: 0;
@@ -846,12 +844,6 @@ button.lyric::after {
 
 .lyrics-note[hidden] {
   display: none;
-}
-
-/* Classic is a small card: tighter type, tighter rhythm. */
-body.skin-classic .lyric {
-  font-size: 11.5px;
-  padding: 4px 0;
 }
 
 /* Stack is wider and already vertical, so it can carry a larger, airier roll
@@ -1527,135 +1519,6 @@ body.skin-stack .upnext:not([hidden]) {
   font-size: 9.5px;
   color: var(--fg-dim);
   line-height: 1.3;
-}
-
-
-/* --------------------------------------------------------------- compact */
-
-/* Classic — artwork left, titles and the full transport right, in a tighter box
-   than the base metrics. Every control is present. */
-
-body.skin-classic .player {
-  padding: 11px;
-  gap: 10px;
-}
-
-body.skin-classic .corner-bar {
-  top: 6px;
-  right: 6px;
-}
-
-body.skin-classic .corner {
-  width: 18px;
-  height: 18px;
-}
-
-/* Tucked in and shrunk to match, so it stays the corner bar's reflection on the
-   tighter skin rather than the one oversized thing on the card. */
-body.skin-classic .close-widget {
-  top: 5px;
-  left: 5px;
-  width: 18px;
-  height: 18px;
-}
-
-body.skin-classic .close-widget svg {
-  width: 12px;
-  height: 12px;
-}
-
-/* 18px buttons in this skin, so a narrower step. */
-body.skin-classic .titles {
-  --corner-step: 20px;
-}
-
-body.skin-classic .search {
-  padding: 0 10px 8px;
-}
-
-/* Exactly the height of the row it sits in — card 110, less 11px of padding top
-   and bottom — so its edges line up with the title above and the transport
-   below instead of floating in the middle of them. Anything taller would need
-   the padding back. */
-body.skin-classic .art {
-  width: 88px;
-  height: 88px;
-  border-radius: 12px;
-}
-
-body.skin-classic .art-empty .glyph {
-  width: 28px;
-  height: 28px;
-}
-
-body.skin-classic .meta {
-  gap: 7px;
-}
-
-body.skin-classic .titles {
-  gap: 1px;
-}
-
-body.skin-classic .title {
-  font-size: 13px;
-}
-
-body.skin-classic .subtitle {
-  font-size: 11px;
-}
-
-body.skin-classic .marquee.scroll {
-  padding-left: 10px; /* == the compact flex gap */
-  margin-left: -10px;
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
-  mask-image: linear-gradient(90deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
-}
-
-body.skin-classic .seek {
-  height: 9px;
-}
-
-body.skin-classic .btn {
-  width: 26px;
-  height: 26px;
-}
-
-body.skin-classic .btn svg {
-  width: 17px;
-  height: 17px;
-}
-
-body.skin-classic .btn.sm {
-  width: 24px;
-  height: 24px;
-}
-
-body.skin-classic .btn.sm svg {
-  width: 14px;
-  height: 14px;
-}
-
-body.skin-classic .btn.play {
-  width: 30px;
-  height: 30px;
-}
-
-body.skin-classic .btn.play svg {
-  width: 15px;
-  height: 15px;
-}
-
-body.skin-classic .setup {
-  padding: 12px 18px;
-  gap: 3px;
-}
-
-body.skin-classic .setup h1 {
-  font-size: 12px;
-}
-
-body.skin-classic .setup p {
-  font-size: 10px;
 }
 
 /* ---------------------------------------------------------------- setup */

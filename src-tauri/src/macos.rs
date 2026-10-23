@@ -94,6 +94,14 @@ pub fn double_click_interval() -> f64 {
     interval.clamp(0.2, 0.6)
 }
 
+/// Whether Option is down right now. `NSEvent.modifierFlags` is the live state,
+/// which during a click handler is the state the click was made with.
+pub fn option_held() -> bool {
+    const OPTION: usize = 1 << 19; // NSEventModifierFlagOption
+    let flags: usize = unsafe { msg_send![class!(NSEvent), modifierFlags] };
+    flags & OPTION != 0
+}
+
 pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
     let alpha = alpha.clamp(0.0, 1.0);
     with_ns_window(window, move |handle| unsafe {

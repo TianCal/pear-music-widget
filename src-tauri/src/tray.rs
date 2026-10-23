@@ -69,8 +69,6 @@ const TINTS: [(u32, &str); 5] = [
     (100, "Vivid"),
 ];
 
-const SKIN_LABELS: [(&str, &str); 2] = [("classic", "Classic"), ("stack", "Stack")];
-
 /// Stillness before the corner buttons fade, in seconds. Zero remains "Never";
 /// a one-millisecond delay hides immediately while preserving click-to-wake.
 const CORNER_AUTOHIDE: [(f64, &str); 6] = [
@@ -201,33 +199,6 @@ fn quit_music_app_then(app: AppHandle) {
 }
 
 // ------------------------------------------------------------------- pieces
-
-fn skin_submenu(
-    app: &AppHandle,
-    id_prefix: &str,
-    label: &str,
-    current: &str,
-) -> tauri::Result<Submenu<tauri::Wry>> {
-    let items: Vec<CheckMenuItem<tauri::Wry>> = SKIN_LABELS
-        .iter()
-        .map(|(key, text)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("{id_prefix}:{key}"),
-                text,
-                true,
-                *key == current,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
-
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    Submenu::with_items(app, label, true, &refs)
-}
 
 fn opacity_submenu(
     app: &AppHandle,
@@ -513,11 +484,8 @@ fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenu
 /// Independent checkboxes rather than a skin-style pick-one, so unlike every
 /// other submenu here more than one is ticked at a time.
 ///
-/// **Kept per skin**, and `skin` is the one this menu edits: how much chrome
-/// fits above the titles is a property of the card, so four buttons over
-/// Stack's 330×284 and one over Classic's 300×110 is a reasonable pair of
-/// answers to hold at once rather than a setting to keep re-flipping. Each
-/// menu passes the skin of the surface it belongs to.
+/// **Kept per skin**, and `skin` is the one this menu edits. There is only
+/// Stack now, so the widget and the dropdown share one set.
 fn corner_submenu(
     app: &AppHandle,
     skin: &str,
@@ -640,13 +608,6 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &always_on_top_item(app, always_on_top)?,
-            &skin_submenu(app, "skin", "Skin", &widget_skin)?,
-            &skin_submenu(
-                app,
-                "panelSkin",
-                "Dropdown skin",
-                &window::panel_skin_of(&store),
-            )?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity, store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -684,8 +645,8 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// Right-click menu for the floating widget itself: the things you would want
 /// while looking at it, minus the app-level plumbing that belongs in the tray.
 ///
-/// Deliberately no "Dropdown skin" — every item here acts on the window you
-/// right-clicked, and the dropdown has its own menu for its own layout.
+/// Every item here acts on the window you right-clicked; the dropdown has its
+/// own menu.
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let snapshot = app.state::<Arc<Core>>().snapshot();
     let store = app.state::<Arc<Store>>();
@@ -714,7 +675,6 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity), store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -750,7 +710,6 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         app,
         &[
-            &skin_submenu(app, "panelSkin", "Dropdown skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyrics_submenu(
                 app,
@@ -774,54 +733,34 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 // ------------------------------------------------------------------ actions
 
-pub fn set_skin(app: &AppHandle, skin: &str) {
-    // The renderer's IPC lands on a worker thread, so the window work is hopped
-    // to the main thread as one closure — the aspect lock has to be released,
-    // the window resized and the lock re-applied in that order.
-    let (handle, layout) = (app.clone(), skin.to_string());
-    let _ = app.run_on_main_thread(move || {
-        if let Some(widget) = handle.get_webview_window(WIDGET) {
-            window::apply_skin(&handle, &widget, &layout);
-        }
-    });
-
-    let core = app.state::<Arc<Core>>().inner().clone();
-    core.update(|state| state.skin = skin.to_string());
-
-    let spawned = Arc::clone(&core);
-    tauri::async_runtime::spawn(async move { spawned.refresh_queue().await });
-    refresh(app);
-}
-
-pub fn set_panel_skin(app: &AppHandle, skin: &str) {
-    let (handle, layout) = (app.clone(), skin.to_string());
-    let _ = app.run_on_main_thread(move || crate::panel::apply_panel_skin(&handle, &layout));
-
-    let core = app.state::<Arc<Core>>().inner().clone();
-    core.update(|state| state.panel_skin = skin.to_string());
-
-    let spawned = Arc::clone(&core);
-    tauri::async_runtime::spawn(async move { spawned.refresh_queue().await });
-    refresh(app);
-}
-
 /// Bring the floating widget back — without the menu item's other half.
 ///
 /// "Show floating widget" is a checkbox and toggles; the tray's double click
 /// asks for the widget, and a gesture that put it away again every second time
 /// would be a different feature wearing the same shape.
+///
+/// Asking for the widget also brings it forward, already showing or not: one
+/// left behind other windows is as lost as a hidden one.
 pub fn show_widget(app: &AppHandle) {
     let Some(widget) = app.get_webview_window(WIDGET) else {
         return;
     };
-    if widget.is_visible().unwrap_or(false) {
-        return;
+    if !widget.is_visible().unwrap_or(false) {
+        let _ = widget.show();
+        // The pollers stand down while nothing is on screen, so a widget coming
+        // back could be showing a stale glyph.
+        crate::resync(app);
     }
-    // Showing it must not steal focus from whatever you were doing.
-    let _ = widget.show();
-    // The pollers stand down while nothing is on screen, so a widget coming
-    // back could be showing a stale glyph.
-    crate::resync(app);
+    let _ = widget.set_focus();
+}
+
+/// Play or pause from the menu bar, through the renderer's command path so a
+/// disconnected player still gets YouTube Music launched.
+fn toggle_play(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::commands::command(handle, "togglePlay".into(), None).await;
+    });
 }
 
 pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
@@ -924,15 +863,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "quit" => crate::quit(app),
         "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
-            if let Some(skin) = other.strip_prefix("skin:") {
-                if SKINS.contains(&skin) {
-                    set_skin(app, skin);
-                }
-            } else if let Some(skin) = other.strip_prefix("panelSkin:") {
-                if SKINS.contains(&skin) {
-                    set_panel_skin(app, skin);
-                }
-            } else if let Some(rest) = other.strip_prefix("corner:") {
+            if let Some(rest) = other.strip_prefix("corner:") {
                 // `corner:<skin>:<button>`. The skin is in the id because the
                 // set is per skin and each menu edits the skin of the surface it
                 // belongs to — without it the dropdown's menu would toggle the
@@ -1106,6 +1037,20 @@ pub fn create(app: &AppHandle) -> tauri::Result<TrayIcon> {
                 // lands in one place from either starting point — a double
                 // click that began with the dropdown already open would
                 // otherwise reopen it.
+                // Option-click plays or pauses, the macOS idiom for a menu
+                // extra's alternate action — and the only free gesture on a
+                // trackpad. Checked first so it never arms a double click.
+                // A middle click does the same for mice that have one.
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } if crate::macos::option_held() => toggle_play(app),
+                TrayIconEvent::Click {
+                    button: MouseButton::Middle,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => toggle_play(app),
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,

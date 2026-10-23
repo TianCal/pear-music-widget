@@ -5,14 +5,15 @@ A floating now-playing widget and menu-bar player for macOS. It connects to the
 or [th-ch/youtube-music](https://github.com/th-ch/youtube-music) and receives
 player updates over WebSocket.
 
-![The Classic skin on the desktop](docs/classic.png)
+<img src="docs/stack.png" alt="The widget with the lyrics panel open" width="380">
 
 ## What it does
 
 Pear Music Widget provides two views of the same player:
 
 - **Menu-bar dropdown:** click the menu-bar icon for artwork, transport controls,
-  progress, queue, lyrics, and search. It closes on click-away or Escape.
+  progress, queue, lyrics, and search. It closes on click-away or Escape and
+  reopens showing the queue or lyrics if you left one open.
 - **Floating widget:** a resizable, always-available player that can sit anywhere
   on the desktop.
 
@@ -21,7 +22,8 @@ Menu-bar gestures:
 | Gesture | Action |
 | --- | --- |
 | Left click | Toggle the dropdown |
-| Double click | Show the floating widget |
+| Double click | Show the floating widget and bring it to the front |
+| Option-click or middle click | Play/pause |
 | Right click | Open settings |
 
 A solid menu-bar icon means connected; a hollow one means YouTube Music or its
@@ -32,22 +34,16 @@ The floating widget's close button shares the corner buttons' auto-hide setting
 and hides the widget. Use a tray double-click or **Show floating widget** to bring
 it back.
 
-## Skins
+## Layout
 
-| Skin | Natural size | Layout |
-| --- | --- | --- |
-| **Classic** | 300×110 | Artwork on the left; titles and transport on the right |
-| **Stack** | 330×284 | Artwork and titles above transport, progress, and an inline queue |
-
-The widget and dropdown can use different skins. Resizing scales the chosen
+Both views use the Stack layout (330×284 natural size): artwork and titles
+above transport, progress, and an inline queue. Resizing the widget scales the
 layout without reflowing it.
-
-<img src="docs/stack.png" alt="The Stack skin with the lyrics panel open" width="380">
 
 ## Controls
 
 The corner bar contains **Repeat**, **Queue**, **Lyrics**, and **Search**. Each
-button can be hidden per skin, and the bar can hide when idle. Choose
+button can be hidden, and the bar can hide when idle. Choose
 **Immediately** to show the buttons on hover and hide them as soon as the pointer
 leaves, or choose a delay.
 

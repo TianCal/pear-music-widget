@@ -108,21 +108,20 @@ are hidden, and showing either surface calls `resync` first.
 
 ## Skins, sizing, and panels
 
-`window.rs::BASE` defines each skin's natural size. The renderer does not reflow;
+`window.rs::BASE` defines each skin's natural size. Stack is the only skin;
+Classic was removed; stored `"classic"` values fall back to Stack
+through `valid_skin`. The skin plumbing stays so a new skin is a table row. The renderer does not reflow;
 it zooms by the tighter `width/base_width` ratio. Stored sizes contain only
 width, and height is derived from the skin ratio. The AppKit corner radius stays
 in points, so CSS divides its radius by the zoom.
 
-When switching skins, release the aspect lock, resize, then restore the lock.
 Apply min/max limits before the resize they permit. A visible panel adds its
 height to the window's shape; `shape_of` must be used by every constraint.
-Changing skins or resetting with a panel open must use `apply_collapsed_size`.
+Resetting with a panel open must use `apply_collapsed_size`.
 Never persist the temporary panel expansion (`expanded_by`).
 
-Resizing must preserve the corner recorded when the user last positioned the
-window. Do not recompute the anchor during a resize: different skin sizes will
-make the window walk across the screen. `set_bounds` records programmatic moves;
-only `reset_window` chooses a new anchor.
+`set_bounds` records programmatic moves so move/resize events can be told
+apart from the user's.
 
 Queue, lyrics, and search share one panel slot. `window.rs::panel_height` must
 match the CSS `flex-basis`; its `Some` result is also the panel-name whitelist.
@@ -130,9 +129,15 @@ Use `PANELS` for panel ownership and `CORNERS` for the four visible buttons,
 because Repeat does not open a panel. Reveal rules must retain `:not([hidden])`,
 and skin sections need `position: relative` so ambient layers do not cover them.
 
-Only queue and lyrics are restored. Seed `queue_wanted_by` from stored state
-before the first render. `panel::collapse` clears both wanted sets because the
+Only queue and lyrics are restored. The widget stores `panel` and reopens it at
+launch; the dropdown stores `dropdownPanel`. The dropdown keeps queue/lyrics
+open while hidden (only search collapses) and clears its wanted sets; showing
+it calls `panel::restore`, which re-marks them or, if nothing is open, pre-sizes
+for the remembered panel and emits `panel-restore`. Remembered panels change
+only while connected, so the offline teardown does not forget them. Seed
+`queue_wanted_by` from stored state before the first render. `panel::collapse` clears both wanted sets because the
 renderer handles `panel-collapsed` locally and does not call `set_panel(null)`.
+`set_panel` from a hidden dropdown never marks data as wanted.
 Queue demand comes from either a queue-owning skin or a surface with its queue
 panel open.
 
@@ -235,8 +240,10 @@ Register menu handling once with `Builder::on_menu_event`; adding a tray-local
 handler executes toggles twice. Rebuild the status menu on state changes and on
 `TrayIconEvent::Enter`, because macOS displays the last attached menu.
 
-Left click toggles the dropdown, right click opens settings, and a detected
-double click shows the widget. macOS does not emit the documented tray
+Left click toggles the dropdown, right click opens settings, a detected
+double click shows and focuses the widget, and Option-click or middle click
+toggles playback. Check Option (`macos::option_held`) before
+`is_double_click` so a play/pause click never arms a double click. macOS does not emit the documented tray
 `DoubleClick`, so pair clicks using the live `NSEvent.doubleClickInterval`
 clamped to 0.2–0.6 s. Do not delay the first click: the brief dropdown flash on
 double-click is intentional. The second click must `dismiss` the panel rather
@@ -270,7 +277,7 @@ legacy Electron path and unknown keys.
 `corners` is keyed by skin. `corners_from_file` must continue accepting the old
 flat shape; a parse failure falls back to defaults and would also lose position,
 sizes, and token. The state snapshot includes the whole map because the two
-surfaces can use different skins. Menu IDs follow `corner:<skin>:<button>`.
+surfaces could use different skins. Menu IDs follow `corner:<skin>:<button>`.
 
 `cornersAutohide` is renderer-driven. Keep the 200 ms `wakeChrome` guard, allow
 mousedown to wake faded controls before click, and run it even with a panel

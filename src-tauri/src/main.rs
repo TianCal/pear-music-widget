@@ -259,8 +259,6 @@ fn main() {
             commands::queue_art,
             commands::set_panel,
             commands::context_menu,
-            commands::set_skin,
-            commands::set_panel_skin,
             commands::hide_widget,
             commands::hide_panel,
             commands::retry,

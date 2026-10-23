@@ -50,8 +50,8 @@ impl Default for CornerButtons {
 }
 
 /// The set kept for each skin, since how much chrome a card can carry is a
-/// property of the card: four buttons sit comfortably above Stack's titles and
-/// crowd Classic's. Keyed by skin name — see `window::SKINS`.
+/// property of the card. Keyed by skin name — see `window::SKINS`; a retired
+/// skin's entry is kept in the file but never read.
 pub type SkinCorners = BTreeMap<String, CornerButtons>;
 
 /// Accepts both shapes the file has had: the current map of skin to buttons,
@@ -92,7 +92,7 @@ fn default_client_id() -> String {
     "PearMusicWidget".into()
 }
 fn default_skin() -> String {
-    "classic".into()
+    "stack".into()
 }
 fn default_always_on_top() -> bool {
     true
@@ -126,10 +126,12 @@ pub struct Settings {
     /// The width the user last left **each skin** at.
     #[serde(default)]
     pub sizes: BTreeMap<String, StoredSize>,
-    /// Floating widget layout — see `window::SKINS`.
+    /// Floating widget layout — see `window::SKINS`. A retired skin such as
+    /// Classic falls back to Stack through `window::valid_skin`.
     #[serde(default = "default_skin")]
     pub skin: String,
-    /// Menu-bar dropdown layout, chosen independently of `skin`.
+    /// Menu-bar dropdown layout. Kept separate from `skin` in case another
+    /// skin returns; today both can only be Stack.
     #[serde(rename = "panelSkin", default = "default_skin")]
     pub panel_skin: String,
     #[serde(rename = "alwaysOnTop", default = "default_always_on_top")]
@@ -164,10 +166,12 @@ pub struct Settings {
     pub lyrics_cache_mb: f64,
     /// The panel the floating widget was last left showing, restored on the
     /// next launch — see `window::panel_is_restorable`. A search is never
-    /// stored: it is a query you have finished with. Nor is the dropdown's
-    /// panel, which collapses on blur by design.
+    /// stored: it is a query you have finished with.
     #[serde(default)]
     pub panel: Option<String>,
+    /// The same for the menu-bar dropdown, reopened each time it drops down.
+    #[serde(rename = "dropdownPanel", default)]
+    pub dropdown_panel: Option<String>,
     /// Which top-right toggles the card shows, per skin.
     #[serde(default, deserialize_with = "corners_from_file")]
     pub corners: SkinCorners,
@@ -217,6 +221,7 @@ impl Default for Settings {
             jyutping_lyrics: false,
             lyrics_cache_mb: default_lyrics_cache_mb(),
             panel: None,
+            dropdown_panel: None,
             corners: SkinCorners::new(),
             corners_autohide: 0.0,
             extra: BTreeMap::new(),

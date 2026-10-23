@@ -8,7 +8,7 @@ const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 if (IS_PANEL) document.body.classList.add('panel');
 
 /** Must match `SKINS` in src-tauri/src/window.rs. */
-const SKINS = ['classic', 'stack'];
+const SKINS = ['stack'];
 
 /* The three panels that share the one slot, in corner-bar order. A table rather
    than three enumerations: opening, closing and the dropdown's blur teardown
@@ -31,7 +31,7 @@ const CORNERS = [
 ];
 
 /** Each surface picks its own skin: the dropdown's is configured separately. */
-const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'classic';
+const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'stack';
 
 /** The corner buttons for *this* surface's skin. One snapshot carries every
  *  skin's set, because the widget and the dropdown can be on different ones. A
@@ -97,8 +97,8 @@ const el = {
  *  everything below still reads from one object. */
 let state = {
   status: 'connecting',
-  skin: 'classic',
-  panelSkin: 'classic',
+  skin: 'stack',
+  panelSkin: 'stack',
   liquidGlass: true,
   tint: 1,
   lyricsOffset: 0,
@@ -255,9 +255,8 @@ const STATUS_COPY = {
   },
 };
 
-/* Auto-hide. The buttons are chrome over someone else's artwork, and on Classic
-   they sit right on top of the title, so they can be asked to fade once the
-   pointer has been still for a while. */
+/* Auto-hide. The buttons are chrome over someone else's artwork, so they can be
+   asked to fade once the pointer has been still for a while. */
 let cornerIdleTimer = null;
 let cornerWokeAt = 0;
 /** The delay the running timer was armed with, so a state push that did not
@@ -1445,6 +1444,14 @@ window.widget.onPanelCollapsed(() => {
   }
 });
 
+// And reopens the queue or lyrics it was last left showing. Main has already
+// sized the window for it; this draws it and tells main someone is watching.
+window.widget.onPanelRestore((which) => {
+  if (openPanel === which || searching) return;
+  if (which === 'lyrics') toggleLyrics();
+  else if (which === 'queue') toggleQueue();
+});
+
 // Double-clicking brings YouTube Music forward. The artwork is the guaranteed
 // target because it opts out of the drag region; the document-level listener
 // covers the rest of the card for the case where the events do get through.
@@ -1584,7 +1591,7 @@ const holdingVolume = () => volumeDragging || performance.now() < ignoreVolumeUn
 /** Briefly show a wheel or keyboard change, both ways the card has of showing
  *  one: the slider peeks out from under the speaker, and the progress bar turns
  *  into the volume. Which of the two you see is the stylesheet's business — the
- *  speaker is hidden on Stack, and Classic would otherwise say it twice. */
+ *  speaker is hidden on Stack. */
 const peekVolume = () => {
   el.volPop.classList.add('peek');
 
