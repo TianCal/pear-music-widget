@@ -954,6 +954,13 @@ body.skin-stack .lyric {
   color: #e5484d;
 }
 
+/* Shuffle is on or off and nothing else, so unlike Repeat it needs a lit
+   state — but only the accent colour, never the disc, which belongs to the
+   panel toggles and says "this surface is open". */
+.corner.shuffle.lit {
+  color: var(--accent);
+}
+
 /* Repeat is deliberately never lit — no accent, no disc. Both of those say
    "this surface is open", which is true of the three panel toggles and never of
    this one, and the button only ever sits in one of two modes anyway: the glyph

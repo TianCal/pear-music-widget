@@ -496,6 +496,7 @@ fn corner_submenu(
         ("queue", "Queue", corners.queue),
         ("lyrics", "Lyrics", corners.lyrics),
         ("search", "Search", corners.search),
+        ("shuffle", "Shuffle", corners.shuffle),
         ("repeat", "Repeat", corners.repeat),
         ("trash", "Delete (local files)", corners.trash),
     ]
@@ -1190,6 +1191,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                             "queue" => corners.queue = !corners.queue,
                             "lyrics" => corners.lyrics = !corners.lyrics,
                             "search" => corners.search = !corners.search,
+                            "shuffle" => corners.shuffle = !corners.shuffle,
                             "repeat" => corners.repeat = !corners.repeat,
                             "trash" => corners.trash = !corners.trash,
                             _ => {}

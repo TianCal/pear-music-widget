@@ -81,12 +81,15 @@
         <!-- DOM order is left-to-right, and each can be turned off from the
              Corner buttons submenu, per skin. Delete exists only for a local
              file and leads, furthest from the panel toggles; it asks natively
-             before anything is moved to the Trash. Repeat is set slightly
-             apart: the panel toggles open a panel, it changes what the player
-             does. -->
+             before anything is moved to the Trash. Shuffle and Repeat are set
+             slightly apart: the panel toggles open a panel, these change what
+             the player does. -->
         <div class="corner-bar">
           <button class="corner trash" id="btn-trash" title="Move to Trash…" aria-label="Move this file to the Trash">
             <svg><use href="#i-trash" /></svg>
+          </button>
+          <button class="corner shuffle" id="btn-shuffle-corner" data-cmd="shuffle" title="Shuffle: off" aria-label="Shuffle">
+            <svg><use href="#i-shuffle" /></svg>
           </button>
           <button class="corner repeat" id="btn-repeat" title="Repeat" aria-label="Repeat">
             <svg id="repeat-icon"><use href="#i-repeat" /></svg>

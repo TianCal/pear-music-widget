@@ -36,6 +36,7 @@ pub struct CornerButtons {
     pub lyrics: bool,
     pub search: bool,
     pub repeat: bool,
+    pub shuffle: bool,
     /// Move the playing file to the Trash. Drawn only for a local track.
     pub trash: bool,
 }
@@ -47,6 +48,7 @@ impl Default for CornerButtons {
             lyrics: true,
             search: true,
             repeat: true,
+            shuffle: true,
             trash: true,
         }
     }
@@ -465,6 +467,7 @@ mod tests {
             // Absent from the old file, so it lands on its default rather than
             // being read as off.
             assert!(corners.repeat);
+            assert!(corners.shuffle);
         }
     }
 

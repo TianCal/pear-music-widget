@@ -524,6 +524,11 @@ impl Core {
             state.song = None;
             state.is_playing = false;
             state.position = 0.0;
+            // The folder's modes are its own (saved per folder) and must not
+            // leak onto YouTube Music: back to plain queue repeat until the
+            // resync reports the player's real modes.
+            state.shuffle = false;
+            state.repeat = Some("ALL".into());
         });
         self.set_cover(None);
         self.set_queue(QueueView::empty());

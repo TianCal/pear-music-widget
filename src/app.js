@@ -22,12 +22,13 @@ const PANELS = [
   { key: 'search', section: 'search', corner: 'cornerSearch' },
 ];
 
-/* Every button in the bar, in DOM order. The panels are a subset: repeat and
-   delete open nothing, so they are here and not in `PANELS`, and this is the
+/* Every button in the bar, in DOM order. The panels are a subset: shuffle,
+   repeat and delete open nothing, so they are here and not in `PANELS`, and this is the
    list that decides what is drawn and how wide a gutter the titles reserve.
    `local` buttons exist only while a file from a folder is playing. */
 const CORNERS = [
   { key: 'trash', node: 'cornerTrash', local: true },
+  { key: 'shuffle', node: 'cornerShuffle' },
   { key: 'repeat', node: 'cornerRepeat' },
   ...PANELS.map((panel) => ({ key: panel.key, node: panel.corner })),
 ];
@@ -81,6 +82,7 @@ const el = {
   cornerLyrics: $('btn-lyrics'),
   cornerQueue: $('btn-queue'),
   cornerRepeat: $('btn-repeat'),
+  cornerShuffle: $('btn-shuffle-corner'),
   cornerTrash: $('btn-trash'),
   repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
@@ -752,6 +754,9 @@ const renderControls = () => {
   }
 
   el.shuffle.classList.toggle('on', !!state.shuffle);
+  // `lit`, not `on`: a disc up in the corner bar means "that panel is open".
+  el.cornerShuffle.classList.toggle('lit', !!state.shuffle);
+  el.cornerShuffle.title = state.shuffle ? 'Shuffle: on' : 'Shuffle: off';
 
   const repeat = (state.repeat || '').toUpperCase();
   if (written.repeat !== repeat) {

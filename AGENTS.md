@@ -141,8 +141,9 @@ apart from the user's.
 
 Queue, lyrics, and search share one panel slot. `window.rs::panel_height` must
 match the CSS `flex-basis`; its `Some` result is also the panel-name whitelist.
-Use `PANELS` for panel ownership and `CORNERS` for the four visible buttons,
-because Repeat does not open a panel. Reveal rules must retain `:not([hidden])`,
+Use `PANELS` for panel ownership and `CORNERS` for the visible buttons,
+because Shuffle, Repeat and Delete do not open a panel. Shuffle lights with
+the accent colour only (`lit`); the `on` disc means a panel is open. Reveal rules must retain `:not([hidden])`,
 and skin sections need `position: relative` so ambient layers do not cover them.
 
 Only queue and lyrics are restored. The widget stores `panel` and reopens it at
