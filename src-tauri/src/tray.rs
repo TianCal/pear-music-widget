@@ -508,6 +508,7 @@ fn corner_submenu(
     let shown: Vec<CheckMenuItem<tauri::Wry>> = [
         ("queue", "Queue", corners.queue),
         ("lyrics", "Lyrics", corners.lyrics),
+        ("playlists", "Playlists", corners.playlists),
         ("search", "Search", corners.search),
         ("shuffle", "Shuffle", corners.shuffle),
         ("repeat", "Repeat", corners.repeat),
@@ -1219,6 +1220,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                             "shuffle" => corners.shuffle = !corners.shuffle,
                             "repeat" => corners.repeat = !corners.repeat,
                             "trash" => corners.trash = !corners.trash,
+                            "playlists" => corners.playlists = !corners.playlists,
                             _ => {}
                         }
                         store.set_corners_for(skin, corners);

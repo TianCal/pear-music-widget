@@ -31,6 +31,8 @@ const CORNERS = [
   { key: 'shuffle', node: 'cornerShuffle' },
   { key: 'repeat', node: 'cornerRepeat' },
   ...PANELS.map((panel) => ({ key: panel.key, node: panel.corner })),
+  // Opens the playlist picker, an overlay rather than a panel.
+  { key: 'playlists', node: 'cornerPlaylists' },
 ];
 
 /** Each surface picks its own skin: the dropdown's is configured separately. */
@@ -84,6 +86,9 @@ const el = {
   cornerRepeat: $('btn-repeat'),
   cornerShuffle: $('btn-shuffle-corner'),
   cornerTrash: $('btn-trash'),
+  cornerPlaylists: $('btn-playlists'),
+  playlists: $('playlists'),
+  playlistsScroll: $('playlists-scroll'),
   repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
   closeWidget: $('btn-close'),
@@ -105,6 +110,10 @@ const el = {
   setupRetry: $('setup-retry'),
   setupOpen: $('setup-open'),
 };
+
+/** Whether the playlist picker is showing. Declared up here because
+ *  `renderStatus` reads it, and can run before the picker's own section. */
+let pickerOpen = false;
 
 /** Latest snapshot from the main process.
  *
@@ -304,7 +313,9 @@ const armCornerFade = () => {
   // closes a panel too, but only once the widget has focus, which a widget
   // usually does not.)
   if (!after) return;
-  cornerIdleTimer = setTimeout(() => setCornerIdle(true), after * 1000);
+  cornerIdleTimer = setTimeout(() => {
+    if (!pickerOpen) setCornerIdle(true);
+  }, after * 1000);
 };
 
 /** The pointer moved, so start the countdowns over. */
@@ -370,6 +381,7 @@ const renderStatus = () => {
   const orphaned = openPanel && corners[openPanel] === false;
   if ((offline || orphaned) && searching) closeSearch();
   else if ((offline || orphaned) && openPanel) setPanel(null);
+  if (pickerOpen && (offline || corners.playlists === false)) closePicker();
 
   if (!showSetup) {
     el.setup.hidden = true;
@@ -1350,6 +1362,275 @@ el.cornerRepeat.addEventListener('click', (event) => {
   send('repeat');
 });
 
+/* ----------------------------------------------------------- playlist picker
+
+   YouTube Music playlists and saved folders in one list. Picking a row plays
+   it, switching source first when the row belongs to the other one — so both
+   halves are listed whichever source is playing, and Rust does the switching.
+   The list is fetched fresh unless the hover prefetch below is recent:
+   playlists change in YouTube Music itself, and a drive can come or go. */
+
+/** Bumped on every open and close, so a reply that lands after the picker
+ *  was closed (or reopened) is dropped rather than drawn. */
+let pickerSeq = 0;
+
+const pickerNote = (text) => {
+  const note = document.createElement('div');
+  note.className = 'playlists-note';
+  note.textContent = text;
+  return note;
+};
+
+const pickerHead = (text) => {
+  const head = document.createElement('div');
+  head.className = 'playlists-head';
+  head.textContent = text;
+  return head;
+};
+
+/** Covers already resolved, by source URL: reopening draws them at once. */
+const pickerArt = new Map();
+
+const pickerRow = ({ kind, id, title, sub, art, current, disabled }) => {
+  const row = document.createElement('button');
+  row.className = 'result';
+  row.type = 'button';
+  row.setAttribute('role', 'menuitem');
+  row.dataset.kind = kind;
+  row.dataset.id = id;
+  row.disabled = !!disabled;
+  if (current) {
+    row.classList.add('current');
+    row.setAttribute('aria-current', 'true');
+  }
+
+  if (kind === 'folder') {
+    const tile = document.createElement('span');
+    tile.className = 'folder-tile';
+    tile.innerHTML = '<svg><use href="#i-folder" /></svg>';
+    row.append(tile);
+  } else {
+    const img = document.createElement('img');
+    img.alt = '';
+    if (art && pickerArt.get(art)) img.src = pickerArt.get(art);
+    else if (art) img.dataset.art = art;
+    row.append(img);
+  }
+
+  const text = document.createElement('span');
+  text.className = 'result-text';
+  const titleNode = document.createElement('span');
+  titleNode.className = 'result-title';
+  titleNode.textContent = title;
+  const subNode = document.createElement('span');
+  subNode.className = 'result-sub';
+  subNode.textContent = sub || '';
+  text.append(titleNode, subNode);
+  row.append(text);
+  return row;
+};
+
+const renderPicker = (data) => {
+  const youtube = [pickerHead('YouTube Music')];
+  if (!data.youtube?.ok) {
+    youtube.push(pickerNote(data.youtube?.error || 'YouTube Music did not answer.'));
+  } else if (!data.youtube.playlists.length) {
+    youtube.push(pickerNote('No playlists in your library.'));
+  } else {
+    for (const item of data.youtube.playlists) {
+      youtube.push(
+        pickerRow({
+          kind: 'youtube',
+          id: item.id,
+          title: item.title,
+          sub: item.subtitle,
+          art: item.art,
+          current: item.id === data.currentPlaylist,
+        }),
+      );
+    }
+  }
+
+  const folders = [pickerHead('Folders')];
+  if (!data.folders.length) {
+    folders.push(pickerNote('Add a folder from Source > Choose Folder… in the menu.'));
+  }
+  for (const folder of data.folders) {
+    folders.push(
+      pickerRow({
+        kind: 'folder',
+        id: folder.path,
+        title: folder.name,
+        sub: folder.present ? folder.parent : 'Not connected',
+        current: folder.current,
+        disabled: !folder.present,
+      }),
+    );
+  }
+
+  // The source that is playing leads.
+  el.playlistsScroll.replaceChildren(
+    ...(data.local ? [...folders, ...youtube] : [...youtube, ...folders]),
+  );
+  el.playlistsScroll.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
+  loadVisiblePickerArt();
+};
+
+/* Covers come from Rust (the CSP allows data: URLs only), and only for the rows
+   in view: a library of a hundred playlists should not wait on, or fill the
+   image cache with, covers nobody sees. Measured by hand rather than with an
+   IntersectionObserver or animation frames, which a hidden WebKit document —
+   the widget always reports hidden — may never deliver. */
+const PICKER_ART_MARGIN = 60;
+const pickerArtPending = new Set();
+
+const loadVisiblePickerArt = () => {
+  const scroll = el.playlistsScroll;
+  const top = scroll.scrollTop - PICKER_ART_MARGIN;
+  const bottom = scroll.scrollTop + scroll.clientHeight + PICKER_ART_MARGIN;
+  const urls = [];
+  for (const img of scroll.querySelectorAll('img[data-art]')) {
+    const row = img.closest('.result');
+    if (row.offsetTop + row.offsetHeight < top || row.offsetTop > bottom) continue;
+    const url = img.dataset.art;
+    if (!pickerArtPending.has(url)) {
+      pickerArtPending.add(url);
+      urls.push(url);
+    }
+  }
+  if (!urls.length) return;
+  window.widget
+    .playlistArt(urls)
+    .then((reply) => {
+      for (const [url, data] of Object.entries(reply?.art || {})) {
+        if (data) pickerArt.set(url, data);
+      }
+      for (const img of scroll.querySelectorAll('img[data-art]')) {
+        const data = pickerArt.get(img.dataset.art);
+        if (data) {
+          img.src = data;
+          delete img.dataset.art;
+        }
+      }
+    })
+    .catch(() => {})
+    // A failed cover can be asked for again when it scrolls back into view.
+    .finally(() => urls.forEach((url) => pickerArtPending.delete(url)));
+};
+
+// Scroll events belong to the rendering steps a hidden document may skip, so
+// while the picker is open the rows in view are also rechecked on a timer. It
+// measures a few dozen rows and asks for nothing that is already loading.
+const PICKER_ART_CHECK_MS = 300;
+let pickerArtTimer = null;
+
+/** The list fetched when the pointer reached the button. Moving onto it is
+ *  the cue that a click may follow, so by the time it does the reply is
+ *  usually in. Reused only while fresh: playlists change in YouTube Music
+ *  itself, and a drive can come or go. */
+const PICKER_PREFETCH_MS = 15000;
+let pickerPrefetch = null;
+
+const fetchPicker = () => {
+  if (pickerPrefetch && performance.now() - pickerPrefetch.at < PICKER_PREFETCH_MS) {
+    return pickerPrefetch.reply;
+  }
+  const reply = window.widget.playlists().catch(() => null);
+  pickerPrefetch = { at: performance.now(), reply };
+  // A failed fetch is not worth keeping: the click should try again.
+  reply.then((data) => {
+    if (!data?.ok && pickerPrefetch?.reply === reply) pickerPrefetch = null;
+  });
+  return reply;
+};
+
+// Only once the pointer rests there: passing over the button on the way
+// somewhere else should not cost a library fetch.
+const PICKER_HOVER_MS = 150;
+let pickerHoverTimer = null;
+el.cornerPlaylists.addEventListener('pointerenter', () => {
+  clearTimeout(pickerHoverTimer);
+  pickerHoverTimer = setTimeout(() => {
+    if (!pickerOpen) fetchPicker();
+  }, PICKER_HOVER_MS);
+});
+el.cornerPlaylists.addEventListener('pointerleave', () => clearTimeout(pickerHoverTimer));
+
+const openPicker = async () => {
+  const seq = ++pickerSeq;
+  pickerOpen = true;
+  el.playlists.hidden = false;
+  el.cornerPlaylists.classList.add('on');
+  el.cornerPlaylists.setAttribute('aria-expanded', 'true');
+  // The bar stays up while the picker hangs from it; see `armCornerFade`.
+  setCornerIdle(false);
+  clearTimeout(cornerIdleTimer);
+  el.playlistsScroll.replaceChildren(pickerNote('Loading playlists…'));
+
+  clearInterval(pickerArtTimer);
+  pickerArtTimer = setInterval(loadVisiblePickerArt, PICKER_ART_CHECK_MS);
+
+  const data = await fetchPicker();
+  if (seq !== pickerSeq) return;
+  if (!data?.ok) {
+    el.playlistsScroll.replaceChildren(pickerNote('Could not load playlists.'));
+    return;
+  }
+  renderPicker(data);
+};
+
+const closePicker = () => {
+  pickerSeq += 1;
+  pickerOpen = false;
+  el.playlists.hidden = true;
+  el.cornerPlaylists.classList.remove('on');
+  el.cornerPlaylists.setAttribute('aria-expanded', 'false');
+  clearInterval(pickerArtTimer);
+  armCornerFade();
+};
+
+el.cornerPlaylists.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (pickerOpen) closePicker();
+  else openPicker();
+});
+
+/** One pick at a time: a second click while one is starting would race it. */
+let pickerPlaying = false;
+
+el.playlists.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const row = event.target.closest('.result');
+  if (!row || row.disabled || pickerPlaying) return;
+
+  const seq = pickerSeq;
+  pickerPlaying = true;
+  row.classList.add('busy');
+  let reply;
+  try {
+    reply = await window.widget.playPlaylist(row.dataset.kind, row.dataset.id);
+  } catch (err) {
+    reply = { ok: false, error: String(err) };
+  } finally {
+    pickerPlaying = false;
+  }
+  if (seq !== pickerSeq) return;
+  row.classList.remove('busy');
+  if (reply?.ok) {
+    // What is current just changed, so the kept list is out of date.
+    pickerPrefetch = null;
+    closePicker();
+    return;
+  }
+  const sub = row.querySelector('.result-sub');
+  if (sub) sub.textContent = reply?.error || 'Could not play that.';
+});
+
+// A click anywhere else on the card dismisses it, like a menu.
+document.addEventListener('click', (event) => {
+  if (pickerOpen && !event.target.closest('#playlists, #btn-playlists')) closePicker();
+});
+
 // Clicking a line seeks to it — the timestamps are right there. `dataset.index`
 // is not tested for truthiness: the first line's is the string "0", which is
 // falsy, and guarding on it is what used to make the opening line unclickable.
@@ -1386,6 +1667,8 @@ const paintPanel = (which) => {
 };
 
 const setPanel = (which) => {
+  // A panel opening below would sit under the picker.
+  if (which && pickerOpen) closePicker();
   openPanel = which;
   paintPanel(which);
   // Opening or closing one is an interaction, so it restarts the countdown
@@ -1486,6 +1769,7 @@ const runSearch = async (query) => {
 
 const openSearch = async () => {
   if (searching || state.status !== 'connected') return;
+  if (pickerOpen) closePicker();
   searching = true;
   results = [];
   activeResult = -1;
@@ -1566,7 +1850,7 @@ window.widget.onPanelRestore((which) => {
 // covers the rest of the card for the case where the events do get through.
 // Controls are excluded — a double click on one would fire it twice as well.
 const INTERACTIVE =
-  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item';
+  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item, .playlists';
 
 const openMusicApp = () => window.widget.openApp();
 
@@ -1793,7 +2077,7 @@ el.card.addEventListener(
       return;
     }
     // These scroll on their own; the wheel belongs to them, not to volume.
-    if (event.target.closest('#queue, #upnext')) return;
+    if (event.target.closest('#queue, #upnext, #playlists')) return;
     if (state.status !== 'connected') return;
     // With macOS natural scrolling, swiping up reports a positive deltaY, so
     // adding it is what makes "scroll up" raise the volume.
@@ -1817,6 +2101,11 @@ const VOLUME_STEP_FINE = 1;
 // While the search panel is open the arrows belong to the result list, and
 // Escape closes it. Volume only gets the keys once search is out of the way.
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && pickerOpen) {
+    event.preventDefault();
+    closePicker();
+    return;
+  }
   if (event.key === 'Escape' && !searching && openPanel) {
     event.preventDefault();
     setPanel(null);
@@ -1849,7 +2138,7 @@ document.addEventListener('keydown', (event) => {
 
 // Playback and volume shortcuts belong to the focused surface, outside editors.
 document.addEventListener('keydown', (event) => {
-  if (searching || event.defaultPrevented || event.isComposing) return;
+  if (searching || pickerOpen || event.defaultPrevented || event.isComposing) return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   if (state.status !== 'connected') return;

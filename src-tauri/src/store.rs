@@ -39,6 +39,8 @@ pub struct CornerButtons {
     pub shuffle: bool,
     /// Move the playing file to the Trash. Drawn only for a local track.
     pub trash: bool,
+    /// The playlist picker: YouTube Music playlists and saved folders.
+    pub playlists: bool,
 }
 
 impl Default for CornerButtons {
@@ -50,6 +52,7 @@ impl Default for CornerButtons {
             repeat: true,
             shuffle: true,
             trash: true,
+            playlists: true,
         }
     }
 }
@@ -201,6 +204,11 @@ pub struct Settings {
     /// its entry and is shown as not connected.
     #[serde(rename = "localFolders", default)]
     pub local_folders: Vec<SavedFolder>,
+    /// The YouTube Music playlist last started from the playlist picker, as its
+    /// browse id. Only a hint for the picker's checkmark: playing something
+    /// else in YouTube Music itself does not clear it.
+    #[serde(rename = "youtubePlaylist", default)]
+    pub youtube_playlist: Option<String>,
 
     /// Anything else the file carried, preserved on write.
     #[serde(flatten)]
@@ -256,6 +264,7 @@ impl Default for Settings {
             source: None,
             local_folder: None,
             local_folders: Vec::new(),
+            youtube_playlist: None,
             extra: BTreeMap::new(),
         }
     }

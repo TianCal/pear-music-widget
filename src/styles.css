@@ -1668,3 +1668,102 @@ body.skin-stack .upnext:not([hidden]) {
 .pill[hidden] {
   display: none;
 }
+
+/* ------------------------------------------------------------ playlists */
+
+/* The picker hangs under the corner bar, right-anchored like `.vol-pop` so
+   the card never clips it. It is an overlay, not a panel: the window keeps its
+   size, so the list scrolls inside whatever height the card has. Shown with
+   `hidden` rather than a transition — the widget's document reports hidden
+   and WebKit may never run one. */
+.playlists {
+  position: absolute;
+  top: 31px;
+  right: 7px;
+  z-index: 22;
+  width: min(232px, calc(100% - 14px));
+  max-height: calc(100% - 40px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 11px;
+  background: rgba(28, 28, 32, 0.94);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4), inset 0 0 0 0.5px var(--hairline);
+}
+
+@media (prefers-color-scheme: light) {
+  .playlists {
+    background: rgba(250, 250, 252, 0.96);
+  }
+}
+
+.playlists[hidden] {
+  display: none;
+}
+
+.playlists-scroll {
+  /* The offset parent for its rows, so their offsetTop is in its scroll space. */
+  position: relative;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+.playlists-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.playlists-scroll::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: var(--rail);
+}
+
+.playlists-head {
+  padding: 6px 6px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fg-faint);
+}
+
+.playlists-note {
+  padding: 2px 6px 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.playlists .result.current .result-title {
+  color: var(--accent);
+}
+
+.playlists .result:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.playlists .result:disabled:hover {
+  background: transparent;
+}
+
+.playlists .result.busy {
+  opacity: 0.6;
+}
+
+/* Folders have no artwork: the same 30px tile, with a glyph in it. */
+.playlists .folder-tile {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  background: var(--hover);
+  color: var(--fg-dim);
+}
+
+.playlists .folder-tile svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}

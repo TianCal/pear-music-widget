@@ -471,6 +471,45 @@ impl Api {
         Some(result)
     }
 
+    /// Raw Library > Playlists browse page; `search::parse_library_playlists`
+    /// reads it. A 204 means YouTube Music had nothing to give (signed out).
+    pub async fn library_playlists(&self) -> Result<Value> {
+        self.request(
+            reqwest::Method::GET,
+            "/library/playlists",
+            None,
+            SEARCH_TIMEOUT,
+        )
+        .await
+        .map(|value| value.unwrap_or(Value::Null))
+    }
+
+    /// Replace the queue with a playlist and play it from the top.
+    pub async fn play_playlist(&self, id: &str) -> Result<()> {
+        // Ids are base64url; refuse anything that could reshape the path.
+        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if id.is_empty() || !id.chars().all(safe) {
+            return Err(ApiError::new(ErrorCode::Error, "Not a playlist id"));
+        }
+        self.request(
+            reqwest::Method::POST,
+            &format!("/library/playlists/{id}/play"),
+            None,
+            SEARCH_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            // 404: YouTube Music gave no songs for it. "Episodes for later" is
+            // the usual one — a podcast list the music queue will not take.
+            if err.message.starts_with("HTTP 404") {
+                ApiError::new(ErrorCode::Error, "YouTube Music can't play this one")
+            } else {
+                err
+            }
+        })
+    }
+
     pub async fn add_to_queue(&self, video_id: &str) -> Result<()> {
         self.post(
             "/queue",

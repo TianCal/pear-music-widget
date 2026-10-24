@@ -206,6 +206,104 @@ pub fn parse_search_results(payload: &Value) -> Vec<SearchResult> {
     results
 }
 
+/// A library playlist, as the playlist picker draws it.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Playlist {
+    /// The browse id ("VL…"); the API server strips the prefix itself.
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub thumbnail: Option<Arc<str>>,
+}
+
+pub const PLAYLISTS_MAX: usize = 100;
+
+fn collect_renderers<'a>(node: &'a Value, keys: &[&str], out: &mut Vec<&'a Value>, depth: usize) {
+    if depth > MAX_DEPTH || out.len() > MAX_ITEMS {
+        return;
+    }
+    match node {
+        Value::Array(items) => {
+            for child in items {
+                collect_renderers(child, keys, out, depth + 1);
+            }
+        }
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(renderer) = map.get(*key) {
+                    out.push(renderer);
+                }
+            }
+            for child in map.values() {
+                collect_renderers(child, keys, out, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `GET /library/playlists` returns the Library > Playlists browse page, drawn
+/// as a grid (`musicTwoRowItemRenderer`) or a list
+/// (`musicResponsiveListItemRenderer`) depending on the account's view setting.
+/// Only rows that browse to a playlist are kept, which drops "New playlist".
+pub fn parse_library_playlists(payload: &Value) -> Vec<Playlist> {
+    let mut items = Vec::new();
+    collect_renderers(
+        payload,
+        &["musicTwoRowItemRenderer", "musicResponsiveListItemRenderer"],
+        &mut items,
+        0,
+    );
+
+    let mut playlists: Vec<Playlist> = Vec::new();
+    for item in items {
+        let Some(id) = dig(item, &["navigationEndpoint", "browseEndpoint", "browseId"])
+            .and_then(Value::as_str)
+            .filter(|id| id.starts_with("VL"))
+        else {
+            continue;
+        };
+        if playlists.iter().any(|known| known.id == id) {
+            continue;
+        }
+
+        let two_row = item.get("title").is_some();
+        let (title, subtitle) = if two_row {
+            (runs_text(item.get("title")), runs_text(item.get("subtitle")))
+        } else {
+            (column_text(item, 0), column_text(item, 1))
+        };
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let thumbnail = if two_row {
+            dig(
+                item,
+                &["thumbnailRenderer", "musicThumbnailRenderer", "thumbnail", "thumbnails"],
+            )
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+            .and_then(|first| first.get("url"))
+            .and_then(Value::as_str)
+            .map(Arc::from)
+        } else {
+            thumbnail_of(item)
+        };
+
+        playlists.push(Playlist {
+            id: id.to_string(),
+            title,
+            subtitle: subtitle.trim().to_string(),
+            thumbnail,
+        });
+        if playlists.len() >= PLAYLISTS_MAX {
+            break;
+        }
+    }
+    playlists
+}
+
 /// Queue items come either bare or wrapped; unwrap to the video renderer.
 fn video_renderer(item: &Value) -> Option<&Value> {
     item.get("playlistPanelVideoRenderer").or_else(|| {
@@ -439,5 +537,46 @@ mod tests {
         let view = parse_queue(Some(&queue), 2);
         assert_eq!(view.items.len(), 2);
         assert!(view.truncated);
+    }
+
+    #[test]
+    fn library_playlists_come_from_grid_and_list_views() {
+        let payload = json!({ "grid": { "items": [
+            // "New playlist" opens a dialog rather than browsing: dropped.
+            { "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": "New playlist" }] },
+                "navigationEndpoint": { "createPlaylistEndpoint": {} }
+            }},
+            { "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": "Liked Music" }] },
+                "subtitle": { "runs": [{ "text": "Auto playlist" }] },
+                "navigationEndpoint": { "browseEndpoint": { "browseId": "VLLM" } },
+                "thumbnailRenderer": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "http://liked" }] } } }
+            }},
+            // The same playlist again: dropped.
+            { "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": "Liked Music" }] },
+                "navigationEndpoint": { "browseEndpoint": { "browseId": "VLLM" } }
+            }},
+            // An album browses to MPRE…, not a playlist: dropped.
+            { "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": "Album" }] },
+                "navigationEndpoint": { "browseEndpoint": { "browseId": "MPREb_x" } }
+            }}
+        ]}, "list": [{ "musicResponsiveListItemRenderer": {
+            "navigationEndpoint": { "browseEndpoint": { "browseId": "VLPLabc" } },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Night drive" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "38 songs" }] } } }
+            ]
+        }}]});
+
+        let playlists = parse_library_playlists(&payload);
+        let ids: Vec<_> = playlists.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["VLLM", "VLPLabc"]);
+        assert_eq!(playlists[0].subtitle, "Auto playlist");
+        assert_eq!(playlists[0].thumbnail.as_deref(), Some("http://liked"));
+        assert_eq!(playlists[1].title, "Night drive");
+        assert_eq!(playlists[1].subtitle, "38 songs");
     }
 }

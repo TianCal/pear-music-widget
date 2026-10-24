@@ -353,6 +353,11 @@ const QUEUE_SHOW_TTL: Duration = Duration::from_secs(5);
 /// How long after a track change its like state is read a second time.
 const LIKE_RECHECK: Duration = Duration::from_millis(1500);
 
+/// Waits before each queue read after a shuffle change, in ms: the first
+/// catches YouTube Music's new order, the second an unshuffle's restored
+/// opening tracks, which need a whole-playlist fetch first.
+const REORDER_REFRESH_MS: [u64; 2] = [700, 900];
+
 /// One run at a time. A caller arriving while a run is in flight either gives
 /// up (the run in flight answers it) or, with `rerun`, asks the holder to go
 /// round once more, so a request made after a change always gets a fetch that
@@ -447,6 +452,8 @@ pub struct Core {
     lyrics_stale: AtomicBool,
     cover_token: AtomicU64,
     queue_token: AtomicU64,
+    /// Bumped by each shuffle change; see `refresh_queue_after_reorder`.
+    reorder_token: AtomicU64,
     lyrics_token: AtomicU64,
     /// Woken whenever a lookup is superseded, so the old one is dropped at its
     /// next await instead of finishing a whole chain of requests for a track
@@ -521,6 +528,7 @@ impl Core {
             lyrics_stale: AtomicBool::new(false),
             cover_token: AtomicU64::new(0),
             queue_token: AtomicU64::new(0),
+            reorder_token: AtomicU64::new(0),
             lyrics_token: AtomicU64::new(0),
             lyrics_superseded: tokio::sync::Notify::new(),
             lyrics_style_token: AtomicU64::new(0),
@@ -956,6 +964,30 @@ impl Core {
         }
     }
 
+    /// Refresh the queue once YouTube Music has finished reordering it. The
+    /// shuffle event fires when the button flips, but the new order arrives
+    /// from YouTube after that, and an unshuffle can land in two steps — the
+    /// API server puts back a long playlist's opening tracks once the queue
+    /// is rebuilt. Two timed reads cover both without polling a queue that can
+    /// be thousands of items. A newer toggle supersedes an older one, and
+    /// nothing is fetched while no surface shows the queue.
+    fn refresh_queue_after_reorder(self: &Arc<Self>) {
+        let token = self.reorder_token.fetch_add(1, Ordering::SeqCst) + 1;
+        if !self.queue_visible() {
+            return;
+        }
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            for delay in REORDER_REFRESH_MS {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                if core.reorder_token.load(Ordering::SeqCst) != token || core.is_local() {
+                    return;
+                }
+                core.refresh_queue().await;
+            }
+        });
+    }
+
     /// The whole queue, for the queue panel and Stack's "Next tracks" strip
     /// alike — one fetch, one channel, two readers.
     ///
@@ -1372,7 +1404,15 @@ impl Core {
             }
             "SHUFFLE_CHANGED" => {
                 let shuffle = flag("shuffle");
+                let changed = self.snapshot().shuffle != shuffle;
                 self.update_remote(|state| state.shuffle = shuffle);
+                // Shuffling reorders the queue but keeps the track, and
+                // `apply_song` only refreshes the queue when the track moves —
+                // so without this "Next tracks" keeps the old order and the
+                // button looks like it only lit itself up.
+                if changed {
+                    self.refresh_queue_after_reorder();
+                }
             }
             // Fires for a press inside YouTube Music as well as for our own, so
             // this is what keeps the loop honest when the mode is changed

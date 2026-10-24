@@ -52,6 +52,10 @@ window.widget = {
   playResult: (videoId) => invoke('play_result', { videoId }),
   playQueued: (videoId) => invoke('play_queued', { videoId }),
   playQueueIndex: (index, videoId) => invoke('play_queue_index', { index, videoId }),
+  // The playlist picker: YouTube Music playlists and saved folders together.
+  playlists: () => invoke('list_playlists'),
+  playPlaylist: (kind, id) => invoke('play_playlist', { kind, id }),
+  playlistArt: (urls) => invoke('playlist_art', { urls }),
   // Artwork for the queue rows a surface is showing. A command rather than an
   // event: a reply is formatted once, an event once per webview.
   queueArt: (ids, size) => invoke('queue_art', { ids, size }),
@@ -84,7 +88,7 @@ window.widget = {
  */
 const NO_DRAG =
   '.art, .seek, .btn, .vol-pop, .lyrics, .corner, .search, .upnext, .queue, ' +
-  '.pill, .edge, input, button';
+  '.pill, .edge, .playlists, input, button';
 
 const DRAG_THRESHOLD = 3;
 

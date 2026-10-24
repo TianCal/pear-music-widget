@@ -365,6 +365,172 @@ pub async fn search_tracks(app: AppHandle, window: WebviewWindow, query: String)
     json!({ "ok": true, "results": resolved })
 }
 
+/// Everything the playlist picker offers, from both sources at once: picking
+/// a row switches source as well as playlist, so YouTube Music playlists are
+/// listed while a folder plays and folders while YouTube Music does. The
+/// YouTube half fails on its own (YouTube Music not running, signed out)
+/// without taking the folders with it.
+///
+/// Rows carry their cover's source URL, not the cover: the picker asks for
+/// the rows it shows through `playlist_art`, so a large library neither holds
+/// the reply up nor floods the image cache.
+#[tauri::command]
+pub async fn list_playlists(app: AppHandle) -> Value {
+    let core = core(&app);
+    let local = core.is_local();
+
+    let (saved, current_folder, current_playlist) = core.store.get(|s| {
+        (s.saved_folders(), s.local_folder.clone(), s.youtube_playlist.clone())
+    });
+    let player = core.local();
+    let folders: Vec<Value> = saved
+        .iter()
+        .map(|folder| {
+            let path = std::path::Path::new(&folder.path);
+            let name = |p: Option<&std::path::Path>| {
+                p.and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+            };
+            json!({
+                "path": folder.path,
+                "name": name(Some(path)).unwrap_or_else(|| folder.path.clone()),
+                "parent": name(path.parent()).unwrap_or_default(),
+                "present": player.folder_present(&folder.path),
+                "current": local && current_folder.as_deref() == Some(folder.path.as_str()),
+            })
+        })
+        .collect();
+
+    let youtube = match core.api.library_playlists().await {
+        Ok(payload) => {
+            let playlists: Vec<Value> = search::parse_library_playlists(&payload)
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "title": item.title,
+                        "subtitle": item.subtitle,
+                        "art": item.thumbnail,
+                    })
+                })
+                .collect();
+            json!({ "ok": true, "playlists": playlists })
+        }
+        Err(err) => json!({ "ok": false, "error": err.message }),
+    };
+
+    json!({
+        "ok": true,
+        "local": local,
+        "youtube": youtube,
+        "currentPlaylist": if local { None } else { current_playlist },
+        "folders": folders,
+    })
+}
+
+/// Most covers one `playlist_art` call resolves: a screenful and then some.
+const PLAYLIST_ART_MAX: usize = 24;
+
+/// Where YouTube Music serves playlist covers from. Auto playlists such as
+/// Liked Music use static artwork on gstatic.com.
+fn art_host(host: &str) -> bool {
+    ["googleusercontent.com", "ytimg.com", "ggpht.com", "gstatic.com"]
+        .iter()
+        .any(|domain| host.ends_with(&format!(".{domain}")))
+}
+
+/// Covers for the picker rows on screen, as `data:` URLs keyed by the source
+/// URL `list_playlists` gave. Only YouTube's image hosts (`art_host`) are
+/// fetched, so the renderer cannot point this at anything else.
+#[tauri::command]
+pub async fn playlist_art(app: AppHandle, urls: Vec<String>) -> Value {
+    let core = core(&app);
+    let allowed = |url: &str| reqwest::Url::parse(url).ok().is_some_and(|url| {
+        url.scheme() == "https" && url.host_str().is_some_and(art_host)
+    });
+    let art: serde_json::Map<String, Value> = futures_util::stream::iter(
+        urls.into_iter().filter(|url| allowed(url)).take(PLAYLIST_ART_MAX),
+    )
+    .map(|url| {
+        let core = Arc::clone(&core);
+        async move {
+            let cover = core.api.fetch_cover(Some(&url), THUMB_PX).await;
+            (url, cover.map(|data| Value::String(data.to_string())).unwrap_or(Value::Null))
+        }
+    })
+    .buffer_unordered(SEARCH_ART_CONCURRENCY)
+    .collect()
+    .await;
+    json!({ "ok": true, "art": art })
+}
+
+/// Bumped by every `play_playlist`, so a slow pick (a folder scanning off an
+/// external drive) cannot start playing after a newer one has.
+static PLAY_PLAYLIST_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Play a picker row: `kind` is `youtube` (a playlist browse id) or `folder`
+/// (a saved folder's path). Either one starts playing, switching source first
+/// when the row belongs to the other one.
+#[tauri::command]
+pub async fn play_playlist(app: AppHandle, kind: String, id: String) -> Value {
+    let core = core(&app);
+    let generation = PLAY_PLAYLIST_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let superseded = || PLAY_PLAYLIST_GEN.load(Ordering::SeqCst) != generation;
+    match kind.as_str() {
+        "youtube" => {
+            let from = playing_id(&core);
+            // Start it before leaving a folder, so a playlist YouTube Music
+            // cannot play leaves the folder playing rather than silence.
+            if let Err(err) = core.api.play_playlist(&id).await {
+                return json!({ "ok": false, "error": err.message });
+            }
+            if core.is_local() {
+                // `close` waits out a load in progress: not on this worker.
+                let handle = Arc::clone(&core);
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    crate::local::Local::close(&handle)
+                })
+                .await;
+            }
+            core.store.update_soon(move |s| s.youtube_playlist = Some(id));
+            refresh_queue_after_jump(Arc::clone(&core), 0, None, from);
+            json!({ "ok": true })
+        }
+        "folder" => {
+            // Only folders the user has chosen before: the path comes from the
+            // renderer, and opening one also scans and remembers it.
+            let saved = core.store.get(|s| s.saved_folders());
+            if !saved.iter().any(|folder| folder.path == id) {
+                return json!({ "ok": false, "error": "That folder is not in your list" });
+            }
+            let player = core.local();
+            if !player.folder_present(&id) {
+                return json!({ "ok": false, "error": "That folder's drive is not connected" });
+            }
+            let current = core.store.get(|s| s.local_folder.clone());
+            if !(core.is_local() && current.as_deref() == Some(id.as_str())) {
+                if let Err(err) =
+                    crate::local::Local::open(&core, std::path::PathBuf::from(&id)).await
+                {
+                    return json!({ "ok": false, "error": err });
+                }
+            }
+            if superseded() {
+                return json!({ "ok": false, "error": "Another pick took over" });
+            }
+            // A folder opens paused where it was left; picking it means play.
+            let handle = Arc::clone(&core);
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                if handle.is_local() && !handle.snapshot().is_playing {
+                    handle.local().toggle_play(&handle);
+                }
+            })
+            .await;
+            json!({ "ok": true })
+        }
+        other => json!({ "ok": false, "error": format!("Unknown playlist kind {other}") }),
+    }
+}
+
 /// Queue a search result and jump to it.
 ///
 /// Do not shortcut this to `next()`. The insert returns 204 *before* YouTube
@@ -690,4 +856,19 @@ pub fn retry(app: AppHandle) -> Value {
 #[tauri::command]
 pub fn quit(app: AppHandle) {
     crate::quit(&app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::art_host;
+
+    #[test]
+    fn playlist_art_only_fetches_youtube_image_hosts() {
+        for host in ["yt3.googleusercontent.com", "i.ytimg.com", "www.gstatic.com", "yt3.ggpht.com"] {
+            assert!(art_host(host), "{host}");
+        }
+        for host in ["gstatic.com.evil.test", "evilgstatic.com", "127.0.0.1", "localhost"] {
+            assert!(!art_host(host), "{host}");
+        }
+    }
 }
