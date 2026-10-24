@@ -52,6 +52,7 @@ const IMAGE_CACHE_MAX: usize = 256;
 ///   Denied       - the user pressed "Deny" on the in-app authorisation dialog
 ///   NotFound     - HTTP 404: the route or the thing it names does not exist
 ///   NoBrowse     - the API server has no `/browse` (stock pear-desktop)
+///   Rejected     - HTTP 422: understood, but YouTube Music could not do it
 ///   Error        - anything else
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -60,6 +61,7 @@ pub enum ErrorCode {
     Denied,
     NotFound,
     NoBrowse,
+    Rejected,
     Error,
 }
 
@@ -210,10 +212,21 @@ pub struct Api {
     /// delays one they did.
     searches_waiting: std::sync::atomic::AtomicUsize,
     queue_slot: tokio::sync::Mutex<()>,
+    /// One `play_song` at a time. Each reads the playing slot only once
+    /// YouTube has answered for its song, so two in flight could finish in
+    /// the other order and leave the older click playing.
+    play_slot: tokio::sync::Mutex<()>,
     /// Held while asking for a token. Requests that all hit a 401 at once
     /// (a rotated secret under `refresh_all`'s `join!`) would otherwise each
     /// open YouTube Music's authorisation dialog.
     auth_slot: tokio::sync::Mutex<()>,
+}
+
+/// What `play_song` started: the queue slot now playing and the video in it,
+/// which YouTube Music may have resolved from the one asked for.
+pub struct Played {
+    pub index: usize,
+    pub video_id: String,
 }
 
 /// `browse`'s error when the API server has no `/browse` (stock pear-desktop).
@@ -235,6 +248,7 @@ impl Api {
             search_slot: tokio::sync::Mutex::new(()),
             searches_waiting: std::sync::atomic::AtomicUsize::new(0),
             queue_slot: tokio::sync::Mutex::new(()),
+            play_slot: tokio::sync::Mutex::new(()),
             auth_slot: tokio::sync::Mutex::new(()),
         }
     }
@@ -365,7 +379,11 @@ impl Api {
                 return Ok(None);
             }
             if !res.status().is_success() {
-                let code = if status == 404 { ErrorCode::NotFound } else { ErrorCode::Error };
+                let code = match status {
+                    404 => ErrorCode::NotFound,
+                    422 => ErrorCode::Rejected,
+                    _ => ErrorCode::Error,
+                };
                 return Err(ApiError::new(code, format!("HTTP {status} on {path}")));
             }
 
@@ -589,6 +607,38 @@ impl Api {
                 err
             }
         })
+    }
+
+    /// Insert a song after the playing track and jump to it, in one request
+    /// (the fork's `POST /queue/play`). `None` only when the API server has no
+    /// such route and the caller should insert and poll instead: any other
+    /// answer may already have played the song, so it must not be retried.
+    pub async fn play_song(&self, video_id: &str) -> Result<Option<Played>> {
+        let _slot = self.play_slot.lock().await;
+        let reply = self
+            .request(
+                reqwest::Method::POST,
+                "/queue/play",
+                Some(serde_json::json!({ "videoId": video_id })),
+                SEARCH_TIMEOUT,
+            )
+            .await;
+        match reply {
+            Ok(value) => {
+                let value = value.unwrap_or(Value::Null);
+                let index = value.get("index").and_then(Value::as_u64);
+                let played = value.get("videoId").and_then(Value::as_str).unwrap_or(video_id);
+                index
+                    .map(|index| Some(Played { index: index as usize, video_id: played.to_string() }))
+                    .ok_or_else(|| ApiError::new(ErrorCode::Error, "Unexpected reply to /queue/play"))
+            }
+            Err(err) if err.code == ErrorCode::NotFound => Ok(None),
+            Err(err) if err.code == ErrorCode::Rejected => Err(ApiError::new(
+                ErrorCode::Rejected,
+                "YouTube Music couldn't queue that one",
+            )),
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn add_to_queue(&self, video_id: &str) -> Result<()> {

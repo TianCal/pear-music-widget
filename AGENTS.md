@@ -101,7 +101,8 @@ The app targets `/api/v1`, verified with YouTube Music 3.12.0.
   `/toggle-mute`, `/like`, `/dislike`, `/shuffle`, `/switch-repeat`
 - Search/queue: `POST /search`, `POST /queue`, `PATCH /queue`
 - Fork only (TianCal/pear-desktop): `GET /library/playlists`,
-  `POST /library/playlists/{id}/play`, `GET /browse/{browseId}`. A 404 means
+  `POST /library/playlists/{id}/play`, `GET /browse/{browseId}`,
+  `POST /queue/play`. A 404 means
   stock pear-desktop; say so on screen rather than failing silently. A 404
   arrives as `ErrorCode::NotFound`; decide on the code, never on the message.
 - Auth: `POST /auth/{clientId}`; Bearer token for REST and query token for WS.
@@ -359,10 +360,21 @@ pointer is on the credit.
 Search responses have no stable result path. `parse_search_results` walks the
 JSON and keeps `musicResponsiveListItemRenderer` nodes with a `videoId`.
 
-Playing a search result inserts after the current video, then polls until the
-queue reflects the insertion before advancing. The insert returns `204` before
-the queue changes, so calling `next()` immediately can play the wrong track.
-Polls back off (150 ms doubling, five tries). After a jump that changes the
+Playing a search result or an artist's top song (`play_result`) uses the
+fork's `POST /queue/play`, which inserts after the current video and jumps to
+it inside YouTube Music in one request (~0.1 s, YouTube's `get_queue`). It
+replies with the slot and the video now in it, which YouTube Music may have
+resolved to another id; `refresh_queue_after_jump` watches that one, and skips
+its confirming queue read since the slot was selected in the same step. 422
+(`ErrorCode::Rejected`) means YouTube Music gave nothing to queue, 503 that it
+could not be asked; the fork gives up rather than play the song after its
+request timed out. Plays go one at a time (`Api::play_slot`): each reads the
+playing slot only once YouTube has answered, so two in flight could finish in
+the wrong order. Only a 404 (stock pear-desktop) falls back, because any
+other reply may already have played the song. The fallback, `insert_and_jump`,
+inserts and then polls until the queue reflects the insertion before advancing. That insert
+returns `204` before the queue changes, so calling `next()` immediately can
+play the wrong track. Polls back off (150 ms doubling, five tries). After a jump that changes the
 track, VIDEO_CHANGED → `apply_song` refreshes the queue; `refresh_queue_after_jump`
 only watches `/song` as a fallback. A jump to another copy of the playing video
 has no VIDEO_CHANGED, so that case polls `/queue` until the slot is selected and

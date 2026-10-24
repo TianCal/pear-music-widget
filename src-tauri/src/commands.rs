@@ -74,11 +74,16 @@ fn core(app: &AppHandle) -> Arc<Core> {
 /// VIDEO_CHANGED is coming, so the queue itself is polled until the slot goes
 /// selected: read before the player has switched, it is the list we already
 /// had. Either way the queue is published once.
+///
+/// `selected` says the API server marked the slot in the same step as the
+/// jump (`POST /queue/play`), so the queue `apply_song` reads on the track
+/// change already shows it and the confirming re-read is skipped.
 fn refresh_queue_after_jump(
     core: Arc<Core>,
     index: usize,
     target: Option<String>,
     from: Option<String>,
+    selected: bool,
 ) {
     tauri::async_runtime::spawn(async move {
         let moves = from.is_none() || target != from;
@@ -106,10 +111,12 @@ fn refresh_queue_after_jump(
                     };
                 if landed {
                     // `apply_song` refreshed the queue on the track change, but
-                    // that read can land before the queue marks the new slot
-                    // selected. Confirm once.
-                    tokio::time::sleep(JUMP_CONFIRM).await;
-                    core.refresh_queue().await;
+                    // after a separate jump that read can land before the
+                    // queue marks the new slot selected. Confirm once.
+                    if !selected {
+                        tokio::time::sleep(JUMP_CONFIRM).await;
+                        core.refresh_queue().await;
+                    }
                     return;
                 }
             } else if let Ok(Some(queue)) = core.api.queue().await {
@@ -526,7 +533,7 @@ pub async fn play_playlist(app: AppHandle, kind: String, id: String) -> Value {
                 .await;
             }
             core.store.update_soon(move |s| s.youtube_playlist = Some(id));
-            refresh_queue_after_jump(Arc::clone(&core), 0, None, from);
+            refresh_queue_after_jump(Arc::clone(&core), 0, None, from, false);
             json!({ "ok": true })
         }
         "folder" => {
@@ -565,12 +572,12 @@ pub async fn play_playlist(app: AppHandle, kind: String, id: String) -> Value {
     }
 }
 
-/// Queue a search result and jump to it.
+/// Queue a search result (or an artist's top song) and jump to it.
 ///
-/// Do not shortcut this to `next()`. The insert returns 204 *before* YouTube
-/// Music has actually mutated its queue, so a `next()` fired straight after
-/// skips onto whatever was already queued — you click A, an unrelated track
-/// plays, and A only starts when you click something else.
+/// The fork's `POST /queue/play` does both inside YouTube Music, in about the
+/// time YouTube takes to hand over the song's queue data (~0.1 s). Stock
+/// pear-desktop has no such route, so there the insert and the jump are two
+/// requests with polling between them, which costs up to a second more.
 #[tauri::command]
 pub async fn play_result(app: AppHandle, video_id: String) -> Value {
     if video_id.is_empty() {
@@ -581,6 +588,27 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
         return local_jump(&core, None, &video_id).await;
     }
 
+    let from = playing_id(&core);
+    match core.api.play_song(&video_id).await {
+        Ok(Some(played)) => {
+            let index = played.index;
+            refresh_queue_after_jump(Arc::clone(&core), index, Some(played.video_id), from, true);
+            return json!({ "ok": true, "index": index });
+        }
+        Ok(None) => {}
+        Err(err) => return json!({ "ok": false, "error": err.message }),
+    }
+    insert_and_jump(&core, &video_id).await
+}
+
+/// `play_result` for an API server without `POST /queue/play`.
+///
+/// Do not shortcut this to `next()`. The insert returns 204 *before* YouTube
+/// Music has actually mutated its queue, so a `next()` fired straight after
+/// skips onto whatever was already queued — you click A, an unrelated track
+/// plays, and A only starts when you click something else.
+async fn insert_and_jump(core: &Arc<Core>, video_id: &str) -> Value {
+    let video_id = video_id.to_string();
     let before = search::queue_entries(core.api.queue().await.ok().flatten().as_ref()).len();
 
     if let Err(err) = core.api.add_to_queue(&video_id).await {
@@ -609,10 +637,10 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
             continue;
         }
 
-        let (target, from) = (entries[current + 1].video_id.clone(), playing_id(&core));
+        let (target, from) = (entries[current + 1].video_id.clone(), playing_id(core));
         return match core.api.set_queue_index(current + 1).await {
             Ok(()) => {
-                refresh_queue_after_jump(Arc::clone(&core), current + 1, target, from);
+                refresh_queue_after_jump(Arc::clone(core), current + 1, target, from, false);
                 json!({ "ok": true, "index": current + 1 })
             }
             Err(err) => json!({ "ok": false, "error": err.message }),
@@ -660,7 +688,7 @@ pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
             let (target, from) = (entries[index].video_id.clone(), playing_id(&core));
             match core.api.set_queue_index(index).await {
                 Ok(()) => {
-                    refresh_queue_after_jump(Arc::clone(&core), index, target, from);
+                    refresh_queue_after_jump(Arc::clone(&core), index, target, from, false);
                     json!({ "ok": true, "index": index })
                 }
                 Err(err) => json!({ "ok": false, "error": err.message }),
@@ -834,7 +862,7 @@ pub async fn play_queue_index(app: AppHandle, index: usize, video_id: String) ->
     let from = playing_id(&core);
     match core.api.set_queue_index(index).await {
         Ok(()) => {
-            refresh_queue_after_jump(Arc::clone(&core), index, Some(video_id), from);
+            refresh_queue_after_jump(Arc::clone(&core), index, Some(video_id), from, false);
             json!({ "ok": true, "index": index })
         }
         Err(err) => json!({ "ok": false, "error": err.message }),
