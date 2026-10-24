@@ -25,7 +25,8 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/tray.rs` | Status item and menus |
 | `src-tauri/src/commands.rs` | Renderer commands |
 | `src-tauri/src/macos.rs` | AppKit integration |
-| `src-tauri/src/search.rs` | Search and queue parsing |
+| `src-tauri/src/search.rs` | Search, queue and artist page parsing |
+| `src-tauri/src/artist.rs` | Artist popup pages: fetch and cache |
 | `src-tauri/src/lyrics.rs` | Lyrics lookup, matching, and LRC parsing |
 | `src-tauri/src/lyrics_cache.rs` | Memory and disk lyrics cache |
 | `src-tauri/src/local.rs` | Local-folder scanning and playback |
@@ -87,6 +88,9 @@ The app targets `/api/v1`, verified with YouTube Music 3.12.0.
 - Writes: `/toggle-play`, `/next`, `/previous`, `/seek-to`, `/volume`,
   `/toggle-mute`, `/like`, `/dislike`, `/shuffle`, `/switch-repeat`
 - Search/queue: `POST /search`, `POST /queue`, `PATCH /queue`
+- Fork only (TianCal/pear-desktop): `GET /library/playlists`,
+  `POST /library/playlists/{id}/play`, `GET /browse/{browseId}`. A 404 means
+  stock pear-desktop; say so on screen rather than failing silently.
 - Auth: `POST /auth/{clientId}`; Bearer token for REST and query token for WS
 
 Repeat is a button cycle, not a setter. `/switch-repeat` accepts an iteration
@@ -100,7 +104,7 @@ the player reports, so only `ALL`/`ONE` are taken from it.
 The server answers `/search` and `/queue` by asking the renderer and taking the
 first reply, so overlapping calls can swap answers. `Api` serialises each
 behind its own async mutex; every caller (user search, artwork's YouTube Music
-lookup) goes through it.
+lookup, the artist popup's name lookups) goes through it.
 
 ## State and connection
 
@@ -259,6 +263,73 @@ display timing.
 derived on output with phrase-aware `fast2s`; turning the option off must restore
 the unmodified source without another request. `publish_lyrics` reads settings
 before locking lyrics and emits only when the display value changed.
+
+## Track labels and artists
+
+`/song` gives YouTube Music's canonical words, often romanised ("Free Soul"
+by "Ronghao Li"). The track's queue slot has them in the account's language
+("纵横四海" by "李荣浩") and a browse id for each artist. `Core::dress`
+relabels the playing `Song` from its slot whenever the queue holds it: in
+`apply_song` (the next track is usually already queued, so there is no flash),
+after every `publish_queue` (`relabel_song`) and in `remap_artists`. It
+rebuilds from `api_title`/`api_artist` each time, so it can be re-run. The
+two later callers dress a copy outside the locks and write it back only if
+the song is still that copy, so a newer `apply_song` is never overwritten.
+An `artistNames` entry for the whole canonical credit is the user's choice
+and beats the slot's credit (`store::renames_whole`); a rename of one name
+inside it does not. Lyrics look up with `Song::for_lyrics`: the API's words,
+so a lookup and its cached miss never depend on whether the queue had
+arrived, except that a rename of the credit as shown (what the Rename menu
+offers) still steers the artist.
+
+`Song.artists` comes from the slot's byline. A run whose page type is
+`MUSIC_PAGE_TYPE_ARTIST` gives its browse id. YouTube Music links only the
+artists it has matched, and sometimes none: "MC HotDog熱狗/艾怡良" is one plain
+run. So plain text is split with `store::split_credit` into names with an
+empty id, and the joiners it writes as their own runs ("、", "和") are dropped.
+Each link keeps YouTube Music's own name in `query`; `name` is the
+`artistNames` rename for display. A name without an id is found when needed:
+`artist::page` searches for `query` and takes only an artist whose name folds
+equal (`search::find_artist`). Uploader channels are skipped because they
+have no Top songs, and for uploads only linked artists are kept. Without a
+slot the credit is romanised, so it is linked only when it names one artist
+and `/song`'s `artistUrl` channel (kept for `AUDIO` and
+`ORIGINAL_MUSIC_VIDEO`) can stand in; the slot follows within a queue fetch.
+The channel also fills a slot's lone unlinked name. `QueueTrack` keeps
+`credit` and `artists` unserialised; only the playing track's links reach the
+renderer.
+
+The whole credit under the title is one link. It opens the artist popup,
+which has one section per artist (up to four), each with the Top songs shelf
+of `GET /browse/{UC…}` and its own Play all. Sections fill in as their pages
+land. This is YouTube Music only: local credits have no page, so local
+subtitles have no link. A page takes about 0.4 s through the API server,
+plus its covers, so it must never be fetched on the click:
+
+- Warming is on hover only, like the playlist picker: never on a track
+  change. Resting the pointer on the card for 150 ms warms every artist the
+  popup would show, and again when the links change while the pointer is
+  still there.
+- `artist::page` caches pages (covers already resolved to `data:` URLs) by
+  id, and name lookups by folded name, separately, so a failed page does not
+  repeat its search. Both keep 24 entries for 30 min, and concurrent callers
+  share one fetch. Failures are kept too, because warming runs on every
+  hover: 10 min for an API server without `/browse` (`api::NO_BROWSE`), 60 s
+  for other failed requests, and 30 min for a name with no artist.
+- Name lookups use `Api::search_background`, which takes the search slot only
+  while no `search_if` is waiting, so they never delay the user's search.
+- A page's covers are fetched all at once, each given 2 s, so one slow
+  thumbnail cannot hold the page.
+- The renderer keeps replies for 10 min and shows "Loading" only after
+  150 ms, so a warm open draws in the same frame. `artist_page` replies with
+  a typed struct rather than `json!`, which would copy the covers again.
+
+Rows play through `play_result` (after the current track). **Play all** plays
+the shelf's "VL…" playlist through `play_playlist`. The popup is an overlay like
+the picker. It closes for panels, search, the picker, Escape, an outside click,
+going offline, switching to a folder and a change of credit, and it blocks
+the playback shortcuts while open. A drifting subtitle pauses while the
+pointer is on the credit.
 
 ## Search and queue
 

@@ -216,13 +216,6 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The credit as it should be shown. The whole string is tried first, so a
-    /// mapping can name a collaboration; then each credit separately, keeping
-    /// the separators the source used.
-    pub fn artist_name(&self, artist: &str) -> String {
-        map_artist(&self.artist_names, artist)
-    }
-
     pub fn lyrics_offset_for(&self, video_id: Option<&str>) -> f64 {
         let offset = video_id
             .and_then(|id| self.lyrics_offsets_by_video.get(id))
@@ -331,6 +324,24 @@ static ARTIST_SEPARATORS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLoc
     regex::Regex::new(r"\s*(?:,|，|&|、|/|;|\bfeat\.?|\bft\.)\s*").expect("separator regex")
 });
 
+/// Whether `names` has an entry for the whole credit, as `map_artist` tries
+/// first.
+pub fn renames_whole(names: &BTreeMap<String, String>, credit: &str) -> bool {
+    names.keys().any(|from| from.trim().eq_ignore_ascii_case(credit.trim()))
+}
+
+/// The names in a credit, split where `map_artist` splits it.
+pub fn split_credit(credit: &str) -> Vec<&str> {
+    ARTIST_SEPARATORS
+        .split(credit)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The credit as it should be shown. The whole string is tried first, so a
+/// mapping can name a collaboration; then each credit separately, keeping
+/// the separators the source used.
 pub fn map_artist(names: &BTreeMap<String, String>, artist: &str) -> String {
     let lookup = |credit: &str| {
         let credit = credit.trim();
@@ -548,6 +559,8 @@ mod tests {
         assert_eq!(map_artist(&names, "jaychou"), "周杰伦");
         assert_eq!(map_artist(&names, "JJ Lin, A-Mei"), "林俊杰, A-Mei");
         assert_eq!(map_artist(&names, "Jaychou & JJ Lin"), "周杰伦 & 林俊杰");
+        assert_eq!(split_credit("MC HotDog熱狗/艾怡良, "), ["MC HotDog熱狗", "艾怡良"]);
+        assert_eq!(split_credit("Dan + Shay"), ["Dan + Shay"]);
         // Substrings are not credits.
         assert_eq!(map_artist(&names, "Jaychoux"), "Jaychoux");
         assert_eq!(map_artist(&BTreeMap::new(), "Jaychou"), "Jaychou");

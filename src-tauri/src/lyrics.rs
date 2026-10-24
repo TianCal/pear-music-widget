@@ -1674,6 +1674,7 @@ mod local_order_sample {
                 image_src: None,
                 url: None,
                 media_type: Some("LOCAL".into()),
+                ..Song::default()
             };
             let found = lookup_local(&http, &song).await;
             println!(

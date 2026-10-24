@@ -32,7 +32,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::api::{Api, ErrorCode, COVER_PX};
 use crate::jyutping::Jyutping;
 use crate::lyrics::{self, LyricLine, Lyrics};
-use crate::search::{self, QueueView, QUEUE_MAX};
+use crate::search::{self, ArtistLink, QueueView, QUEUE_MAX};
 use crate::store::{SkinCorners, Store};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -51,6 +51,21 @@ pub struct Song {
     pub image_src: Option<String>,
     pub url: Option<String>,
     pub media_type: Option<String>,
+    /// Each credited artist with a YouTube Music page, for the artist popup.
+    /// Empty for local files and for uploads credited to a channel.
+    pub artists: Vec<ArtistLink>,
+    /// `/song`'s own title and credit. `Core::dress` relabels the track from
+    /// its queue slot; lyrics are still looked up with these (`for_lyrics`).
+    /// Empty for local files.
+    #[serde(skip)]
+    pub api_title: String,
+    #[serde(skip)]
+    pub api_artist: String,
+    /// The artist channel from `/song`'s `artistUrl`: the link to use until
+    /// the queue slot gives the real ones. Only for songs and official videos,
+    /// whose page owner is the artist rather than an uploader.
+    #[serde(skip)]
+    pub channel: Option<String>,
 }
 
 impl Song {
@@ -77,6 +92,13 @@ impl Song {
                 .map(str::to_string)
         };
 
+        let media_type = optional("mediaType");
+        let by_artist = matches!(media_type.as_deref(), Some("AUDIO" | "ORIGINAL_MUSIC_VIDEO"));
+        let channel = optional("artistUrl")
+            .filter(|_| by_artist)
+            .and_then(|url| Some(url.split_once("/channel/")?.1.to_string()))
+            .filter(|id| !id.is_empty());
+
         Some(Self {
             video_id: video_id.to_string(),
             title: text("title", "Unknown title"),
@@ -89,8 +111,29 @@ impl Song {
                 .unwrap_or(0.0),
             image_src: optional("imageSrc"),
             url: optional("url"),
-            media_type: optional("mediaType"),
+            media_type,
+            artists: Vec::new(),
+            api_title: text("title", "Unknown title"),
+            api_artist: text("artist", ""),
+            channel,
         })
+    }
+
+    /// The song as lyrics are looked up: `/song`'s own words, whatever the
+    /// queue relabelled it to, so a lookup and its cached miss do not depend
+    /// on whether the queue had arrived yet. A rename of the credit as shown
+    /// (the one the Rename menu offers) still steers the lookup.
+    pub fn for_lyrics(&self, names: &std::collections::BTreeMap<String, String>) -> Self {
+        if self.api_title.is_empty() {
+            return self.clone();
+        }
+        let shown = crate::store::map_artist(names, &self.raw_artist);
+        let artist = if shown != self.raw_artist {
+            shown
+        } else {
+            crate::store::map_artist(names, &self.api_artist)
+        };
+        Self { title: self.api_title.clone(), artist, ..self.clone() }
     }
 }
 
@@ -706,17 +749,20 @@ impl Core {
     /// `artistNames` changed: re-label the song, the queue and retry the
     /// lyrics (and, for a file, the cover) a miss under the old name left out.
     pub fn remap_artists(self: &Arc<Self>) {
-        let names = self.store.get(|s| s.artist_names.clone());
         let mut renamed = None;
-        self.update(|state| {
-            if let Some(song) = state.song.as_mut() {
-                let artist = crate::store::map_artist(&names, &song.raw_artist);
-                if artist != song.artist {
-                    song.artist = artist;
-                    renamed = Some(song.video_id.clone());
+        let current = self.player.lock().expect("player lock").song.clone();
+        if let Some(current) = current {
+            let dressed = self.dress(current.clone());
+            self.update(|state| {
+                // Only onto the song it was dressed from, never a newer one.
+                if state.song.as_ref() == Some(&current) {
+                    if dressed.artist != current.artist {
+                        renamed = Some(current.video_id.clone());
+                    }
+                    state.song = Some(dressed);
                 }
-            }
-        });
+            });
+        }
         if self.is_local() {
             self.local().renamed(self);
         }
@@ -879,10 +925,7 @@ impl Core {
         if self.is_local() {
             return false;
         }
-        let song = Song::from_value(raw).map(|mut song| {
-            song.artist = self.store.get(|s| s.artist_name(&song.raw_artist));
-            song
-        });
+        let song = Song::from_value(raw).map(|song| self.dress(song));
         let current = self.player.lock().expect("player lock").song.clone();
 
         if song.as_ref().map(|s| &s.video_id) == current.as_ref().map(|s| &s.video_id) {
@@ -931,6 +974,94 @@ impl Core {
             core.refresh_lyrics().await;
         });
         true
+    }
+
+    /// A track as the surfaces show it. `/song` has YouTube Music's canonical
+    /// words, often romanised ("Free Soul" by "Ronghao Li"); the track's queue
+    /// slot has them in the account's language ("纵横四海" by "李荣浩") and a
+    /// link per artist, so the slot wins whenever the queue holds the track.
+    /// An `artistNames` entry for the canonical credit is the user's own choice
+    /// and still wins over the slot's credit.
+    ///
+    /// Rebuilt from the `api_*` fields every time, so it can be re-run when
+    /// the queue or the names change. A local file only gets `artistNames`.
+    fn dress(&self, mut song: Song) -> Song {
+        let names = self.store.get(|s| s.artist_names.clone());
+        let map = |credit: &str| crate::store::map_artist(&names, credit);
+        if song.api_title.is_empty() {
+            song.artist = map(&song.raw_artist);
+            return song;
+        }
+
+        let slot = self
+            .queue
+            .lock()
+            .expect("queue lock")
+            .items
+            .iter()
+            .find(|track| track.video_id == song.video_id)
+            .cloned();
+        // A rename of the whole canonical credit; one of a single name in it
+        // still lets the slot's words through.
+        let renamed = crate::store::renames_whole(&names, &song.api_artist);
+
+        song.title = slot
+            .as_ref()
+            .map(|track| track.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| song.api_title.clone());
+        song.raw_artist = slot
+            .as_ref()
+            .map(|track| track.credit.clone())
+            .filter(|credit| !renamed && !credit.is_empty())
+            .unwrap_or_else(|| song.api_artist.clone());
+        song.artist = map(&song.raw_artist);
+        // Names without an id are found by name when opened. Only a song or
+        // an official video is credited to artists; an upload's byline names
+        // whoever posted it. Without a slot `/song`'s credit is romanised, so
+        // it is only linked when it names one artist and the channel is
+        // theirs; the slot follows within a queue fetch.
+        let by_artist = matches!(song.media_type.as_deref(), Some("AUDIO" | "ORIGINAL_MUSIC_VIDEO"));
+        let mut links: Vec<ArtistLink> = match &slot {
+            Some(track) => track.artists.to_vec(),
+            None if crate::store::split_credit(&song.api_artist).len() == 1 => {
+                vec![ArtistLink::named(&song.api_artist)]
+            }
+            None => Vec::new(),
+        };
+        links.retain(|link| by_artist || !link.id.is_empty());
+        // `/song`'s channel is the page owner: the artist when only one is named.
+        if let ([link], Some(channel)) = (links.as_mut_slice(), song.channel.as_ref()) {
+            if link.id.is_empty() {
+                link.id = channel.clone();
+            }
+        }
+        if slot.is_none() {
+            links.retain(|link| !link.id.is_empty());
+        }
+        song.artists = links
+            .into_iter()
+            .map(|link| ArtistLink { name: map(&link.query), ..link })
+            .collect();
+        song
+    }
+
+    /// The queue changed: relabel the playing track from its slot.
+    fn relabel_song(&self) {
+        let Some(current) = self.player.lock().expect("player lock").song.clone() else {
+            return;
+        };
+        let dressed = self.dress(current.clone());
+        if dressed == current {
+            return;
+        }
+        // Only onto the song it was dressed from: an `apply_song` in between
+        // (a later album or duration) wins, and relabels itself.
+        self.update_remote(|state| {
+            if state.song.as_ref() == Some(&current) {
+                state.song = Some(dressed);
+            }
+        });
     }
 
     /// Whether any surface is looking at the queue — a skin whose layout draws
@@ -1050,6 +1181,7 @@ impl Core {
             view.items = Arc::from(items);
         }
         self.set_queue(view);
+        self.relabel_song();
     }
 
     async fn refresh_queue_once(self: &Arc<Self>) {
@@ -1091,6 +1223,8 @@ impl Core {
         }
         let wanted = !open.is_empty();
         let song = self.player.lock().expect("player lock").song.clone();
+        let names = self.store.get(|s| s.artist_names.clone());
+        let song = song.map(|song| song.for_lyrics(&names));
 
         let token = self.lyrics_token.fetch_add(1, Ordering::SeqCst) + 1;
         self.lyrics_superseded.notify_waiters();
@@ -1622,6 +1756,40 @@ mod tests {
         assert!(lyrics.synced);
         assert_eq!(lyrics.how, "exact");
         assert_eq!(converted.state, "ready");
+    }
+
+    #[test]
+    fn song_keeps_the_api_words_for_lyrics_and_an_artist_channel_for_songs_only() {
+        let raw = serde_json::json!({
+            "videoId": "p_oH-XgGqX0",
+            "title": "Free Soul",
+            "artist": "Jaychou",
+            "artistUrl": "https://music.youtube.com/channel/UCLZ9hbBmb_5mEclHVY5yOBg",
+            "mediaType": "AUDIO",
+        });
+        let mut song = Song::from_value(Some(&raw)).expect("a track");
+        assert_eq!(song.channel.as_deref(), Some("UCLZ9hbBmb_5mEclHVY5yOBg"));
+
+        // Relabelled from the queue; lyrics still ask with /song's words.
+        song.title = "纵横四海".into();
+        song.artist = "李荣浩".into();
+        let names = std::collections::BTreeMap::from([("Jaychou".to_string(), "周杰伦".to_string())]);
+        let query = song.for_lyrics(&names);
+        assert_eq!((query.title.as_str(), query.artist.as_str()), ("Free Soul", "周杰伦"));
+
+        // Renaming the credit as shown (the slot's) steers the lookup too.
+        song.raw_artist = "李荣浩".into();
+        let names = std::collections::BTreeMap::from([("李荣浩".to_string(), "李榮浩".to_string())]);
+        assert_eq!(song.for_lyrics(&names).artist, "李榮浩");
+        assert_eq!(song.for_lyrics(&Default::default()).artist, "Jaychou");
+
+        // An upload's page owner is the uploader, not an artist.
+        let upload = serde_json::json!({
+            "videoId": "x", "title": "t", "artist": "a",
+            "artistUrl": "https://music.youtube.com/channel/UCuploader",
+            "mediaType": "USER_GENERATED_CONTENT",
+        });
+        assert_eq!(Song::from_value(Some(&upload)).expect("a track").channel, None);
     }
 
     #[test]

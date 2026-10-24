@@ -81,7 +81,7 @@ fn dir() -> PathBuf {
 // ------------------------------------------------------------------ matching
 
 /// Simplified, lowercased, letters and digits only.
-fn fold(text: &str) -> String {
+pub(crate) fn fold(text: &str) -> String {
     fast2s::convert(text)
         .to_lowercase()
         .chars()

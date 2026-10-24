@@ -463,6 +463,40 @@ pub async fn playlist_art(app: AppHandle, urls: Vec<String>) -> Value {
     json!({ "ok": true, "art": art })
 }
 
+/// An artist's Top songs for the artist popup, by the browse id on the
+/// playing `Song`'s `artists`, or by name when it has none. YouTube Music
+/// only: a local file's credit has no page, and the renderer does not offer
+/// the popup there.
+///
+/// A typed reply rather than `json!`: the page's covers are `data:` URLs, and
+/// building a `Value` would copy them once more before Tauri serialises it.
+#[tauri::command]
+pub async fn artist_page(app: AppHandle, id: String, name: String) -> ArtistReply {
+    let core = core(&app);
+    if core.is_local() {
+        return ArtistReply::failed("Artist pages are a YouTube Music feature".into());
+    }
+    match crate::artist::page(&core.api, &id, &name).await {
+        Ok(page) => ArtistReply { ok: true, page: Some(page), error: None },
+        Err(failed) => ArtistReply::failed(failed.message),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ArtistReply {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<Arc<search::ArtistPage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl ArtistReply {
+    fn failed(error: String) -> Self {
+        Self { ok: false, page: None, error: Some(error) }
+    }
+}
+
 /// Bumped by every `play_playlist`, so a slow pick (a folder scanning off an
 /// external drive) cannot start playing after a newer one has.
 static PLAY_PLAYLIST_GEN: AtomicU64 = AtomicU64::new(0);

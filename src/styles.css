@@ -1767,3 +1767,77 @@ body.skin-stack .upnext:not([hidden]) {
   height: 16px;
   fill: currentColor;
 }
+
+/* ---------------------------------------------------------- artist popup */
+
+/* A linked artist under the title (YouTube Music only). Hover brightens the
+   name and shows the pointer cursor. A drifting subtitle
+   holds still while the pointer is on a name, so the target does not slide
+   out from under the click. */
+.artist-link {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: color 0.12s ease;
+}
+
+.artist-link:hover {
+  color: var(--fg);
+}
+
+.titles:hover .marquee.scroll .subtitle:has(.artist-link:hover) {
+  animation-play-state: paused;
+}
+
+/* The picker's overlay, placed by `placeArtistPop` under the credit instead
+   of under the corner bar. One section per artist, each headed by their name
+   and Play all; the list scrolls once there are more than fit. */
+.artist-pop {
+  right: auto;
+  width: min(240px, calc(100% - 14px));
+}
+
+.artist-section + .artist-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 0.5px solid var(--hairline);
+}
+
+.artist-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 3px;
+}
+
+.artist-pop-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.artist-play-all {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 99px;
+  padding: 3px 9px;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--hover);
+  cursor: pointer;
+}
+
+.artist-play-all:hover {
+  color: var(--accent);
+}
+
+/* Rows take `.busy` and `.current` from the picker's `.playlists` rules. */
+.artist-play-all.busy {
+  opacity: 0.6;
+}

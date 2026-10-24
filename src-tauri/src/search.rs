@@ -23,6 +23,23 @@ pub struct SearchResult {
     pub thumbnail: Option<Arc<str>>,
 }
 
+/// An artist credited on a track, with the browse id of their YouTube Music
+/// page (`UC…`), or an empty id when YouTube Music did not link the name.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ArtistLink {
+    /// As shown: `artistNames` applied on the playing `Song`.
+    pub name: String,
+    pub id: String,
+    /// YouTube Music's own name, which an artist without an id is searched by.
+    pub query: String,
+}
+
+impl ArtistLink {
+    pub fn named(name: &str) -> Self {
+        Self { name: name.to_string(), id: String::new(), query: name.to_string() }
+    }
+}
+
 /// A pathological queue is capped the way the search tree is by `MAX_ITEMS`.
 pub const QUEUE_MAX: usize = 500;
 
@@ -37,6 +54,14 @@ pub struct QueueTrack {
     pub video_id: String,
     pub title: String,
     pub artist: String,
+    /// The byline's artist part before `artistNames`: `artist` is drawn, this
+    /// is what the playing track is relabelled from (`Core::dress`).
+    #[serde(skip)]
+    pub credit: String,
+    /// Each credited artist with a page, in byline order. Not serialised: only
+    /// the playing track's links reach the renderer, on its `Song`.
+    #[serde(skip)]
+    pub artists: Arc<[ArtistLink]>,
     /// `lengthText`, already formatted by the player. Empty when absent.
     pub duration: String,
     /// The artwork **source** URL, deliberately not serialised. Resolving one
@@ -304,6 +329,84 @@ pub fn parse_library_playlists(payload: &Value) -> Vec<Playlist> {
     playlists
 }
 
+/// An artist page's Top songs shelf, as the artist popup draws it.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistPage {
+    /// `thumbnail` holds the source URL from the parse; `artist::page`
+    /// swaps in a `data:` URL.
+    pub songs: Vec<SearchResult>,
+    /// The "Show all" playlist ("VL…") holding every top song, for Play all.
+    pub all_songs: Option<String>,
+}
+
+/// The first `musicShelfRenderer` on an artist page is Top songs; the albums,
+/// singles and videos below it are carousels of another renderer. Rows are
+/// title, artist, plays, album, so the subtitle is the last two.
+pub fn parse_artist_page(payload: &Value) -> ArtistPage {
+    let mut shelves = Vec::new();
+    collect_renderers(payload, &["musicShelfRenderer"], &mut shelves, 0);
+    let Some(shelf) = shelves.first() else {
+        return ArtistPage { songs: Vec::new(), all_songs: None };
+    };
+
+    let mut items = Vec::new();
+    collect_items(shelf, &mut items, 0);
+    let mut songs: Vec<SearchResult> = Vec::new();
+    for item in items {
+        let Some(video_id) = video_id_of(item) else { continue };
+        if songs.iter().any(|song| song.video_id == video_id) {
+            continue;
+        }
+        let title = column_text(item, 0).trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let details: Vec<String> = [2, 3]
+            .iter()
+            .map(|&index| column_text(item, index).trim().to_string())
+            .filter(|text| !text.is_empty())
+            .collect();
+        let subtitle = if details.is_empty() {
+            column_text(item, 1).trim().to_string()
+        } else {
+            details.join(" · ")
+        };
+        // The largest of the row's thumbnails (60 and 120 px): rows are drawn
+        // at retina size, and `at_most` only ever shrinks.
+        let thumbnail = dig(
+            item,
+            &["thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"],
+        )
+        .and_then(Value::as_array)
+        .and_then(|list| list.last())
+        .and_then(|last| last.get("url"))
+        .and_then(Value::as_str)
+        .map(Arc::from);
+        songs.push(SearchResult { video_id: video_id.to_string(), title, subtitle, thumbnail });
+        if songs.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+
+    let browse_id = |node: Option<&Value>| {
+        node.and_then(|node| dig(node, &["browseEndpoint", "browseId"]))
+            .and_then(Value::as_str)
+            .filter(|id| id.starts_with("VL"))
+            .map(str::to_string)
+    };
+    let all_songs = browse_id(shelf.get("bottomEndpoint")).or_else(|| {
+        browse_id(
+            dig(shelf, &["title", "runs"])
+                .and_then(Value::as_array)
+                .and_then(|runs| runs.first())
+                .and_then(|run| run.get("navigationEndpoint")),
+        )
+    });
+
+    ArtistPage { songs, all_songs }
+}
+
 /// Queue items come either bare or wrapped; unwrap to the video renderer.
 fn video_renderer(item: &Value) -> Option<&Value> {
     item.get("playlistPanelVideoRenderer").or_else(|| {
@@ -361,6 +464,97 @@ fn queue_art_of(renderer: &Value) -> Option<Arc<str>> {
         .map(Arc::from)
 }
 
+/// Joiners YouTube Music writes as runs of their own between names.
+const JOINERS: [&str; 5] = ["和", "與", "与", "and", "x"];
+
+/// The artists in a byline's first part. A run that browses to an artist page
+/// gives its id. YouTube Music links only the artists it has matched, and
+/// sometimes none ("MC HotDog熱狗/艾怡良" is one plain run), so plain text is
+/// split into names with an empty id for `artist::page` to find by name.
+/// Uploader channels (`MUSIC_PAGE_TYPE_USER_CHANNEL`) have no Top songs and
+/// are left out.
+fn artist_links(byline: Option<&Value>) -> Vec<ArtistLink> {
+    let runs = byline
+        .and_then(|node| node.get("runs"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut links = Vec::new();
+    for run in runs {
+        let text = run.get("text").and_then(Value::as_str).unwrap_or("");
+        if text.contains('•') {
+            break;
+        }
+        let Some(browse) = dig(run, &["navigationEndpoint", "browseEndpoint"]) else {
+            links.extend(
+                crate::store::split_credit(text)
+                    .into_iter()
+                    .filter(|name| !JOINERS.contains(&name.to_lowercase().as_str()))
+                    .map(ArtistLink::named),
+            );
+            continue;
+        };
+        if page_type(browse) != Some("MUSIC_PAGE_TYPE_ARTIST") {
+            continue;
+        }
+        let id = browse.get("browseId").and_then(Value::as_str).unwrap_or("");
+        let name = text.trim();
+        if !id.is_empty() && !name.is_empty() {
+            links.push(ArtistLink { id: id.to_string(), ..ArtistLink::named(name) });
+        }
+    }
+    links
+}
+
+fn page_type(browse: &Value) -> Option<&str> {
+    dig(
+        browse,
+        &[
+            "browseEndpointContextSupportedConfigs",
+            "browseEndpointContextMusicConfig",
+            "pageType",
+        ],
+    )
+    .and_then(Value::as_str)
+}
+
+/// The artist page a search for `name` names: the first artist link (the top
+/// result card, then artist rows and credits) whose text is `name` once
+/// folded. A different artist is never taken for it.
+pub fn find_artist(payload: &Value, name: &str) -> Option<String> {
+    fn walk(node: &Value, wanted: &str, depth: usize) -> Option<String> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        match node {
+            Value::Array(items) => items.iter().find_map(|child| walk(child, wanted, depth + 1)),
+            Value::Object(map) => {
+                let browse = dig(node, &["navigationEndpoint", "browseEndpoint"])
+                    .filter(|browse| page_type(browse) == Some("MUSIC_PAGE_TYPE_ARTIST"));
+                if let Some(browse) = browse {
+                    // A run carries its text; an artist row, its first column.
+                    let text = match map.get("text").and_then(Value::as_str) {
+                        Some(text) => text.to_string(),
+                        None => column_text(node, 0),
+                    };
+                    if crate::artwork::fold(&text) == wanted {
+                        if let Some(id) = browse.get("browseId").and_then(Value::as_str) {
+                            return Some(id.to_string());
+                        }
+                    }
+                }
+                map.values().find_map(|child| walk(child, wanted, depth + 1))
+            }
+            _ => None,
+        }
+    }
+    let wanted = crate::artwork::fold(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    walk(payload, &wanted, 0)
+}
+
 /// One queue slot's metadata. `None` for a slot that names no track — a divider,
 /// or a renderer shape we do not know.
 fn queue_track(index: usize, renderer: Option<&Value>) -> Option<QueueTrack> {
@@ -382,6 +576,8 @@ fn queue_track(index: usize, renderer: Option<&Value>) -> Option<QueueTrack> {
         index,
         video_id: video_id.to_string(),
         title: runs_text(renderer.get("title")).trim().to_string(),
+        credit: artist.clone(),
+        artists: Arc::from(artist_links(byline)),
         artist,
         duration: runs_text(renderer.get("lengthText")).trim().to_string(),
         art: queue_art_of(renderer),
@@ -578,5 +774,129 @@ mod tests {
         assert_eq!(playlists[0].thumbnail.as_deref(), Some("http://liked"));
         assert_eq!(playlists[1].title, "Night drive");
         assert_eq!(playlists[1].subtitle, "38 songs");
+    }
+
+    fn browse_run(text: &str, id: &str, page: &str) -> Value {
+        json!({ "text": text, "navigationEndpoint": { "browseEndpoint": {
+            "browseId": id,
+            "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": { "pageType": page } } } } })
+    }
+
+    #[test]
+    fn queue_slots_link_each_artist_before_the_album() {
+        let queue = json!({ "items": [{ "playlistPanelVideoRenderer": {
+            "videoId": "v1",
+            "title": { "runs": [{ "text": "纵横四海" }] },
+            "longBylineText": { "runs": [
+                browse_run("周杰倫", "UCjay", "MUSIC_PAGE_TYPE_ARTIST"),
+                { "text": " & " },
+                browse_run("費玉清", "UCfei", "MUSIC_PAGE_TYPE_ARTIST"),
+                { "text": " • " },
+                browse_run("Album", "MPREb_x", "MUSIC_PAGE_TYPE_ALBUM"),
+                { "text": " • " },
+                { "text": "2022年" }
+            ] }
+        } }, { "playlistPanelVideoRenderer": {
+            "videoId": "v2",
+            "title": { "runs": [{ "text": "Cover" }] },
+            "longBylineText": { "runs": [
+                browse_run("Someone", "UCsomeone", "MUSIC_PAGE_TYPE_USER_CHANNEL"),
+                { "text": " • " },
+                { "text": "1.2M views" }
+            ] }
+        } }] });
+
+        let view = parse_queue(Some(&queue), QUEUE_MAX);
+        let song = &view.items[0];
+        assert_eq!(song.credit, "周杰倫 & 費玉清");
+        assert_eq!(
+            &*song.artists,
+            &[
+                ArtistLink { id: "UCjay".into(), ..ArtistLink::named("周杰倫") },
+                ArtistLink { id: "UCfei".into(), ..ArtistLink::named("費玉清") },
+            ]
+        );
+        // An uploader's channel is not an artist page.
+        assert_eq!(view.items[1].credit, "Someone");
+        assert!(view.items[1].artists.is_empty());
+    }
+
+    #[test]
+    fn unlinked_credits_split_into_names_to_find_by_name() {
+        let byline = json!({ "runs": [
+            { "text": "MC HotDog熱狗/艾怡良" },
+            { "text": " • " },
+            { "text": "Album" }
+        ] });
+        let name = ArtistLink::named;
+        assert_eq!(artist_links(Some(&byline)), [name("MC HotDog熱狗"), name("艾怡良")]);
+
+        // Joiners are runs of their own; only the matched artist is linked.
+        let byline = json!({ "runs": [
+            { "text": "苏运莹" }, { "text": "、" }, { "text": "岑宁儿" }, { "text": "和" },
+            browse_run("艾怡良", "UCeve", "MUSIC_PAGE_TYPE_ARTIST")
+        ] });
+        assert_eq!(
+            artist_links(Some(&byline)),
+            [name("苏运莹"), name("岑宁儿"), ArtistLink { id: "UCeve".into(), ..name("艾怡良") }]
+        );
+    }
+
+    #[test]
+    fn finds_an_artist_by_exact_name_only() {
+        let payload = json!({ "contents": [
+            { "musicCardShelfRenderer": { "title": { "runs": [
+                browse_run("艾怡良", "UCeve", "MUSIC_PAGE_TYPE_ARTIST") ] } } },
+            { "musicResponsiveListItemRenderer": {
+                "navigationEndpoint": { "browseEndpoint": { "browseId": "UCcen",
+                    "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST" } } } },
+                "flexColumns": [{ "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "岑寧兒" }] } } }]
+            } }
+        ] });
+        assert_eq!(find_artist(&payload, "艾怡良").as_deref(), Some("UCeve"));
+        // Folded: case, spacing and traditional/simplified script.
+        assert_eq!(find_artist(&payload, "岑宁儿").as_deref(), Some("UCcen"));
+        assert_eq!(find_artist(&payload, "Someone Else"), None);
+    }
+
+    #[test]
+    fn reads_top_songs_and_play_all_off_an_artist_page() {
+        let column = |runs: Value| json!({ "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": runs } } });
+        let row = |id: &str, title: &str| json!({ "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": id },
+            "flexColumns": [
+                column(json!([{ "text": title }])),
+                column(json!([browse_run("李荣浩", "UClrh", "MUSIC_PAGE_TYPE_ARTIST")])),
+                column(json!([{ "text": "播放次数：6456万" }])),
+                column(json!([browse_run("纵横四海", "MPREb_x", "MUSIC_PAGE_TYPE_ALBUM")])),
+            ],
+            "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [
+                { "url": "http://w60" }, { "url": "http://w120" } ] } } }
+        } });
+        let page = json!({ "contents": { "sectionListRenderer": { "contents": [
+            { "musicShelfRenderer": {
+                "title": { "runs": [{ "text": "热门歌曲", "navigationEndpoint": {
+                    "browseEndpoint": { "browseId": "VLOLAK5top" } } }] },
+                "contents": [row("a", "对等关系"), row("b", "恋人")]
+            } },
+            // Albums below are a carousel; nothing in it is a song row.
+            { "musicCarouselShelfRenderer": { "contents": [
+                { "musicTwoRowItemRenderer": { "title": { "runs": [{ "text": "嗯" }] } } }
+            ] } }
+        ] } } });
+
+        let parsed = parse_artist_page(&page);
+        assert_eq!(parsed.all_songs.as_deref(), Some("VLOLAK5top"));
+        assert_eq!(parsed.songs.len(), 2);
+        assert_eq!(parsed.songs[0].video_id, "a");
+        assert_eq!(parsed.songs[0].title, "对等关系");
+        assert_eq!(parsed.songs[0].subtitle, "播放次数：6456万 · 纵横四海");
+        assert_eq!(parsed.songs[0].thumbnail.as_deref(), Some("http://w120"));
+
+        let empty = parse_artist_page(&json!({ "contents": {} }));
+        assert!(empty.songs.is_empty() && empty.all_songs.is_none());
     }
 }

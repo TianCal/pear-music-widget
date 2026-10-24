@@ -201,8 +201,15 @@ pub struct Api {
     /// renderer and taking the *first* reply that comes back, so two of either
     /// in flight can be handed each other's answer. One at a time each.
     search_slot: tokio::sync::Mutex<()>,
+    /// Searches someone is waiting on (`search_if`). `search_background`
+    /// steps aside while any are, so a lookup the user did not ask for never
+    /// delays one they did.
+    searches_waiting: std::sync::atomic::AtomicUsize,
     queue_slot: tokio::sync::Mutex<()>,
 }
+
+/// `browse`'s error when the API server has no `/browse` (stock pear-desktop).
+pub const NO_BROWSE: &str = "Artist pages need TianCal/pear-desktop's API server";
 
 impl Api {
     pub fn new(store: Arc<Store>) -> Self {
@@ -216,6 +223,7 @@ impl Api {
                 .expect("build http client"),
             images: Mutex::new(ImageCache::new()),
             search_slot: tokio::sync::Mutex::new(()),
+            searches_waiting: std::sync::atomic::AtomicUsize::new(0),
             queue_slot: tokio::sync::Mutex::new(()),
         }
     }
@@ -455,20 +463,41 @@ impl Api {
         query: &str,
         still_wanted: impl Fn() -> bool,
     ) -> Option<Result<Value>> {
+        use std::sync::atomic::Ordering;
+        self.searches_waiting.fetch_add(1, Ordering::SeqCst);
         let _slot = self.search_slot.lock().await;
+        self.searches_waiting.fetch_sub(1, Ordering::SeqCst);
         if !still_wanted() {
             return None;
         }
-        let result = self
-            .request(
-                reqwest::Method::POST,
-                "/search",
-                Some(serde_json::json!({ "query": query })),
-                SEARCH_TIMEOUT,
-            )
-            .await
-            .map(|value| value.unwrap_or(Value::Null));
-        Some(result)
+        Some(self.post_search(query).await)
+    }
+
+    /// A search nobody is waiting on (an artist looked up by name): it takes
+    /// the slot only while no `search_if` wants it, and hands it back if one
+    /// arrived while it was queued for the slot.
+    pub async fn search_background(&self, query: &str) -> Result<Value> {
+        use std::sync::atomic::Ordering;
+        loop {
+            while self.searches_waiting.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _slot = self.search_slot.lock().await;
+            if self.searches_waiting.load(Ordering::SeqCst) == 0 {
+                return self.post_search(query).await;
+            }
+        }
+    }
+
+    async fn post_search(&self, query: &str) -> Result<Value> {
+        self.request(
+            reqwest::Method::POST,
+            "/search",
+            Some(serde_json::json!({ "query": query })),
+            SEARCH_TIMEOUT,
+        )
+        .await
+        .map(|value| value.unwrap_or(Value::Null))
     }
 
     /// Raw Library > Playlists browse page; `search::parse_library_playlists`
@@ -482,6 +511,26 @@ impl Api {
         )
         .await
         .map(|value| value.unwrap_or(Value::Null))
+    }
+
+    /// A raw browse page, such as an artist's (`UC…`); `search::parse_artist_page`
+    /// reads it. Only fetched, never navigated to, so playback is untouched.
+    pub async fn browse(&self, id: &str) -> Result<Value> {
+        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if id.is_empty() || !id.chars().all(safe) {
+            return Err(ApiError::new(ErrorCode::Error, "Not a browse id"));
+        }
+        self.request(reqwest::Method::GET, &format!("/browse/{id}"), None, SEARCH_TIMEOUT)
+            .await
+            .map(|value| value.unwrap_or(Value::Null))
+            .map_err(|err| {
+                // Stock pear-desktop has no `/browse`; it comes with the fork.
+                if err.message.starts_with("HTTP 404") {
+                    ApiError::new(ErrorCode::Error, NO_BROWSE)
+                } else {
+                    err
+                }
+            })
     }
 
     /// Replace the queue with a playlist and play it from the top.

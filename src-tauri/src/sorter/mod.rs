@@ -129,6 +129,7 @@ impl Sorter {
             image_src: None,
             url: None,
             media_type: Some("LOCAL".into()),
+            ..Song::default()
         }
     }
 

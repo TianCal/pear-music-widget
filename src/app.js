@@ -89,6 +89,8 @@ const el = {
   cornerPlaylists: $('btn-playlists'),
   playlists: $('playlists'),
   playlistsScroll: $('playlists-scroll'),
+  artistPop: $('artist-pop'),
+  artistPopScroll: $('artist-pop-scroll'),
   repeatIcon: $('repeat-icon'),
   cornerBar: document.querySelector('.corner-bar'),
   closeWidget: $('btn-close'),
@@ -114,6 +116,8 @@ const el = {
 /** Whether the playlist picker is showing. Declared up here because
  *  `renderStatus` reads it, and can run before the picker's own section. */
 let pickerOpen = false;
+/** The same, for the artist popup. */
+let artistOpen = false;
 
 /** Latest snapshot from the main process.
  *
@@ -382,6 +386,7 @@ const renderStatus = () => {
   if ((offline || orphaned) && searching) closeSearch();
   else if ((offline || orphaned) && openPanel) setPanel(null);
   if (pickerOpen && (offline || corners.playlists === false)) closePicker();
+  if (artistOpen && (offline || isLocal(state))) closeArtist();
 
   if (!showSetup) {
     el.setup.hidden = true;
@@ -421,6 +426,28 @@ const renderCover = () => {
   applyPalette(state.cover);
 };
 
+/** What the subtitle's links depend on, so a change to them redraws it. */
+const artistsKey = (song) => (song?.artists || []).map(({ id, name }) => `${id}:${name}`).join(',');
+
+/** "Artist — Album". On YouTube Music the whole credit is one link that
+ *  drops the Top songs of everyone in it (`song.artists`). */
+const subtitleNodes = (song, album) => {
+  const nodes = [];
+  const credit = song?.artist || '';
+  if (credit && song.artists?.length) {
+    const link = document.createElement('span');
+    link.className = 'artist-link';
+    link.setAttribute('role', 'button');
+    link.title = 'Top songs on YouTube Music';
+    link.textContent = credit;
+    nodes.push(link);
+  } else if (credit) {
+    nodes.push(credit);
+  }
+  if (album) nodes.push(credit ? ` — ${album}` : album);
+  return nodes;
+};
+
 const renderSong = ({ restartMarquee = false } = {}) => {
   const song = state.song;
   const title = song?.title || 'Nothing playing';
@@ -434,7 +461,8 @@ const renderSong = ({ restartMarquee = false } = {}) => {
       .trim()
       .toLocaleLowerCase();
   const album = song && releaseName(song.album) !== releaseName(song.title) ? song.album : '';
-  const subtitle = song ? [song.artist, album].filter(Boolean).join(' — ') : '';
+  // Text plus links: a relabel can change the links and not the words.
+  const subtitle = song ? [song.artist, album, artistsKey(song)].join('\n') : '';
 
   const titleChanged = title !== lastTitle;
   if (titleChanged) {
@@ -448,7 +476,10 @@ const renderSong = ({ restartMarquee = false } = {}) => {
   const subtitleChanged = subtitle !== lastSubtitle;
   if (subtitleChanged) {
     lastSubtitle = subtitle;
-    el.subtitle.textContent = subtitle;
+    el.subtitle.replaceChildren(...subtitleNodes(song, album));
+    // The popup belongs to the credit it dropped from.
+    if (artistOpen) closeArtist();
+    if (pointerOnCard) warmArtists();
   }
   if (subtitleChanged || restartMarquee) {
     requestAnimationFrame(() => setupMarquee(el.subtitle, { intro: true }));
@@ -961,7 +992,8 @@ const applyState = (next) => {
   const songTextChanged =
     next.song?.title !== state.song?.title ||
     next.song?.artist !== state.song?.artist ||
-    next.song?.album !== state.song?.album;
+    next.song?.album !== state.song?.album ||
+    artistsKey(next.song) !== artistsKey(state.song);
   const tintChanged = next.tint !== state.tint;
   const liquidGlassChanged = next.liquidGlass !== state.liquidGlass;
   const statusChanged = next.status !== state.status;
@@ -1557,6 +1589,7 @@ el.cornerPlaylists.addEventListener('pointerenter', () => {
 el.cornerPlaylists.addEventListener('pointerleave', () => clearTimeout(pickerHoverTimer));
 
 const openPicker = async () => {
+  if (artistOpen) closeArtist();
   const seq = ++pickerSeq;
   pickerOpen = true;
   el.playlists.hidden = false;
@@ -1631,6 +1664,218 @@ document.addEventListener('click', (event) => {
   if (pickerOpen && !event.target.closest('#playlists, #btn-playlists')) closePicker();
 });
 
+/* ------------------------------------------------------------ artist popup
+
+   The Top songs of every artist on the playing track, one section each,
+   dropped from the credit under the title. A page is ~0.4 s away through the
+   API server, so it is warmed the way the picker is: once the pointer rests
+   on the card, and again if the track changes while it is there. Nothing is
+   fetched just because a track started. Rust keeps pages (see artist.rs) and
+   so does this side, so reopening skips even the IPC. */
+
+let artistSeq = 0;
+
+/** Replies by artist id, or by name for an artist without one:
+ *  `{ at, reply, data }`, where `data` is set once a good reply lands so an
+ *  open can draw it in the same frame. */
+const ARTIST_REUSE_MS = 10 * 60 * 1000;
+const ARTIST_PAGES_MAX = 24;
+const artistPages = new Map();
+
+/** `query` is YouTube Music's own name, which an artist without an id is
+ *  found by; `name` may be an `artistNames` rename. */
+const fetchArtist = ({ id, query }) => {
+  const key = id || `~${query}`;
+  const held = artistPages.get(key);
+  if (held && performance.now() - held.at < ARTIST_REUSE_MS) return held;
+  const entry = { at: performance.now(), data: null };
+  entry.reply = window.widget
+    .artistPage(id, query)
+    .catch((err) => ({ ok: false, error: String(err) }));
+  entry.reply.then((data) => {
+    // A failure is not kept here: Rust decides what is worth asking again.
+    if (data?.ok) entry.data = data;
+    else if (artistPages.get(key) === entry) artistPages.delete(key);
+  });
+  artistPages.delete(key);
+  artistPages.set(key, entry);
+  if (artistPages.size > ARTIST_PAGES_MAX) artistPages.delete(artistPages.keys().next().value);
+  return entry;
+};
+
+/** Artists warmed and shown for one track: a credit can list more names
+ *  than a popup has room for. */
+const ARTISTS_MAX = 4;
+const songArtists = () => (state.song?.artists || []).slice(0, ARTISTS_MAX);
+
+/** One artist's section: their name and Play all, then their songs. */
+const artistSection = (artist, data) => {
+  const head = document.createElement('div');
+  head.className = 'artist-pop-head';
+  const name = document.createElement('span');
+  name.className = 'artist-pop-name';
+  name.textContent = artist.name;
+  head.append(name);
+
+  const section = document.createElement('div');
+  section.className = 'artist-section';
+  section.append(head);
+  if (!data) {
+    section.append(pickerNote('Loading top songs…'));
+    return section;
+  }
+  if (!data.ok) {
+    section.append(pickerNote(data.error || 'Could not load this artist.'));
+    return section;
+  }
+  const { songs, allSongs } = data.page;
+  if (allSongs) {
+    const all = document.createElement('button');
+    all.className = 'artist-play-all';
+    all.type = 'button';
+    all.dataset.id = allSongs;
+    all.textContent = 'Play all';
+    head.append(all);
+  }
+  if (!songs.length) section.append(pickerNote('No top songs on YouTube Music.'));
+  for (const song of songs) {
+    const row = pickerRow({
+      kind: 'song',
+      id: song.videoId,
+      title: song.title,
+      sub: song.subtitle,
+      current: song.videoId === state.song?.videoId,
+    });
+    const img = row.querySelector('img');
+    if (song.thumbnail) img.src = song.thumbnail;
+    section.append(row);
+  }
+  return section;
+};
+
+/** Under the subtitle, starting at the credit, kept inside the card. */
+const placeArtistPop = (link) => {
+  const card = el.card.getBoundingClientRect();
+  const line = el.subtitle.parentElement.getBoundingClientRect();
+  const name = link.getBoundingClientRect();
+  const pop = el.artistPop;
+  const top = Math.round(line.bottom - card.top + 4);
+  pop.style.top = `${top}px`;
+  pop.style.maxHeight = `${Math.max(80, card.height - top - 7)}px`;
+  const left = clamp(name.left - card.left - 6, 7, card.width - pop.offsetWidth - 7);
+  pop.style.left = `${Math.round(left)}px`;
+};
+
+/** A section still loading only says so if its reply is not in quickly, so
+ *  warm pages never flash a note. */
+const ARTIST_LOADING_NOTE_MS = 150;
+
+const openArtist = (link) => {
+  if (pickerOpen) closePicker();
+  const seq = ++artistSeq;
+  artistOpen = true;
+  const artists = songArtists();
+  const entries = artists.map(fetchArtist);
+  let late = false;
+  const draw = () => {
+    if (seq !== artistSeq) return;
+    const shown = artists
+      .map((artist, i) => {
+        const data = entries[i].data || entries[i].settled || null;
+        return data || late ? artistSection(artist, data) : null;
+      })
+      .filter(Boolean);
+    el.artistPopScroll.replaceChildren(...shown);
+    placeArtistPop(link);
+  };
+
+  el.artistPop.hidden = false;
+  draw();
+  const notes = setTimeout(() => {
+    late = true;
+    draw();
+  }, ARTIST_LOADING_NOTE_MS);
+  // Each section fills in as its page lands, in credit order.
+  for (const entry of entries) {
+    entry.reply.then((data) => {
+      entry.settled = data;
+      draw();
+    });
+  }
+  Promise.all(entries.map((entry) => entry.reply)).then(() => clearTimeout(notes));
+};
+
+const closeArtist = () => {
+  artistSeq += 1;
+  artistOpen = false;
+  el.artistPop.hidden = true;
+};
+
+el.subtitle.addEventListener('click', (event) => {
+  const link = event.target.closest('.artist-link');
+  if (!link) return;
+  event.stopPropagation();
+  if (artistOpen) closeArtist();
+  else openArtist(link);
+});
+
+const ARTIST_CARD_HOVER_MS = 150;
+let pointerOnCard = false;
+let artistWarmTimer = null;
+
+const warmArtists = () => {
+  clearTimeout(artistWarmTimer);
+  artistWarmTimer = setTimeout(() => {
+    if (!pointerOnCard || state.status !== 'connected') return;
+    songArtists().forEach(fetchArtist);
+  }, ARTIST_CARD_HOVER_MS);
+};
+
+el.card.addEventListener('pointerenter', () => {
+  pointerOnCard = true;
+  warmArtists();
+});
+el.card.addEventListener('pointerleave', () => {
+  pointerOnCard = false;
+  clearTimeout(artistWarmTimer);
+});
+
+/** One play at a time, as in the picker. */
+let artistPlaying = false;
+
+el.artistPop.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const target = event.target.closest('.result, .artist-play-all');
+  if (!target || artistPlaying) return;
+
+  const seq = artistSeq;
+  const all = target.classList.contains('artist-play-all');
+  artistPlaying = true;
+  target.classList.add('busy');
+  let reply;
+  try {
+    reply = all
+      ? await window.widget.playPlaylist('youtube', target.dataset.id)
+      : await window.widget.playResult(target.dataset.id);
+  } catch (err) {
+    reply = { ok: false, error: String(err) };
+  } finally {
+    artistPlaying = false;
+  }
+  if (seq !== artistSeq) return;
+  target.classList.remove('busy');
+  if (reply?.ok) {
+    closeArtist();
+    return;
+  }
+  const sub = all ? null : target.querySelector('.result-sub');
+  if (sub) sub.textContent = reply?.error || 'Could not play that.';
+});
+
+document.addEventListener('click', (event) => {
+  if (artistOpen && !event.target.closest('#artist-pop, .artist-link')) closeArtist();
+});
+
 // Clicking a line seeks to it — the timestamps are right there. `dataset.index`
 // is not tested for truthiness: the first line's is the string "0", which is
 // falsy, and guarding on it is what used to make the opening line unclickable.
@@ -1669,6 +1914,7 @@ const paintPanel = (which) => {
 const setPanel = (which) => {
   // A panel opening below would sit under the picker.
   if (which && pickerOpen) closePicker();
+  if (which && artistOpen) closeArtist();
   openPanel = which;
   paintPanel(which);
   // Opening or closing one is an interaction, so it restarts the countdown
@@ -1770,6 +2016,7 @@ const runSearch = async (query) => {
 const openSearch = async () => {
   if (searching || state.status !== 'connected') return;
   if (pickerOpen) closePicker();
+  if (artistOpen) closeArtist();
   searching = true;
   results = [];
   activeResult = -1;
@@ -1850,7 +2097,7 @@ window.widget.onPanelRestore((which) => {
 // covers the rest of the card for the case where the events do get through.
 // Controls are excluded — a double click on one would fire it twice as well.
 const INTERACTIVE =
-  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item, .playlists';
+  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item, .playlists, .artist-link';
 
 const openMusicApp = () => window.widget.openApp();
 
@@ -2077,7 +2324,7 @@ el.card.addEventListener(
       return;
     }
     // These scroll on their own; the wheel belongs to them, not to volume.
-    if (event.target.closest('#queue, #upnext, #playlists')) return;
+    if (event.target.closest('#queue, #upnext, #playlists, #artist-pop')) return;
     if (state.status !== 'connected') return;
     // With macOS natural scrolling, swiping up reports a positive deltaY, so
     // adding it is what makes "scroll up" raise the volume.
@@ -2104,6 +2351,11 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && pickerOpen) {
     event.preventDefault();
     closePicker();
+    return;
+  }
+  if (event.key === 'Escape' && artistOpen) {
+    event.preventDefault();
+    closeArtist();
     return;
   }
   if (event.key === 'Escape' && !searching && openPanel) {
@@ -2138,7 +2390,7 @@ document.addEventListener('keydown', (event) => {
 
 // Playback and volume shortcuts belong to the focused surface, outside editors.
 document.addEventListener('keydown', (event) => {
-  if (searching || pickerOpen || event.defaultPrevented || event.isComposing) return;
+  if (searching || pickerOpen || artistOpen || event.defaultPrevented || event.isComposing) return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   if (state.status !== 'connected') return;

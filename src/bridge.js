@@ -56,6 +56,9 @@ window.widget = {
   playlists: () => invoke('list_playlists'),
   playPlaylist: (kind, id) => invoke('play_playlist', { kind, id }),
   playlistArt: (urls) => invoke('playlist_art', { urls }),
+  // An artist's Top songs, by the browse id on `song.artists` (or the name,
+  // for an artist YouTube Music did not link).
+  artistPage: (id, name) => invoke('artist_page', { id, name }),
   // Artwork for the queue rows a surface is showing. A command rather than an
   // event: a reply is formatted once, an event once per webview.
   queueArt: (ids, size) => invoke('queue_art', { ids, size }),
@@ -88,7 +91,7 @@ window.widget = {
  */
 const NO_DRAG =
   '.art, .seek, .btn, .vol-pop, .lyrics, .corner, .search, .upnext, .queue, ' +
-  '.pill, .edge, .playlists, input, button';
+  '.pill, .edge, .playlists, .artist-link, input, button';
 
 const DRAG_THRESHOLD = 3;
 

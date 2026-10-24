@@ -91,6 +91,7 @@ impl Track {
             image_src: None,
             url: None,
             media_type: Some("LOCAL".into()),
+            ..Song::default()
         }
     }
 }
@@ -1378,6 +1379,8 @@ impl Local {
                         video_id: track.id.clone(),
                         title: track.title.clone(),
                         artist: crate::store::map_artist(names, &track.artist),
+                        credit: track.artist.clone(),
+                        artists: Arc::from([]),
                         duration: clock(track.duration),
                         art: Some(Arc::from(track.id.as_str())),
                         rating: s.likes.get(&track.id).map(Rating::as_str),

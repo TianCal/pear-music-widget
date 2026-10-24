@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod artist;
 mod artwork;
 mod commands;
 mod doctor;
@@ -299,6 +300,7 @@ fn main() {
             commands::list_playlists,
             commands::play_playlist,
             commands::playlist_art,
+            commands::artist_page,
             commands::queue_art,
             commands::set_panel,
             commands::context_menu,
