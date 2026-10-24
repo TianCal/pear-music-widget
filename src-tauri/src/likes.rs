@@ -22,12 +22,12 @@
 //! `INDIFFERENT` — so the renderer's heart needs no second vocabulary.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fsutil::write_atomic;
 use crate::local::Track;
 
 const DIR: &str = ".pear-music";
@@ -42,15 +42,6 @@ const ORPHAN_DAYS: u64 = 180;
 pub enum Rating {
     Like,
     Dislike,
-}
-
-impl Rating {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Like => "LIKE",
-            Self::Dislike => "DISLIKE",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -158,24 +149,6 @@ fn relative(root: &Path, track: &Track) -> Option<String> {
         .strip_prefix(root)
         .ok()
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-}
-
-/// Write `bytes` to `path` via a synced temporary file and a rename, so a
-/// crash or a drive pulled mid-write never leaves an empty or half file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    // A temp name per write, so two writes can never mix into one file — a
-    // mixed file reads as broken, and a broken drive file is never replaced.
-    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-    let mut file = std::fs::File::create(&temp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&temp, path)
 }
 
 /// Newest `at` wins, per key.

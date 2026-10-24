@@ -8,8 +8,8 @@
 //! widget pays for one empty `Mutex<Option<…>>`.
 //!
 //! Ratings go through `likes.rs` into the folder's `.pear-music/likes.json`,
-//! like the player's own. The player's in-memory copy is not reloaded, so a
-//! rating the player saves later can overwrite one made here.
+//! like the player's own. After every write the player re-reads that file if
+//! it has the folder open (`write_ratings`), so its next save keeps them.
 
 mod chorus;
 mod cover;
@@ -77,6 +77,10 @@ struct Sorter {
     lookup: tokio::sync::Mutex<()>,
     /// The folder being scanned, while it is.
     scanning: Mutex<Option<String>>,
+    /// Held by every rating write (rate, undo, reset, trash) from re-reading
+    /// the likes file to writing it back. A `Save` is a whole snapshot, so two
+    /// writes that overlapped would lose whichever rating landed first.
+    ratings: Mutex<()>,
 }
 
 #[derive(Clone, Serialize)]
@@ -117,20 +121,10 @@ pub struct Disliked {
 }
 
 impl Sorter {
+    /// The same `Song` the player builds, so lyrics lookups and their cache
+    /// entries are shared.
     fn song(&self, track: &Track) -> Song {
-        let names = self.names.lock().expect("names lock");
-        Song {
-            video_id: track.id.clone(),
-            title: track.title.clone(),
-            artist: crate::store::map_artist(&names, &track.artist),
-            raw_artist: track.artist.clone(),
-            album: track.album.clone(),
-            song_duration: track.duration,
-            image_src: None,
-            url: None,
-            media_type: Some("LOCAL".into()),
-            ..Song::default()
-        }
+        track.song(&self.names.lock().expect("names lock"))
     }
 
     fn view(&self) -> View {
@@ -213,11 +207,7 @@ impl Sorter {
 /// 小酒窝(feat.蔡卓妍)（粤语版） all give 小酒窝.
 fn title_key(title: &str) -> String {
     let bare = title.split(['(', '（', '[', '【']).next().unwrap_or(title);
-    fast2s::convert(bare)
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
+    crate::artwork::fold(bare)
 }
 
 /// The unrated tracks in folder order, except that each song's namesakes
@@ -285,11 +275,8 @@ fn own() -> Own {
 
 fn save_own(own: &Own) {
     let path = own_path();
-    if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_vec_pretty(own)) {
-        let temp = path.with_extension("tmp");
-        if std::fs::create_dir_all(dir).is_ok() && std::fs::write(&temp, json).is_ok() {
-            let _ = std::fs::rename(&temp, &path);
-        }
+    if let Ok(json) = serde_json::to_vec_pretty(own) {
+        let _ = crate::fsutil::write_atomic(&path, &json);
     }
 }
 
@@ -308,10 +295,8 @@ pub fn open(app: &AppHandle) {
     }
     *RUNTIME.lock().expect("sorter runtime") = Some(Arc::new(Sorter {
         player: Player::new(app.clone()),
-        http: reqwest::Client::builder()
-            .user_agent(crate::lyrics::USER_AGENT)
-            .build()
-            .expect("build http client"),
+        // The widget's own client: cheap to clone, and building one can fail.
+        http: app.state::<Arc<Core>>().api.client().clone(),
         session: Mutex::new(None),
         names: Mutex::new(BTreeMap::new()),
         choruses: Mutex::new(HashMap::new()),
@@ -320,6 +305,7 @@ pub fn open(app: &AppHandle) {
         asked: Mutex::new(HashSet::new()),
         lookup: tokio::sync::Mutex::new(()),
         scanning: Mutex::new(None),
+        ratings: Mutex::new(()),
     }));
     let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sorter/index.html".into()))
         .title("Sort Songs")
@@ -366,7 +352,7 @@ fn pause_playback(app: &AppHandle) {
     }
     if core.is_local() {
         tauri::async_runtime::spawn_blocking(move || core.local().toggle_play(&core));
-    } else if core.status() == "connected" {
+    } else if core.status() == crate::state::Status::Connected {
         core.update(|state| state.is_playing = false);
         tauri::async_runtime::spawn(async move {
             let _ = core.api.toggle_play().await;
@@ -513,7 +499,7 @@ fn present(app: &AppHandle, sorter: &Arc<Sorter>) {
             if still_current(&track.id) {
                 emit_lyrics(&app, &sorter, &track.id);
             }
-            if found.how != "fallback"
+            if found.how != chorus::How::Fallback
                 && sorter.player.untouched(&track.id)
                 && still_current(&track.id)
             {
@@ -626,17 +612,24 @@ pub async fn sorter_choose_folder(app: AppHandle) -> Result<(), String> {
 }
 
 /// Rate the card (`like` or not) and move on.
+///
+/// Async and off to a blocking thread: re-reading the likes is drive IO, and a
+/// sync command would do it on the main thread.
 #[tauri::command]
-pub fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
+pub async fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
     let sorter = runtime().ok_or_else(no_window)?;
+    tauri::async_runtime::spawn_blocking(move || rate(&app, &sorter, like))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Blocking IO.
+fn rate(app: &AppHandle, sorter: &Arc<Sorter>, like: bool) {
+    let _ratings = sorter.ratings.lock().expect("ratings lock");
     let saved = {
         let mut guard = sorter.session.lock().expect("session lock");
-        let Some(s) = guard.as_mut() else {
-            return Ok(());
-        };
-        let Some(&i) = s.queue.first() else {
-            return Ok(());
-        };
+        let Some(s) = guard.as_mut() else { return };
+        let Some(&i) = s.queue.first() else { return };
         // Pick up anything the player saved since.
         s.likes = Likes::load(&s.root, &s.tracks);
         let before = s.likes.get(&s.tracks[i].id);
@@ -649,12 +642,11 @@ pub fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
         s.queue.retain(|&j| likes.get(&tracks[j].id).is_none());
         save.map(|save| (save, s.root.clone()))
     };
+    // Present first: the next card need not wait for the write.
+    present(app, sorter);
     if let Some((save, root)) = saved {
-        let app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || write_ratings(&app, save, root));
+        write_ratings(app, save, root);
     }
-    present(&app, &sorter);
-    Ok(())
 }
 
 /// Send the card to the back of the queue, unrated.
@@ -675,8 +667,14 @@ pub fn sorter_skip(app: AppHandle) {
 
 /// Take back the last rating made here and put that song back on the card.
 #[tauri::command]
-pub fn sorter_undo(app: AppHandle) {
+pub async fn sorter_undo(app: AppHandle) {
     let Some(sorter) = runtime() else { return };
+    let _ = tauri::async_runtime::spawn_blocking(move || undo(&app, &sorter)).await;
+}
+
+/// Blocking IO.
+fn undo(app: &AppHandle, sorter: &Arc<Sorter>) {
+    let _ratings = sorter.ratings.lock().expect("ratings lock");
     let save = {
         let mut guard = sorter.session.lock().expect("session lock");
         let Some(s) = guard.as_mut() else { return };
@@ -689,11 +687,10 @@ pub fn sorter_undo(app: AppHandle) {
         s.queue.insert(0, i);
         save.map(|save| (save, s.root.clone()))
     };
+    present(app, sorter);
     if let Some((save, root)) = save {
-        let app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || write_ratings(&app, save, root));
+        write_ratings(app, save, root);
     }
-    present(&app, &sorter);
 }
 
 /// Ask, then clear every like and dislike in the folder: all its songs go
@@ -742,6 +739,7 @@ pub fn sorter_reset_ratings(app: AppHandle) {
 /// Blocking IO.
 fn reset_ratings(app: &AppHandle) {
     let Some(sorter) = runtime() else { return };
+    let _ratings = sorter.ratings.lock().expect("ratings lock");
     let saved = {
         let mut guard = sorter.session.lock().expect("session lock");
         let Some(s) = guard.as_mut() else { return };
@@ -850,6 +848,7 @@ pub async fn sorter_trash(app: AppHandle, ids: Vec<String>) -> Result<usize, Str
 
 /// Blocking IO. Only what is still disliked: the answer may come after an undo.
 fn trash_disliked(app: &AppHandle, sorter: &Sorter, ids: &[String]) -> (usize, Vec<String>) {
+    let _ratings = sorter.ratings.lock().expect("ratings lock");
     let targets: Vec<Track> = {
         let guard = sorter.session.lock().expect("session lock");
         let Some(s) = guard.as_ref() else {
@@ -910,6 +909,11 @@ fn trash_disliked(app: &AppHandle, sorter: &Sorter, ids: &[String]) -> (usize, V
         })
     };
     if let Some((save, root)) = save {
+        // The player may have these in its queue, or be playing one.
+        if let Some(core) = app.try_state::<Arc<Core>>() {
+            let core = core.inner().clone();
+            core.local().forget_tracks(&core, &root, &moved);
+        }
         write_ratings(app, save, root);
     }
     (moved.len(), failed)

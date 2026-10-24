@@ -15,7 +15,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::state::Core;
+use crate::state::{Core, Like, Status};
 use crate::store::Store;
 use crate::window::{self, Rect, SKINS, WIDGET};
 
@@ -151,14 +151,13 @@ fn ellipsize(text: &str, budget: usize) -> String {
     out
 }
 
-fn status_label(status: &str) -> &str {
+fn status_label(status: Status) -> &'static str {
     match status {
-        "connected" => "Connected",
-        "connecting" => "Connecting…",
-        "offline" => "API server unreachable",
-        "unauthorized" => "Not authorised",
-        "denied" => "Authorisation denied",
-        other => other,
+        Status::Connected => "Connected",
+        Status::Connecting => "Connecting…",
+        Status::Offline => "API server unreachable",
+        Status::Unauthorized => "Not authorised",
+        Status::Denied => "Authorisation denied",
     }
 }
 
@@ -213,25 +212,38 @@ fn quit_music_app_then(app: AppHandle) {
 
 // ------------------------------------------------------------------- pieces
 
+type Item<'a> = &'a dyn tauri::menu::IsMenuItem<tauri::Wry>;
+
+/// `items` as the trait objects `Submenu::with_items` takes.
+fn refs<I: tauri::menu::IsMenuItem<tauri::Wry>>(items: &[I]) -> Vec<Item<'_>> {
+    items.iter().map(|item| item as Item).collect()
+}
+
+/// One check item per `(id, label, checked)`, all enabled or none.
+fn check_items(
+    app: &AppHandle,
+    enabled: bool,
+    choices: impl IntoIterator<Item = (String, String, bool)>,
+) -> tauri::Result<Vec<CheckMenuItem<tauri::Wry>>> {
+    choices
+        .into_iter()
+        .map(|(id, label, checked)| CheckMenuItem::with_id(app, id, label, enabled, checked, None::<&str>))
+        .collect()
+}
+
 fn opacity_submenu(
     app: &AppHandle,
     current: f64,
     liquid_glass: bool,
 ) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 100.0).round() as u32;
-    let items: Vec<CheckMenuItem<tauri::Wry>> = OPACITIES
-        .iter()
-        .map(|pct| {
-            CheckMenuItem::with_id(
-                app,
-                format!("opacity:{pct}"),
-                format!("{pct}%"),
-                true,
-                *pct == selected,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
+    let items = check_items(
+        app,
+        true,
+        OPACITIES
+            .iter()
+            .map(|pct| (format!("opacity:{pct}"), format!("{pct}%"), *pct == selected)),
+    )?;
 
     let custom = CheckMenuItem::with_id(
         app,
@@ -251,61 +263,34 @@ fn opacity_submenu(
         liquid_glass,
         None::<&str>,
     )?;
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    refs.push(&custom);
-    refs.push(&separator);
-    refs.push(&glass);
-    Submenu::with_items(app, "Opacity", true, &refs)
+    let mut all = refs(&items);
+    all.extend([&custom as Item, &separator, &glass]);
+    Submenu::with_items(app, "Opacity", true, &all)
 }
 
 fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 100.0).round() as u32;
-    let items: Vec<CheckMenuItem<tauri::Wry>> = TINTS
-        .iter()
-        .map(|(pct, label)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("tint:{pct}"),
-                label,
-                true,
-                *pct == selected,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
-
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    Submenu::with_items(app, "Cover tint", true, &refs)
+    let items = check_items(
+        app,
+        true,
+        TINTS
+            .iter()
+            .map(|(pct, label)| (format!("tint:{pct}"), label.to_string(), *pct == selected)),
+    )?;
+    Submenu::with_items(app, "Cover tint", true, &refs(&items))
 }
 
 /// Global default for tracks without a Song Time override.
 fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 1000.0).round() as i32;
-    let items: Vec<CheckMenuItem<tauri::Wry>> = LYRIC_OFFSETS
-        .iter()
-        .map(|(ms, label)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("lyricsOffset:{ms}"),
-                label,
-                true,
-                *ms == selected,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
-
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    Submenu::with_items(app, "Timing", true, &refs)
+    let items = check_items(
+        app,
+        true,
+        LYRIC_OFFSETS
+            .iter()
+            .map(|(ms, label)| (format!("lyricsOffset:{ms}"), label.to_string(), *ms == selected)),
+    )?;
+    Submenu::with_items(app, "Timing", true, &refs(&items))
 }
 
 /// Capture the video ID in each action: an open menu may outlive its song.
@@ -344,26 +329,16 @@ fn song_time_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
         None::<&str>,
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let choices = LYRIC_OFFSETS
-        .iter()
-        .map(|(ms, label)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("songTime:{ms}:{id}"),
-                label,
-                enabled,
-                offset.is_some_and(|value| (value - f64::from(*ms) / 1000.0).abs() < 1e-9),
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
-    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        vec![&inherit, &custom, &separator];
-    items.extend(
-        choices
-            .iter()
-            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>),
-    );
+    let choices = check_items(
+        app,
+        enabled,
+        LYRIC_OFFSETS.iter().map(|(ms, label)| {
+            let on = offset.is_some_and(|value| (value - f64::from(*ms) / 1000.0).abs() < 1e-9);
+            (format!("songTime:{ms}:{id}"), label.to_string(), on)
+        }),
+    )?;
+    let mut items: Vec<Item> = vec![&inherit, &custom, &separator];
+    items.extend(refs(&choices));
     Submenu::with_items(app, "Song Time", enabled, &items)
 }
 
@@ -406,19 +381,13 @@ fn jyutping_lyrics_item(
 /// the card's own menus are for what you are looking at.
 fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = cap_mb.round() as u32;
-    let sizes: Vec<CheckMenuItem<tauri::Wry>> = crate::lyrics_cache::SIZES
-        .iter()
-        .map(|(mb, text)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("lyricsCache:{mb}"),
-                text,
-                true,
-                *mb == selected,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
+    let sizes = check_items(
+        app,
+        true,
+        crate::lyrics_cache::SIZES
+            .iter()
+            .map(|(mb, text)| (format!("lyricsCache:{mb}"), text.to_string(), *mb == selected)),
+    )?;
 
     let held = crate::lyrics_cache::size_bytes();
     let separator = PredefinedMenuItem::separator(app)?;
@@ -444,15 +413,9 @@ fn lyrics_cache_submenu(app: &AppHandle, cap_mb: f64) -> tauri::Result<Submenu<t
         None::<&str>,
     )?;
 
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = sizes
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    refs.push(&separator);
-    refs.push(&open);
-    refs.push(&negative);
-    refs.push(&empty);
-    Submenu::with_items(app, "Cache", true, &refs)
+    let mut all = refs(&sizes);
+    all.extend([&separator as Item, &open, &negative, &empty]);
+    Submenu::with_items(app, "Cache", true, &all)
 }
 
 /// One home for every option that changes lyrics. Cache controls stay in the
@@ -492,7 +455,7 @@ fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenu
     )
 }
 
-/// The four toggles in the card's top-right corner, each shown or hidden on its
+/// The toggles in the card's top-right corner, each shown or hidden on its
 /// own — turning Search off while keeping Lyrics is a reasonable thing to want.
 /// Independent checkboxes rather than a skin-style pick-one, so unlike every
 /// other submenu here more than one is ticked at a time.
@@ -505,44 +468,25 @@ fn corner_submenu(
     corners: crate::store::CornerButtons,
     autohide: f64,
 ) -> tauri::Result<Submenu<tauri::Wry>> {
-    let shown: Vec<CheckMenuItem<tauri::Wry>> = [
-        ("queue", "Queue", corners.queue),
-        ("lyrics", "Lyrics", corners.lyrics),
-        ("playlists", "Playlists", corners.playlists),
-        ("search", "Search", corners.search),
-        ("shuffle", "Shuffle", corners.shuffle),
-        ("repeat", "Repeat", corners.repeat),
-        ("trash", "Delete (local files)", corners.trash),
-    ]
-    .iter()
-    .map(|(key, text, on)| {
-        CheckMenuItem::with_id(
-            app,
-            format!("corner:{skin}:{key}"),
-            text,
-            true,
-            *on,
-            None::<&str>,
-        )
-    })
-    .collect::<tauri::Result<_>>()?;
+    let mut corners = corners;
+    let shown = check_items(
+        app,
+        true,
+        crate::store::CornerButtons::BUTTONS.iter().map(|(key, text)| {
+            let on = corners.flag(key).is_some_and(|on| *on);
+            (format!("corner:{skin}:{key}"), text.to_string(), on)
+        }),
+    )?;
 
-    // Pick-one, unlike the three above — hence a separator between them, so the
-    // two kinds of checkmark do not read as one list.
-    let selected = autohide;
-    let fade: Vec<CheckMenuItem<tauri::Wry>> = CORNER_AUTOHIDE
-        .iter()
-        .map(|(secs, text)| {
-            CheckMenuItem::with_id(
-                app,
-                format!("cornerFade:{secs}"),
-                text,
-                true,
-                *secs == selected,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<_>>()?;
+    // Pick-one, unlike the toggles above — hence a separator between them, so
+    // the two kinds of checkmark do not read as one list.
+    let fade = check_items(
+        app,
+        true,
+        CORNER_AUTOHIDE
+            .iter()
+            .map(|(secs, text)| (format!("cornerFade:{secs}"), text.to_string(), *secs == autohide)),
+    )?;
 
     let separator = PredefinedMenuItem::separator(app)?;
     let hide_label = MenuItem::with_id(
@@ -553,17 +497,10 @@ fn corner_submenu(
         None::<&str>,
     )?;
 
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = shown
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-        .collect();
-    refs.push(&separator);
-    refs.push(&hide_label);
-    refs.extend(
-        fade.iter()
-            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>),
-    );
-    Submenu::with_items(app, "Corner buttons", true, &refs)
+    let mut all = refs(&shown);
+    all.extend([&separator as Item, &hide_label]);
+    all.extend(refs(&fade));
+    Submenu::with_items(app, "Corner buttons", true, &all)
 }
 
 // -------------------------------------------------------------------- menus
@@ -596,13 +533,7 @@ fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
         .get(|s| (s.saved_folders(), s.local_folder.clone()));
     let paths: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
     let local_player = core.local();
-    // What Local Music switches to: the folder last played if its drive is
-    // here, otherwise the most recent one that is.
-    let target = current
-        .iter()
-        .chain(paths.iter())
-        .find(|path| local_player.folder_present(path))
-        .cloned();
+    let target = local_player.target(&core.store);
     let local_label = match (&target, paths.is_empty()) {
         (Some(_), _) | (None, true) => "Local Music".to_string(),
         (None, false) => "Local Music (not connected)".to_string(),
@@ -684,14 +615,10 @@ fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
         None::<&str>,
     )?));
     if !removable.is_empty() {
-        let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = removable
-            .iter()
-            .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
-            .collect();
-        items.push(Box::new(Submenu::with_items(app, "Remove from List", true, &refs)?));
+        items.push(Box::new(Submenu::with_items(app, "Remove from List", true, &refs(&removable))?));
     }
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
-    Submenu::with_items(app, "Source", true, &refs)
+    let all: Vec<Item> = items.iter().map(|item| item.as_ref()).collect();
+    Submenu::with_items(app, "Source", true, &all)
 }
 
 /// Display names for artist credits. The first item renames whoever is
@@ -724,12 +651,12 @@ fn artist_names_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
         })
         .collect::<tauri::Result<_>>()?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&rename];
+    let mut all: Vec<Item> = vec![&rename];
     if !saved.is_empty() {
-        refs.push(&separator);
-        refs.extend(saved.iter().map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>));
+        all.push(&separator);
+        all.extend(refs(&saved));
     }
-    Submenu::with_items(app, "Artist Names", true, &refs)
+    Submenu::with_items(app, "Artist Names", true, &all)
 }
 
 /// Prompt for the name `from` should be shown as, then save and re-label.
@@ -745,7 +672,7 @@ fn prompt_artist_name(app: &AppHandle, from: String) {
         "Used for display, lyrics and cover lookups, for YouTube Music and local files. Leave empty to remove.".into(),
         current,
         move |to| {
-            core.store.update(|s| {
+            core.store.update_soon(|s| {
                 if to.is_empty() || to == from {
                     s.artist_names.remove(&from);
                 } else {
@@ -828,7 +755,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(
                 app,
                 "status",
-                status_label(&snapshot.status),
+                status_label(snapshot.status),
                 false,
                 None::<&str>,
             )?,
@@ -889,8 +816,8 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
     let skin = window::skin_of(&store);
-    let can_rate = snapshot.status == "connected" && snapshot.song.is_some();
-    let rating = snapshot.like.as_deref().unwrap_or_default();
+    let can_rate = snapshot.status == Status::Connected && snapshot.song.is_some();
+    let rating = snapshot.like;
 
     Menu::with_items(
         app,
@@ -900,7 +827,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "like",
                 "Like",
                 can_rate,
-                rating.eq_ignore_ascii_case("LIKE"),
+                rating == Some(Like::Like),
                 None::<&str>,
             )?,
             &CheckMenuItem::with_id(
@@ -908,7 +835,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "dislike",
                 "Dislike",
                 can_rate,
-                rating.eq_ignore_ascii_case("DISLIKE"),
+                rating == Some(Like::Dislike),
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
@@ -1046,7 +973,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "liquidGlass" => {
             let next = !store.get(|s| s.liquid_glass);
             store.update_soon(|s| s.liquid_glass = next);
-            for label in [WIDGET, crate::window::PANEL] {
+            for label in [WIDGET, crate::window::DROPDOWN] {
                 if let Some(window) = app.get_webview_window(label) {
                     crate::macos::set_liquid_glass(&window, next);
                 }
@@ -1117,6 +1044,21 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 prompt_artist_name(app, raw);
             }
         }
+        id if id.starts_with("source:") => handle_source(app, &store, id),
+        "sortSongs" => crate::sorter::open(app),
+        "quit" => crate::quit(app),
+        "quitWithMusic" => quit_music_app_then(app.clone()),
+        other => handle_setting(app, &store, widget.as_ref(), other),
+    }
+
+    refresh(app);
+}
+
+/// `source:*`: switch between YouTube Music, Local Music, Liked Songs and the
+/// saved folders. Each menu-bar checkmark is toggled by AppKit on click, so a
+/// choice that changes nothing refreshes the menu to put it back.
+fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
+    match id {
         "source:youtube" => {
             let core = app.state::<Arc<Core>>().inner().clone();
             if core.is_local() {
@@ -1131,14 +1073,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "source:local" => {
             let core = app.state::<Arc<Core>>().inner().clone();
             let local = core.local();
-            let target = store.get(|s| {
-                s.local_folder
-                    .iter()
-                    .cloned()
-                    .chain(s.saved_folders().into_iter().map(|f| f.path))
-                    .find(|path| local.folder_present(path))
-            });
-            match target {
+            match local.target(&store) {
                 Some(path) if !core.is_local() => {
                     open_scoped(app, std::path::PathBuf::from(path), Some(false))
                 }
@@ -1156,14 +1091,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             if core.is_local() {
                 tauri::async_runtime::spawn_blocking(move || local.set_scope(&core, true));
             } else {
-                let target = store.get(|s| {
-                    s.local_folder
-                        .iter()
-                        .cloned()
-                        .chain(s.saved_folders().into_iter().map(|f| f.path))
-                        .find(|path| local.folder_present(path))
-                });
-                match target {
+                match local.target(&store) {
                     Some(path) => open_scoped(app, std::path::PathBuf::from(path), Some(true)),
                     None => refresh(app),
                 }
@@ -1177,9 +1105,6 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 }
             });
         }
-        "sortSongs" => crate::sorter::open(app),
-        "quit" => crate::quit(app),
-        "quitWithMusic" => quit_music_app_then(app.clone()),
         other => {
             if let Some(path) = other.strip_prefix("source:folder:") {
                 let core = app.state::<Arc<Core>>();
@@ -1199,115 +1124,112 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     }
                 });
                 refresh(app);
-            } else if let Some(from) = other.strip_prefix("artistName:") {
-                prompt_artist_name(app, from.to_string());
-            } else if let Some(rest) = other.strip_prefix("corner:") {
-                // `corner:<skin>:<button>`. The skin is in the id because the
-                // set is per skin and each menu edits the skin of the surface it
-                // belongs to — without it the dropdown's menu would toggle the
-                // widget's buttons whenever the two are on different skins.
-                //
-                // Independent toggles, so this flips one rather than selecting
-                // one. The renderer draws the buttons, so — like `tint` — the
-                // flags have to reach it as state.
-                if let Some((skin, which)) = rest.split_once(':') {
-                    if SKINS.contains(&skin) {
-                        let mut corners = store.corners_for(skin);
-                        match which {
-                            "queue" => corners.queue = !corners.queue,
-                            "lyrics" => corners.lyrics = !corners.lyrics,
-                            "search" => corners.search = !corners.search,
-                            "shuffle" => corners.shuffle = !corners.shuffle,
-                            "repeat" => corners.repeat = !corners.repeat,
-                            "trash" => corners.trash = !corners.trash,
-                            "playlists" => corners.playlists = !corners.playlists,
-                            _ => {}
-                        }
-                        store.set_corners_for(skin, corners);
-                        let all = store.get(|s| s.corners.clone());
-                        app.state::<Arc<Core>>()
-                            .update(|state| state.corners = all.clone());
-                    }
-                }
-            } else if let Some(mb) = other.strip_prefix("lyricsCache:") {
-                if let Ok(mb) = mb.parse::<f64>() {
-                    store.update_soon(|s| s.lyrics_cache_mb = mb);
-                    // Shrinking the cap evicts, which is a directory listing and
-                    // a run of deletes — not work for the menu's own thread.
-                    tauri::async_runtime::spawn_blocking(move || crate::lyrics_cache::configure(mb));
-                }
-            } else if let Some(secs) = other.strip_prefix("cornerFade:") {
-                if let Ok(secs) = secs.parse::<f64>() {
-                    store.update_soon(|s| s.corners_autohide = secs);
-                    app.state::<Arc<Core>>()
-                        .update(|state| state.corners_autohide = secs);
-                }
-            } else if let Some(pct) = other.strip_prefix("tint:") {
-                if let Ok(pct) = pct.parse::<f64>() {
-                    let tint = pct / 100.0;
-                    store.update_soon(|s| s.tint = tint);
-                    // The wash is mixed in the renderer, so the strength has to
-                    // reach it like any other piece of state.
-                    app.state::<Arc<Core>>().update(|state| state.tint = tint);
-                }
-            } else if let Some(ms) = other.strip_prefix("lyricsOffset:") {
-                if let Ok(ms) = ms.parse::<f64>() {
-                    let offset = ms / 1000.0;
-                    store.update_soon(|s| s.lyrics_offset = offset);
-                    app.state::<Arc<Core>>().update(|_| {});
-                }
-            } else if let Some(action) = other.strip_prefix("songTime:") {
-                if let Some((value, id)) = action.split_once(':') {
-                    if !id.is_empty() {
-                        if value == "custom" {
-                            let current = store.get(|s| s.lyrics_offset_for(Some(id)));
-                            let id = id.to_string();
-                            let handle = app.clone();
-                            crate::macos::prompt_song_time(app, current, move |seconds| {
-                                handle.state::<Arc<Store>>().update(|s| {
-                                    s.lyrics_offsets_by_video.insert(id, seconds);
-                                });
-                                handle.state::<Arc<Core>>().update(|_| {});
-                                refresh(&handle);
-                            });
-                        } else if value == "default" {
-                            store.update_soon(|s| {
-                                s.lyrics_offsets_by_video.remove(id);
-                            });
-                        } else if let Ok(ms) = value.parse::<i32>() {
-                            if LYRIC_OFFSETS.iter().any(|(choice, _)| *choice == ms) {
-                                store.update_soon(|s| {
-                                    s.lyrics_offsets_by_video
-                                        .insert(id.to_string(), f64::from(ms) / 1000.0);
-                                });
-                            }
-                        }
-                        app.state::<Arc<Core>>().update(|_| {});
-                    }
-                }
-            } else if other == "opacity:custom" {
-                let handle = app.clone();
-                crate::macos::prompt_opacity(app, store.get(|s| s.opacity), move |opacity| {
-                    let store = handle.state::<Arc<Store>>().inner().clone();
-                    store.update_soon(|s| s.opacity = opacity);
-                    if let Some(widget) = handle.get_webview_window(WIDGET) {
-                        crate::macos::set_alpha(&widget, opacity);
-                    }
-                    refresh(&handle);
-                });
-            } else if let Some(pct) = other.strip_prefix("opacity:") {
-                if let Ok(pct) = pct.parse::<f64>() {
-                    let opacity = pct / 100.0;
-                    store.update_soon(|s| s.opacity = opacity);
-                    if let Some(widget) = &widget {
-                        crate::macos::set_alpha(widget, opacity);
-                    }
-                }
             }
         }
     }
+}
 
-    refresh(app);
+/// Parameterised items: `corner:`, `opacity:`, `tint:`, `lyricsOffset:`,
+/// `songTime:`, `lyricsCache:`, `cornerFade:` and `artistName:`.
+fn handle_setting(app: &AppHandle, store: &Arc<Store>, widget: Option<&tauri::WebviewWindow>, other: &str) {
+    if let Some(from) = other.strip_prefix("artistName:") {
+        prompt_artist_name(app, from.to_string());
+    } else if let Some(rest) = other.strip_prefix("corner:") {
+        // `corner:<skin>:<button>`. The skin is in the id because the
+        // set is per skin and each menu edits the skin of the surface it
+        // belongs to — without it the dropdown's menu would toggle the
+        // widget's buttons whenever the two are on different skins.
+        //
+        // Independent toggles, so this flips one rather than selecting
+        // one. The renderer draws the buttons, so — like `tint` — the
+        // flags have to reach it as state.
+        if let Some((skin, which)) = rest.split_once(':') {
+            if SKINS.contains(&skin) {
+                let mut corners = store.corners_for(skin);
+                if let Some(on) = corners.flag(which) {
+                    *on = !*on;
+                }
+                store.set_corners_for(skin, corners);
+                let all = store.get(|s| s.corners.clone());
+                app.state::<Arc<Core>>()
+                    .update(|state| state.corners = all.clone());
+            }
+        }
+    } else if let Some(mb) = other.strip_prefix("lyricsCache:") {
+        if let Ok(mb) = mb.parse::<f64>() {
+            store.update_soon(|s| s.lyrics_cache_mb = mb);
+            // Shrinking the cap evicts, which is a directory listing and
+            // a run of deletes — not work for the menu's own thread.
+            tauri::async_runtime::spawn_blocking(move || crate::lyrics_cache::configure(mb));
+        }
+    } else if let Some(secs) = other.strip_prefix("cornerFade:") {
+        if let Ok(secs) = secs.parse::<f64>() {
+            store.update_soon(|s| s.corners_autohide = secs);
+            app.state::<Arc<Core>>()
+                .update(|state| state.corners_autohide = secs);
+        }
+    } else if let Some(pct) = other.strip_prefix("tint:") {
+        if let Ok(pct) = pct.parse::<f64>() {
+            let tint = pct / 100.0;
+            store.update_soon(|s| s.tint = tint);
+            // The wash is mixed in the renderer, so the strength has to
+            // reach it like any other piece of state.
+            app.state::<Arc<Core>>().update(|state| state.tint = tint);
+        }
+    } else if let Some(ms) = other.strip_prefix("lyricsOffset:") {
+        if let Ok(ms) = ms.parse::<f64>() {
+            let offset = ms / 1000.0;
+            store.update_soon(|s| s.lyrics_offset = offset);
+            app.state::<Arc<Core>>().update(|_| {});
+        }
+    } else if let Some(action) = other.strip_prefix("songTime:") {
+        if let Some((value, id)) = action.split_once(':') {
+            if !id.is_empty() {
+                if value == "custom" {
+                    let current = store.get(|s| s.lyrics_offset_for(Some(id)));
+                    let id = id.to_string();
+                    let handle = app.clone();
+                    crate::macos::prompt_song_time(app, current, move |seconds| {
+                        handle.state::<Arc<Store>>().update_soon(|s| {
+                            s.lyrics_offsets_by_video.insert(id, seconds);
+                        });
+                        handle.state::<Arc<Core>>().update(|_| {});
+                        refresh(&handle);
+                    });
+                } else if value == "default" {
+                    store.update_soon(|s| {
+                        s.lyrics_offsets_by_video.remove(id);
+                    });
+                } else if let Ok(ms) = value.parse::<i32>() {
+                    if LYRIC_OFFSETS.iter().any(|(choice, _)| *choice == ms) {
+                        store.update_soon(|s| {
+                            s.lyrics_offsets_by_video
+                                .insert(id.to_string(), f64::from(ms) / 1000.0);
+                        });
+                    }
+                }
+                app.state::<Arc<Core>>().update(|_| {});
+            }
+        }
+    } else if other == "opacity:custom" {
+        let handle = app.clone();
+        crate::macos::prompt_opacity(app, store.get(|s| s.opacity), move |opacity| {
+            let store = handle.state::<Arc<Store>>().inner().clone();
+            store.update_soon(|s| s.opacity = opacity);
+            if let Some(widget) = handle.get_webview_window(WIDGET) {
+                crate::macos::set_alpha(&widget, opacity);
+            }
+            refresh(&handle);
+        });
+    } else if let Some(pct) = other.strip_prefix("opacity:") {
+        if let Ok(pct) = pct.parse::<f64>() {
+            let opacity = pct / 100.0;
+            store.update_soon(|s| s.opacity = opacity);
+            if let Some(widget) = &widget {
+                crate::macos::set_alpha(widget, opacity);
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------- icon
@@ -1435,14 +1357,14 @@ fn refresh_now(app: &AppHandle) {
     let snapshot = core.snapshot();
 
     // Hollow glyph whenever we cannot reach YouTube Music.
-    if let Ok(image) = icon(snapshot.status == "connected") {
+    if let Ok(image) = icon(snapshot.status == Status::Connected) {
         let _ = tray.set_icon(Some(image));
         let _ = tray.set_icon_as_template(true);
     }
 
     let tooltip = match &snapshot.song {
         Some(song) => format!("{} — {}", song.title, song.artist),
-        None => format!("Perch Player — {}", status_label(&snapshot.status)),
+        None => format!("Perch Player — {}", status_label(snapshot.status)),
     };
     let _ = tray.set_tooltip(Some(tooltip));
 

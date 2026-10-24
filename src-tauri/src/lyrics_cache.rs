@@ -2,8 +2,9 @@
 //!
 //! `lyrics.rs` already remembers the last 60 lookups in memory, which covers an
 //! evening. This covers everything after it: relaunching used to re-ask LRCLib
-//! for the same track, and the fourth matching tier — YouTube Music's own timed
-//! lyrics — is three requests deep before it answers. A hit here costs one file
+//! for the same track, and YouTube Music's own timed lyrics (the first tier for
+//! streamed tracks, the last for local files) are three requests deep before
+//! they answer. A hit here costs one file
 //! read and no network at all.
 //!
 //! ```text
@@ -27,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::lyrics::{how_from, LyricLine, Lyrics};
+use crate::lyrics::{How, LyricLine, Lyrics};
 
 /// Megabytes, and what the menu offers. `0` is off — nothing is read and
 /// nothing is written, and what is already there stays until it is emptied.
@@ -70,13 +71,11 @@ struct Record {
     lyrics: Option<Stored>,
 }
 
-/// `Lyrics` with `how` widened to a `String`: the live type carries a
-/// `&'static str`, which is worth keeping (it is one of the known values, not
-/// arbitrary text) and cannot be deserialised into.
+/// `Lyrics` as stored. An unknown `how` reads back as `How::Cached`.
 #[derive(Serialize, Deserialize)]
 struct Stored {
     synced: bool,
-    how: String,
+    how: How,
     lines: Vec<LyricLine>,
 }
 
@@ -159,7 +158,7 @@ fn record_result(record: Record, now: u64) -> Option<Option<Lyrics>> {
     match record.lyrics {
         Some(stored) => Some(Some(Lyrics {
             synced: stored.synced,
-            how: how_from(&stored.how),
+            how: stored.how,
             lines: stored.lines,
         })),
         // A miss worth re-asking about. Left on disk — the write that follows
@@ -183,7 +182,7 @@ pub fn store(video_id: &str, lyrics: &Option<Lyrics>) {
         at: now(),
         lyrics: lyrics.as_ref().map(|words| Stored {
             synced: words.synced,
-            how: words.how.to_string(),
+            how: words.how,
             lines: words.lines.clone(),
         }),
     };
@@ -234,10 +233,14 @@ pub fn forget_miss(video_id: &str) {
         return;
     }
     let _write = WRITES.lock().expect("lyrics cache writes");
-    if let Some(path) = path_for(video_id) {
-        let _ = fs::remove_file(path);
+    let Some(path) = path_for(video_id) else { return };
+    // Subtract rather than re-measure: the sorter forgets a miss per card, and
+    // a stat of every cache file each time is not worth it for one record.
+    let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    if fs::remove_file(&path).is_ok() {
+        let total = TOTAL_BYTES.load(Ordering::Relaxed).saturating_sub(len);
+        TOTAL_BYTES.store(total, Ordering::Relaxed);
     }
-    TOTAL_BYTES.store(measure(), Ordering::Relaxed);
 }
 
 /// Explicitly forget failed lookups without removing any found lyrics.
@@ -361,7 +364,7 @@ mod tests {
         for synced in [true, false] {
             let words = Stored {
                 synced,
-                how: "ytmusic".into(),
+                how: How::Ytmusic,
                 lines: Vec::new(),
             };
             assert!(record_result(record(Some(words)), miss_age + 1)
@@ -386,7 +389,7 @@ mod tests {
         ] {
             let words = lyrics.map(|synced| Stored {
                 synced,
-                how: "kugeci".into(),
+                how: How::Kugeci,
                 lines: Vec::new(),
             });
             let record = Record {

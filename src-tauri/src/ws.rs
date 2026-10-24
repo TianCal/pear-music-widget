@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::ErrorCode;
-use crate::state::Core;
+use crate::state::{Core, Status};
 
 const RECONNECT_MIN_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 15000;
@@ -77,8 +77,15 @@ pub fn spawn(core: Arc<Core>, realtime: Arc<Realtime>) {
     tauri::async_runtime::spawn(async move {
         loop {
             // Parked after a denied authorisation: wait for a manual retry.
+            // `notify_waiters` keeps no permit, so register before checking:
+            // a retry landing between the check and the await would be lost.
             if realtime.parked.load(Ordering::SeqCst) {
-                realtime.wake.notified().await;
+                let notified = realtime.wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if realtime.parked.load(Ordering::SeqCst) {
+                    notified.await;
+                }
                 continue;
             }
 
@@ -102,8 +109,8 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     // Only advertise "connecting" on the first attempt or after a manual retry.
     // Once we know we are offline, staying offline while retrying in the
     // background beats flickering between the two on every backoff tick.
-    if realtime.attempt.load(Ordering::SeqCst) == 0 && core.status() != "connected" {
-        core.set_status("connecting", "");
+    if realtime.attempt.load(Ordering::SeqCst) == 0 && core.status() != Status::Connected {
+        core.set_status(Status::Connecting, "");
     }
 
     let token = match core.api.ensure_token().await {
@@ -111,13 +118,13 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
         Err(err) => {
             if err.code == ErrorCode::Denied {
                 realtime.parked.store(true, Ordering::SeqCst);
-                core.set_status("denied", &err.message);
+                core.set_status(Status::Denied, &err.message);
                 return Outcome::Parked;
             }
             let status = if err.code == ErrorCode::Offline {
-                "offline"
+                Status::Offline
             } else {
-                "unauthorized"
+                Status::Unauthorized
             };
             core.set_status(status, &err.message);
             return Outcome::Reconnect;
@@ -128,7 +135,7 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
         "{}{}/ws?token={}",
         core.store.ws_base(),
         crate::api::API,
-        urlencode(&token)
+        crate::api::urlencode(&token)
     );
 
     let socket = match tokio::time::timeout(HANDSHAKE_TIMEOUT, tokio_tungstenite::connect_async(url))
@@ -136,17 +143,17 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     {
         Ok(Ok((socket, _response))) => socket,
         Ok(Err(err)) => {
-            core.set_status("offline", &format!("Could not reach the API server: {err}"));
+            core.set_status(Status::Offline, &format!("Could not reach the API server: {err}"));
             return Outcome::Reconnect;
         }
         Err(_) => {
-            core.set_status("offline", "Could not reach the API server");
+            core.set_status(Status::Offline, "Could not reach the API server");
             return Outcome::Reconnect;
         }
     };
 
     realtime.attempt.store(0, Ordering::SeqCst);
-    core.set_status("connected", "");
+    core.set_status(Status::Connected, "");
 
     let (_sink, mut stream) = socket.split();
     let mut policy_rejection = false;
@@ -186,11 +193,11 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     if policy_rejection {
         // The server rejected our token — drop it so the next attempt re-authorises.
         core.api.clear_token();
-        core.set_status("unauthorized", "The API server rejected the saved token");
+        core.set_status(Status::Unauthorized, "The API server rejected the saved token");
     } else {
         core.set_status(
-            "offline",
-            if core.status() == "connected" {
+            Status::Offline,
+            if core.status() == Status::Connected {
                 "Connection closed"
             } else {
                 "Could not reach the API server"
@@ -199,17 +206,4 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     }
 
     Outcome::Reconnect
-}
-
-fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }

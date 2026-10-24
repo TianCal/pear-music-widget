@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
+use crate::artwork::fold as norm;
 use crate::lyrics::Lyrics;
 
 /// Clip start sits this far before the chorus's first line, so the lead-in
@@ -23,12 +24,24 @@ use crate::lyrics::Lyrics;
 const LEAD_IN: f64 = 1.0;
 const FALLBACK_AT: f64 = 0.35;
 
+/// How a chorus was found. The renderer labels each (`HOW` in sorter/app.js).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum How {
+    /// From the repeated block.
+    Lyrics,
+    /// Refined to the line that sings the title.
+    Title,
+    /// Refined a third of the way into a long block.
+    Third,
+    /// No synced lyrics: a fixed share of the song.
+    Fallback,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Chorus {
     pub start: f64,
-    /// `lyrics` (from the repeated block), `title` (refined to the title line),
-    /// `third` (refined into a long block) or `fallback`.
-    pub how: &'static str,
+    pub how: How,
     /// The first chorus line, when lyrics found it.
     pub line: Option<String>,
     pub repeats: usize,
@@ -42,14 +55,6 @@ static CREDIT: LazyLock<Regex> = LazyLock::new(|| {
 });
 static BRACKETED_TAIL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\(（\[【].*$").expect("bracket regex"));
-
-fn norm(text: &str) -> String {
-    fast2s::convert(text)
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
-}
 
 /// Repeats are rarely identical in LRC files: 了/的 swaps, a dropped word.
 fn similar(a: &str, b: &str) -> bool {
@@ -91,25 +96,25 @@ fn lines_of(lyrics: &Lyrics) -> Vec<Line> {
         .collect()
 }
 
-fn refine(lines: &[Line], start: usize, len: usize, title: &str) -> (usize, &'static str) {
+fn refine(lines: &[Line], start: usize, len: usize, title: &str) -> (usize, How) {
     let title = norm(&BRACKETED_TAIL.replace(title, ""));
     if title.chars().count() >= 2 {
         let from = start.saturating_sub(6);
         let to = (start + len).min(lines.len());
         if let Some(i) = (from..to).find(|&i| lines[i].key.contains(&title)) {
-            return (i, "title");
+            return (i, How::Title);
         }
     }
     if len > 8 {
-        return (start + len / 3, "third");
+        return (start + len / 3, How::Third);
     }
-    (start, "lyrics")
+    (start, How::Lyrics)
 }
 
 pub fn find(lyrics: Option<&Lyrics>, title: &str, duration: f64) -> Chorus {
     let fallback = Chorus {
         start: (duration * FALLBACK_AT).max(0.0),
-        how: "fallback",
+        how: How::Fallback,
         line: None,
         repeats: 0,
     };
@@ -183,7 +188,7 @@ mod tests {
     fn lrc(lines: &[(f64, &str)]) -> Lyrics {
         Lyrics {
             synced: true,
-            how: "exact",
+            how: crate::lyrics::How::Exact,
             lines: lines
                 .iter()
                 .map(|(time, text)| LyricLine {
@@ -222,14 +227,14 @@ mod tests {
             (226.0, "不用抉擇 我會自動變朋友"),
         ]);
         let found = find(Some(&words), "明明就", 260.0);
-        assert_eq!(found.how, "title");
+        assert_eq!(found.how, How::Title);
         assert_eq!(found.start, 67.0);
     }
 
     #[test]
     fn no_synced_lyrics_falls_back_to_a_third_of_the_way_in() {
         let found = find(None, "x", 200.0);
-        assert_eq!(found.how, "fallback");
+        assert_eq!(found.how, How::Fallback);
         assert_eq!(found.start, 70.0);
     }
 }

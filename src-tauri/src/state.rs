@@ -93,9 +93,8 @@ impl Song {
         };
 
         let media_type = optional("mediaType");
-        let by_artist = matches!(media_type.as_deref(), Some("AUDIO" | "ORIGINAL_MUSIC_VIDEO"));
         let channel = optional("artistUrl")
-            .filter(|_| by_artist)
+            .filter(|_| by_artist(media_type.as_deref()))
             .and_then(|url| Some(url.split_once("/channel/")?.1.to_string()))
             .filter(|id| !id.is_empty());
 
@@ -138,12 +137,92 @@ impl Song {
 }
 
 /// Everything small enough to ride the once-a-second position tick. Around
+/// Which player the card is showing. The renderer cannot always tell from the
+/// song alone (there may be none), and copy and gestures differ per source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Youtube,
+    Local,
+}
+
+/// The connection to the API server, as the renderer and tray show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Connecting,
+    Connected,
+    Offline,
+    Unauthorized,
+    Denied,
+}
+
+/// YouTube Music's repeat modes, under their own names. `/switch-repeat`
+/// steps through them NONE → ALL → ONE → NONE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Repeat {
+    None,
+    All,
+    One,
+}
+
+impl Repeat {
+    pub fn parse(mode: &str) -> Option<Self> {
+        match mode {
+            "NONE" => Some(Repeat::None),
+            "ALL" => Some(Repeat::All),
+            "ONE" => Some(Repeat::One),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Repeat::None => "NONE",
+            Repeat::All => "ALL",
+            Repeat::One => "ONE",
+        }
+    }
+}
+
+/// The heart, under YouTube Music's names. Local ratings use the same three,
+/// so both sources render and menu the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Like {
+    Like,
+    Dislike,
+    Indifferent,
+}
+
+impl Like {
+    pub fn parse(state: &str) -> Option<Self> {
+        match state.to_ascii_uppercase().as_str() {
+            "LIKE" => Some(Like::Like),
+            "DISLIKE" => Some(Like::Dislike),
+            "INDIFFERENT" => Some(Like::Indifferent),
+            _ => None,
+        }
+    }
+}
+
+impl From<Option<crate::likes::Rating>> for Like {
+    fn from(rating: Option<crate::likes::Rating>) -> Self {
+        match rating {
+            Some(crate::likes::Rating::Like) => Like::Like,
+            Some(crate::likes::Rating::Dislike) => Like::Dislike,
+            None => Like::Indifferent,
+        }
+    }
+}
+
 /// 400 bytes serialised, and nothing in here grows with the track.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerState {
-    /// connecting | connected | offline | unauthorized | denied
-    pub status: String,
+    pub source: Source,
+    pub status: Status,
     pub status_message: String,
     pub skin: String,
     pub panel_skin: String,
@@ -176,8 +255,8 @@ pub struct PlayerState {
     /// `ALL` | `ONE` | `NONE`, or `None` while the player has not said. The
     /// renderer draws the loop unlit for the last two, so an unknown mode
     /// cannot be mistaken for repeat being on.
-    pub repeat: Option<String>,
-    pub like: Option<String>,
+    pub repeat: Option<Repeat>,
+    pub like: Option<Like>,
 }
 
 impl PlayerState {
@@ -207,7 +286,8 @@ impl PlayerState {
         corners_autohide: f64,
     ) -> Self {
         Self {
-            status: "connecting".into(),
+            source: Source::Youtube,
+            status: Status::Connecting,
             status_message: String::new(),
             skin,
             panel_skin,
@@ -443,13 +523,27 @@ impl Gate {
 }
 
 /// `/like-state`'s `{ "state": "LIKE" | … }`, read leniently.
-fn like_of(reply: crate::api::Result<Option<Value>>) -> Option<String> {
-    reply.ok().flatten().and_then(|value| {
-        value
-            .get("state")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    })
+/// `/like-state`'s answer, or `None` if the request failed.
+pub fn like_of(reply: crate::api::Result<Option<Value>>) -> Option<Like> {
+    reply
+        .ok()
+        .flatten()
+        .and_then(|value| value.get("state").and_then(Value::as_str).and_then(Like::parse))
+}
+
+/// `/repeat-mode`'s answer. Null is a real answer — the player has not
+/// reported a mode yet — so it stays `None` rather than being defaulted to NONE.
+pub fn repeat_of(reply: crate::api::Result<Option<Value>>) -> Option<Repeat> {
+    reply
+        .ok()
+        .flatten()
+        .and_then(|value| value.get("mode").and_then(Value::as_str).and_then(Repeat::parse))
+}
+
+/// Only a song or an official video is credited to artists; any other upload's
+/// byline (and `artistUrl` channel) names whoever posted it.
+fn by_artist(media_type: Option<&str>) -> bool {
+    matches!(media_type, Some("AUDIO" | "ORIGINAL_MUSIC_VIDEO"))
 }
 
 /// `elapsed`, or `None` for never.
@@ -461,6 +555,58 @@ fn age(at: &Mutex<Option<Instant>>) -> Option<Duration> {
 
 /// Everything the app shares. Held as Tauri managed state and cloned (as an
 /// `Arc`) into the realtime task and the pollers.
+/// Who wants one of the panel-driven channels (queue, lyrics), whether a
+/// refresh was skipped because nobody could see it, and the token that lets a
+/// newer fetch supersede one in flight.
+struct Demand {
+    /// Window labels with that panel open. No point reaching out to the
+    /// network for a panel nobody is looking at.
+    wanted_by: Mutex<HashSet<String>>,
+    /// A refresh was skipped because nobody could see it.
+    stale: AtomicBool,
+    token: AtomicU64,
+}
+
+impl Demand {
+    fn new(wanted_by: HashSet<String>) -> Self {
+        Self {
+            wanted_by: Mutex::new(wanted_by),
+            stale: AtomicBool::new(false),
+            token: AtomicU64::new(0),
+        }
+    }
+
+    fn wanted_by(&self) -> HashSet<String> {
+        self.wanted_by.lock().expect("demand lock").clone()
+    }
+
+    fn set_wanted(&self, label: &str, wanted: bool) {
+        let mut open = self.wanted_by.lock().expect("demand lock");
+        if wanted {
+            open.insert(label.to_string());
+        } else {
+            open.remove(label);
+        }
+    }
+
+    fn mark_stale(&self) {
+        self.stale.store(true, Ordering::SeqCst);
+    }
+
+    fn take_stale(&self) -> bool {
+        self.stale.swap(false, Ordering::SeqCst)
+    }
+
+    /// Start a fetch; anything older is superseded.
+    fn bump(&self) -> u64 {
+        self.token.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn current(&self, token: u64) -> bool {
+        self.token.load(Ordering::SeqCst) == token
+    }
+}
+
 pub struct Core {
     pub app: AppHandle,
     pub store: Arc<Store>,
@@ -479,25 +625,18 @@ pub struct Core {
     lyrics_source: Mutex<LyricsView>,
     jyutping: Arc<Jyutping>,
     volume: Mutex<VolumeCalibration>,
-    /// Window labels with a lyrics panel open. No point reaching out to the
-    /// network for a panel nobody is looking at.
-    lyrics_wanted_by: Mutex<HashSet<String>>,
-    /// The same, for the queue panel. The skin half of "is anyone looking" is
-    /// answered from the store instead — see `queue_wanted`.
-    queue_wanted_by: Mutex<HashSet<String>>,
+    lyrics_demand: Demand,
+    /// The skin half of "is anyone looking" is answered from the store
+    /// instead — see `queue_visible`.
+    queue_demand: Demand,
     /// Window labels currently on screen, told by whoever shows or hides one.
     /// While this is empty — nearly all the time, for a menu-bar app — the
     /// per-second `state` push is not emitted and the queue and lyrics are not
     /// fetched; showing a surface catches it up. See `set_on_screen`.
     on_screen: Mutex<HashSet<String>>,
-    /// A queue or lyrics refresh was skipped because nobody could see it.
-    queue_stale: AtomicBool,
-    lyrics_stale: AtomicBool,
     cover_token: AtomicU64,
-    queue_token: AtomicU64,
     /// Bumped by each shuffle change; see `refresh_queue_after_reorder`.
     reorder_token: AtomicU64,
-    lyrics_token: AtomicU64,
     /// Woken whenever a lookup is superseded, so the old one is dropped at its
     /// next await instead of finishing a whole chain of requests for a track
     /// that is no longer playing. A dropped lookup caches nothing, so it can
@@ -559,20 +698,16 @@ impl Core {
             lyrics_source: Mutex::new(LyricsView::idle()),
             jyutping,
             volume: Mutex::new(VolumeCalibration::default()),
-            lyrics_wanted_by: Mutex::new(HashSet::new()),
+            lyrics_demand: Demand::new(HashSet::new()),
             // `window::create` restores the stored panel before the window is
             // ever on screen, so the widget can come up with a queue panel open
             // and ask for its state before the renderer has told us it is open.
             // Seeding from the same store entry is what stops that first paint
             // being an empty list corrected a round trip later.
-            queue_wanted_by: Mutex::new(queue_wanted_by),
+            queue_demand: Demand::new(queue_wanted_by),
             on_screen: Mutex::new(HashSet::new()),
-            queue_stale: AtomicBool::new(false),
-            lyrics_stale: AtomicBool::new(false),
             cover_token: AtomicU64::new(0),
-            queue_token: AtomicU64::new(0),
             reorder_token: AtomicU64::new(0),
-            lyrics_token: AtomicU64::new(0),
             lyrics_superseded: tokio::sync::Notify::new(),
             lyrics_style_token: AtomicU64::new(0),
             refresh_gate: Gate::default(),
@@ -646,15 +781,15 @@ impl Core {
         }
         // This surface heard no `state` while it was hidden.
         let _ = self.app.emit_to(label, "state", &self.snapshot());
-        let remote = !self.is_local() && self.status() == "connected";
+        let remote = !self.is_local() && self.status() == Status::Connected;
         let queue_old = remote
             && self
                 .queue_fetched_at
                 .lock()
                 .expect("time lock")
                 .is_none_or(|at| at.elapsed() >= QUEUE_SHOW_TTL);
-        let queue = self.queue_stale.swap(false, Ordering::SeqCst) || queue_old;
-        let lyrics = self.lyrics_stale.swap(false, Ordering::SeqCst);
+        let queue = self.queue_demand.take_stale() || queue_old;
+        let lyrics = self.lyrics_demand.take_stale();
         let resync = woke && remote;
         if queue || lyrics || resync {
             let core = Arc::clone(self);
@@ -694,8 +829,8 @@ impl Core {
         }
     }
 
-    pub fn status(&self) -> String {
-        self.player.lock().expect("player lock").status.clone()
+    pub fn status(&self) -> Status {
+        self.player.lock().expect("player lock").status
     }
 
     // ----------------------------------------------------------- local source
@@ -719,13 +854,13 @@ impl Core {
         song: Song,
         cover: Option<Arc<str>>,
         playing: bool,
-        like: &'static str,
+        like: Like,
     ) {
         self.cover_token.fetch_add(1, Ordering::SeqCst);
         self.update(|state| {
             state.song = Some(song);
             state.position = 0.0;
-            state.like = Some(like.to_string());
+            state.like = Some(like);
             state.is_playing = playing;
         });
         self.set_cover(cover);
@@ -737,7 +872,7 @@ impl Core {
 
     pub fn publish_local_queue(&self) {
         if !self.showing() {
-            self.queue_stale.store(true, Ordering::SeqCst);
+            self.queue_demand.mark_stale();
             return;
         }
         if self.queue_wanted() {
@@ -780,15 +915,16 @@ impl Core {
     /// Drop everything the folder put on screen before the socket reconnects.
     pub fn leave_local(self: &Arc<Self>) {
         self.update(|state| {
-            state.status = "connecting".into();
+            state.source = Source::Youtube;
+            state.status = Status::Connecting;
             state.song = None;
             state.is_playing = false;
             state.position = 0.0;
             // The folder's modes are its own (saved per folder) and must not
-            // leak onto YouTube Music: back to plain queue repeat until the
-            // resync reports the player's real modes.
+            // leak onto YouTube Music. Repeat goes back to unknown rather than
+            // a guess, so a press before the resync reads the player first.
             state.shuffle = false;
-            state.repeat = Some("ALL".into());
+            state.repeat = None;
         });
         self.set_cover(None);
         self.set_queue(QueueView::empty());
@@ -1021,7 +1157,7 @@ impl Core {
         // whoever posted it. Without a slot `/song`'s credit is romanised, so
         // it is only linked when it names one artist and the channel is
         // theirs; the slot follows within a queue fetch.
-        let by_artist = matches!(song.media_type.as_deref(), Some("AUDIO" | "ORIGINAL_MUSIC_VIDEO"));
+        let by_artist = by_artist(song.media_type.as_deref());
         let mut links: Vec<ArtistLink> = match &slot {
             Some(track) => track.artists.to_vec(),
             None if crate::store::split_credit(&song.api_artist).len() == 1 => {
@@ -1082,17 +1218,12 @@ impl Core {
         {
             return true;
         }
-        let open = self.queue_wanted_by.lock().expect("queue lock").clone();
+        let open = self.queue_demand.wanted_by();
         self.any_on_screen(&open)
     }
 
     pub fn set_queue_wanted(&self, label: &str, wanted: bool) {
-        let mut open = self.queue_wanted_by.lock().expect("queue lock");
-        if wanted {
-            open.insert(label.to_string());
-        } else {
-            open.remove(label);
-        }
+        self.queue_demand.set_wanted(label, wanted);
     }
 
     /// Refresh the queue once YouTube Music has finished reordering it. The
@@ -1144,7 +1275,7 @@ impl Core {
     /// Whether a queue view would be shown right now; marks it stale if not.
     fn queue_visible(self: &Arc<Self>) -> bool {
         if !self.showing() {
-            self.queue_stale.store(true, Ordering::SeqCst);
+            self.queue_demand.mark_stale();
             return false;
         }
         if !self.queue_wanted() {
@@ -1160,7 +1291,7 @@ impl Core {
         if self.is_local() || !self.queue_visible() {
             return;
         }
-        self.queue_token.fetch_add(1, Ordering::SeqCst);
+        self.queue_demand.bump();
         *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
         self.publish_queue(queue);
     }
@@ -1195,7 +1326,7 @@ impl Core {
             return;
         }
 
-        let token = self.queue_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = self.queue_demand.bump();
         *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
         let Ok(Some(queue)) = self.api.queue().await else {
             return;
@@ -1205,20 +1336,20 @@ impl Core {
         }
         // One await inside the guarded region, so one check: if a newer refresh
         // started while this response was in flight, its result is the truth.
-        if token != self.queue_token.load(Ordering::SeqCst) {
+        if !self.queue_demand.current(token) {
             return;
         }
         self.publish_queue(&queue);
     }
 
-    /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
-    /// lyrics panel is actually open.
+    /// Lyrics come from several providers (see `lyrics.rs`) and are only
+    /// fetched while a lyrics panel is actually open.
     pub async fn refresh_lyrics(self: &Arc<Self>) {
-        let open = self.lyrics_wanted_by.lock().expect("lyrics lock").clone();
+        let open = self.lyrics_demand.wanted_by();
         // A lyrics panel left open on a hidden widget: nobody is reading, so
         // no lookup — the panel catches up when the widget shows again.
         if !open.is_empty() && !self.any_on_screen(&open) {
-            self.lyrics_stale.store(true, Ordering::SeqCst);
+            self.lyrics_demand.mark_stale();
             return;
         }
         let wanted = !open.is_empty();
@@ -1226,7 +1357,7 @@ impl Core {
         let names = self.store.get(|s| s.artist_names.clone());
         let song = song.map(|song| song.for_lyrics(&names));
 
-        let token = self.lyrics_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = self.lyrics_demand.bump();
         self.lyrics_superseded.notify_waiters();
         let Some(song) = song.filter(|_| wanted) else {
             self.set_lyrics(LyricsView::idle());
@@ -1247,7 +1378,7 @@ impl Core {
         };
 
         // A newer request, or the track moved on while we were waiting.
-        if token != self.lyrics_token.load(Ordering::SeqCst) {
+        if !self.lyrics_demand.current(token) {
             return;
         }
         let still_playing = self
@@ -1277,12 +1408,7 @@ impl Core {
     }
 
     pub fn set_lyrics_wanted(&self, label: &str, wanted: bool) {
-        let mut open = self.lyrics_wanted_by.lock().expect("lyrics lock");
-        if wanted {
-            open.insert(label.to_string());
-        } else {
-            open.remove(label);
-        }
+        self.lyrics_demand.set_wanted(label, wanted);
     }
 
     /// Ground truth pull — the websocket's initial values for shuffle/volume are
@@ -1344,14 +1470,7 @@ impl Core {
             .ok()
             .flatten()
             .and_then(|value| value.get("state").and_then(Value::as_bool));
-        // Null is a real answer here — it means the player has not reported a
-        // mode yet — so it stays `None` rather than being defaulted to NONE.
-        let repeat = repeat.ok().flatten().and_then(|value| {
-            value
-                .get("mode")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+        let repeat = repeat_of(repeat);
         let volume = volume.ok().flatten();
         let reported = volume
             .as_ref()
@@ -1372,7 +1491,7 @@ impl Core {
                 state.shuffle = shuffle;
             }
             if repeat.is_some() {
-                state.repeat = repeat.clone();
+                state.repeat = repeat;
             }
             if let Some(level) = level {
                 state.volume = level;
@@ -1381,7 +1500,7 @@ impl Core {
                 state.muted = muted;
             }
             if like.is_some() {
-                state.like = like.clone();
+                state.like = like;
             }
             if let Some(song) = &song {
                 if let Some(paused) = song.get("isPaused").and_then(Value::as_bool) {
@@ -1410,27 +1529,27 @@ impl Core {
 
     // -------------------------------------------------------------- realtime
 
-    pub fn set_status(self: &Arc<Self>, status: &str, message: &str) {
+    pub fn set_status(self: &Arc<Self>, status: Status, message: &str) {
         if self.is_local() {
             return;
         }
         let mut changed = false;
         self.update_remote(|state| {
             changed = state.status != status || state.status_message != message;
-            state.status = status.to_string();
+            state.status = status;
             state.status_message = message.to_string();
         });
         // Background reconnects report the same `offline` every backoff cycle;
         // the queue is already gone and rebuilding the tray menu (icon decode,
         // a whole NSMenu tree on the main thread) would change nothing.
-        if !changed && status != "connected" {
+        if !changed && status != Status::Connected {
             return;
         }
 
-        if status == "connected" {
+        if status == Status::Connected {
             let core = Arc::clone(self);
             tauri::async_runtime::spawn(async move { core.refresh_all(true).await });
-        } else if status != "connecting" {
+        } else if status != Status::Connecting {
             // Drop the queue too: it belongs to a player we can no longer see.
             self.update_remote(|state| state.is_playing = false);
             self.set_queue(QueueView::empty());
@@ -1459,8 +1578,8 @@ impl Core {
                 let repeat = msg
                     .get("repeat")
                     .and_then(Value::as_str)
-                    .filter(|mode| matches!(*mode, "ALL" | "ONE"))
-                    .map(str::to_string);
+                    .and_then(Repeat::parse)
+                    .filter(|mode| *mode != Repeat::None);
                 self.update_remote(|state| {
                     state.is_playing = flag("isPlaying");
                     state.apply_position(number("position").unwrap_or(0.0));
@@ -1470,7 +1589,7 @@ impl Core {
                     state.muted = flag("muted");
                     state.shuffle = flag("shuffle");
                     if repeat.is_some() {
-                        state.repeat = repeat.clone();
+                        state.repeat = repeat;
                     }
                 });
             }
@@ -1552,12 +1671,9 @@ impl Core {
             // this is what keeps the loop honest when the mode is changed
             // somewhere else.
             "REPEAT_CHANGED" => {
-                let repeat = msg
-                    .get("repeat")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                let repeat = msg.get("repeat").and_then(Value::as_str).and_then(Repeat::parse);
                 if repeat.is_some() {
-                    self.update_remote(|state| state.repeat = repeat.clone());
+                    self.update_remote(|state| state.repeat = repeat);
                 }
             }
             _ => {}
@@ -1580,8 +1696,8 @@ impl Core {
     /// to that state, not just report an error into the void.
     pub fn note_error(self: &Arc<Self>, code: ErrorCode, message: &str) {
         match code {
-            ErrorCode::Offline => self.set_status("offline", message),
-            ErrorCode::Unauthorized => self.set_status("unauthorized", message),
+            ErrorCode::Offline => self.set_status(Status::Offline, message),
+            ErrorCode::Unauthorized => self.set_status(Status::Unauthorized, message),
             _ => return,
         }
         crate::ws::retry(&self.app);
@@ -1716,7 +1832,7 @@ mod tests {
             state: "ready".into(),
             lyrics: Some(Arc::new(Lyrics {
                 synced: true,
-                how: "exact",
+                how: crate::lyrics::How::Exact,
                 lines: vec![
                     LyricLine {
                         time: Some(0.0),
@@ -1754,7 +1870,7 @@ mod tests {
         assert_eq!(lyrics.lines[0].time, Some(0.0));
         assert_eq!(lyrics.lines[2].time, Some(2.0));
         assert!(lyrics.synced);
-        assert_eq!(lyrics.how, "exact");
+        assert_eq!(lyrics.how, crate::lyrics::How::Exact);
         assert_eq!(converted.state, "ready");
     }
 
@@ -1804,7 +1920,7 @@ mod tests {
             state: "ready".into(),
             lyrics: Some(Arc::new(Lyrics {
                 synced: true,
-                how: "exact",
+                how: crate::lyrics::How::Exact,
                 lines: vec![LyricLine {
                     time: Some(1.0),
                     text: "我心裏".into(),

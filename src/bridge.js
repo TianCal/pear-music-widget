@@ -4,8 +4,9 @@
  * The `window.widget` bridge, and the two things a WKWebView cannot do with CSS
  * alone: move the window and dismiss it with keyboard shortcuts.
  *
- * `app.js` was written against the Electron preload and is unchanged — this
- * file re-implements that surface on Tauri's IPC so it never had to be.
+ * `app.js` was first written against the Electron preload; this file keeps
+ * that `window.widget` surface, implemented on Tauri's IPC, and is the only
+ * place the renderer touches Tauri.
  *
  * Wrapped in an IIFE because a preload ran in its own context but a plain
  * `<script>` shares one global scope with `app.js`: a top-level `const` here
@@ -50,15 +51,14 @@ window.widget = {
   openApp: () => invoke('open_app'),
   search: (query) => invoke('search_tracks', { query }),
   playResult: (videoId) => invoke('play_result', { videoId }),
-  playQueued: (videoId) => invoke('play_queued', { videoId }),
   playQueueIndex: (index, videoId) => invoke('play_queue_index', { index, videoId }),
   // The playlist picker: YouTube Music playlists and saved folders together.
   playlists: () => invoke('list_playlists'),
   playPlaylist: (kind, id) => invoke('play_playlist', { kind, id }),
   playlistArt: (urls) => invoke('playlist_art', { urls }),
-  // An artist's Top songs, by the browse id on `song.artists` (or the name,
-  // for an artist YouTube Music did not link).
-  artistPage: (id, name) => invoke('artist_page', { id, name }),
+  // An artist's Top songs, by the browse id on `song.artists`, or for an
+  // artist YouTube Music did not link, by `query` — its own name for them.
+  artistPage: (id, query) => invoke('artist_page', { id, query }),
   // Artwork for the queue rows a surface is showing. A command rather than an
   // event: a reply is formatted once, an event once per webview.
   queueArt: (ids, size) => invoke('queue_art', { ids, size }),
@@ -73,7 +73,6 @@ window.widget = {
   onZoom: (handler) => on('zoom', handler),
   onOnScreen: (handler) => on('on-screen', handler),
   retry: () => invoke('retry'),
-  quit: () => invoke('quit'),
 };
 
 // ------------------------------------------------------------- window drag

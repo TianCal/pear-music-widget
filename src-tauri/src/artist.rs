@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use tokio::sync::OnceCell;
 
-use crate::api::{Api, NO_BROWSE, THUMB_PX};
+use crate::api::{Api, ApiError, ErrorCode, THUMB_PX};
 use crate::search::{self, ArtistPage};
 
 /// How long a page or a name lookup is reused. Top songs move over weeks.
@@ -50,9 +50,9 @@ pub struct Failed {
 }
 
 impl Failed {
-    fn request(message: String) -> Self {
-        let keep = if message == NO_BROWSE { NO_BROWSE_FOR } else { RETRY_AFTER };
-        Self { message, keep }
+    fn request(err: ApiError) -> Self {
+        let keep = if err.code == ErrorCode::NoBrowse { NO_BROWSE_FOR } else { RETRY_AFTER };
+        Self { message: err.message, keep }
     }
 }
 
@@ -131,7 +131,7 @@ async fn resolve(api: &Api, name: &str) -> Result<String, Failed> {
     let payload = api
         .search_background(name)
         .await
-        .map_err(|err| Failed::request(err.message))?;
+        .map_err(Failed::request)?;
     search::find_artist(&payload, name).ok_or_else(|| Failed {
         message: format!("YouTube Music has no artist page for {name}"),
         keep: FRESH,
@@ -139,7 +139,7 @@ async fn resolve(api: &Api, name: &str) -> Result<String, Failed> {
 }
 
 async fn load(api: &Api, id: &str) -> Result<Arc<ArtistPage>, Failed> {
-    let payload = api.browse(id).await.map_err(|err| Failed::request(err.message))?;
+    let payload = api.browse(id).await.map_err(Failed::request)?;
     let mut page = search::parse_artist_page(&payload);
     // All at once: a shelf is five rows, and the slowest cover sets the wait.
     let covers = page.songs.len().max(1);

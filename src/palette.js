@@ -18,7 +18,8 @@
   const BUCKET_DEG = 360 / HUE_BUCKETS;
   const SAMPLE = 42;
 
-  /** Used when the artwork has no hue to give — see `spread`. */
+  /** Used when the artwork has no hue to give — see `spread`. The stylesheet's
+   *  starting `--accent` and washes are this colour too. */
   const FALLBACK = { h: 352, s: 90, l: 67 };
 
   /** How far a runner-up must sit from a hue already taken, in buckets. */
@@ -372,5 +373,5 @@
       }
     });
 
-  window.palette = { extract, FALLBACK_HEX: toHex(FALLBACK.h, FALLBACK.s, FALLBACK.l) };
+  window.palette = { extract };
 })();

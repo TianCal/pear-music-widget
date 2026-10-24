@@ -144,12 +144,7 @@ fn best<'a>(
 
 fn key(kind: &str, artist: &str, name: &str) -> String {
     let text = format!("{kind}\0{}\0{}", fold(&crate::lyrics::lead_artist(artist)), core_name(name));
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{kind}-{hash:016x}")
+    format!("{kind}-{:016x}", crate::fsutil::stable_hash(&text))
 }
 
 enum Cached {
@@ -203,8 +198,18 @@ fn write_cache(key: &str, outcome: Outcome) {
     }
     match outcome {
         Outcome::Hit(bytes) => {
-            let _ = std::fs::write(base.join(format!("{key}.jpg")), bytes);
-            let _ = std::fs::remove_file(base.join(format!("{key}.miss")));
+            // Hits never expire, so a torn one would stand forever: synced and
+            // renamed into place, on a blocking thread rather than the async
+            // worker running the lookup.
+            let (hit, miss, bytes) = (
+                base.join(format!("{key}.jpg")),
+                base.join(format!("{key}.miss")),
+                bytes.to_vec(),
+            );
+            tauri::async_runtime::spawn_blocking(move || {
+                let _ = crate::fsutil::write_atomic(&hit, &bytes);
+                let _ = std::fs::remove_file(miss);
+            });
         }
         Outcome::Miss { partial } => {
             let body: &[u8] = if partial { PARTIAL } else { b"" };
@@ -363,21 +368,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
             Cached::Hit(bytes) => return Some((album_key, bytes)),
             Cached::Miss => {}
             Cached::Unknown => {
-                let mut failed = false;
-                let mut found = None;
-                for country in ITUNES_COUNTRIES {
-                    if !priority.alive() {
-                        return None;
-                    }
-                    match itunes(http, wanted, "album", country, priority).await {
-                        Ok(Some(url)) => {
-                            found = Some(url);
-                            break;
-                        }
-                        Ok(None) => {}
-                        Err(()) => failed = true,
-                    }
-                }
+                let (mut found, mut failed) = itunes_albums(http, wanted, priority).await?;
                 if found.is_none() && !priority.alive() {
                     return None;
                 }
@@ -406,6 +397,8 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
         Cached::Hit(bytes) => Some((track_key, bytes)),
         Cached::Miss => None,
         Cached::Unknown => {
+            // Store by store rather than through `itunes_albums`: a song URL
+            // whose download fails is worth trying in the next store.
             let mut failed = false;
             for country in ITUNES_COUNTRIES {
                 if !priority.alive() {
@@ -450,6 +443,28 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
             }
         }
     }
+}
+
+/// Ask each iTunes store in turn for an album's artwork. The first URL found,
+/// and whether any store failed to answer (so a miss is not the full answer);
+/// `None` if the lookup was abandoned for a track skipped past.
+async fn itunes_albums(
+    http: &reqwest::Client,
+    wanted: &Wanted,
+    priority: &Priority,
+) -> Option<(Option<String>, bool)> {
+    let mut failed = false;
+    for country in ITUNES_COUNTRIES {
+        if !priority.alive() {
+            return None;
+        }
+        match itunes(http, wanted, "album", country, priority).await {
+            Ok(Some(url)) => return Some((Some(url), failed)),
+            Ok(None) => {}
+            Err(()) => failed = true,
+        }
+    }
+    Some((None, failed))
 }
 
 async fn get_json(http: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<Value, ()> {

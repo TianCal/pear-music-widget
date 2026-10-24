@@ -23,11 +23,15 @@ fn info(message: impl AsRef<str>) {
 
 /// Returns the process exit code.
 pub async fn run() -> i32 {
-    let host = std::env::var("PMW_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    // The widget's own settings, so the check talks to the server it does;
+    // `PMW_HOST`/`PMW_PORT` override them.
+    let saved = crate::store::peek().unwrap_or_default();
+    let host = std::env::var("PMW_HOST").unwrap_or(saved.host);
     let port = std::env::var("PMW_PORT")
         .ok()
         .and_then(|port| port.parse::<u16>().ok())
-        .unwrap_or(26538);
+        .unwrap_or(saved.port);
+    let api = crate::api::API;
     let base = format!("http://{host}:{port}");
 
     println!("\nChecking {base}\n");
@@ -99,7 +103,7 @@ pub async fn run() -> i32 {
             "Server speaks {} but this widget targets v1",
             versions.join(", ")
         ));
-        info("Update API in src-tauri/src/api.rs and the socket path in src-tauri/src/ws.rs.");
+        info("Update API in src-tauri/src/api.rs; ws.rs builds the socket path from it.");
         code = 1;
     } else {
         let listed = if versions.is_empty() {
@@ -140,7 +144,7 @@ pub async fn run() -> i32 {
 
     // 3. Authenticated read.
     match http
-        .get(format!("{base}/api/v1/song"))
+        .get(format!("{base}{api}/song"))
         .bearer_auth(&token)
         .timeout(Duration::from_secs(3))
         .send()
@@ -167,7 +171,7 @@ pub async fn run() -> i32 {
     }
 
     // 4. Realtime channel.
-    let url = format!("ws://{host}:{port}/api/v1/ws?token={token}");
+    let url = format!("ws://{host}:{port}{api}/ws?token={}", crate::api::urlencode(&token));
     match tokio::time::timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(url)).await {
         Ok(Ok((socket, _))) => {
             let (_sink, mut stream) = socket.split();

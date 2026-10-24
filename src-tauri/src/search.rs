@@ -73,7 +73,7 @@ pub struct QueueTrack {
     /// `LIKE` / `DISLIKE` for a rated local file, so rows can show it. Absent
     /// for YouTube Music, whose queue does not say.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rating: Option<&'static str>,
+    pub rating: Option<crate::likes::Rating>,
 }
 
 /// The whole queue: every slot that names a track, and which of them is playing.

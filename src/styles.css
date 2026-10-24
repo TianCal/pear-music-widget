@@ -1,16 +1,18 @@
 /* --------------------------------------------------------------- tokens */
 
 :root {
-  /* Matches the corner radius macOS applies to a frameless roundedCorners window. */
+  /* `CORNER_RADIUS` in window.rs, until the first `zoom` event replaces it with
+     that radius divided by the zoom. */
   --radius: 12px;
-  --accent: #ff5a6e;
-  --accent-soft: rgba(255, 90, 110, 0.28);
+  /* Until the first cover is sampled: palette.js `FALLBACK`, hsl(352 90% 67%). */
+  --accent: #f75f73;
+  --accent-soft: rgba(247, 95, 115, 0.28);
 
   /* The wash the card is tinted with, generated from the cover — see
      palette.js. Neutral until artwork arrives. */
-  --wash-1: rgba(255, 90, 110, 0.1);
+  --wash-1: rgba(247, 95, 115, 0.1);
   --wash-2: rgba(255, 138, 74, 0.08);
-  --wash-3: rgba(255, 90, 110, 0.06);
+  --wash-3: rgba(247, 95, 115, 0.06);
   --wash-base: rgba(22, 22, 26, 0.4);
 
   --fg: rgba(255, 255, 255, 0.97);
@@ -36,9 +38,9 @@
     --hover: rgba(0, 0, 0, 0.08);
     --well: rgba(255, 255, 255, 0.18);
     --well-item: rgba(0, 0, 0, 0.06);
-    --wash-1: rgba(255, 90, 110, 0.12);
+    --wash-1: rgba(247, 95, 115, 0.12);
     --wash-2: rgba(255, 138, 74, 0.1);
-    --wash-3: rgba(255, 90, 110, 0.07);
+    --wash-3: rgba(247, 95, 115, 0.07);
     --wash-base: rgba(255, 255, 255, 0.36);
     --shadow: 0 16px 36px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.12);
   }
@@ -72,12 +74,12 @@
 @property --accent {
   syntax: '<color>';
   inherits: true;
-  initial-value: #ff5a6e;
+  initial-value: #f75f73;
 }
 @property --accent-soft {
   syntax: '<color>';
   inherits: true;
-  initial-value: rgba(255, 90, 110, 0.28);
+  initial-value: rgba(247, 95, 115, 0.28);
 }
 
 html {
@@ -1631,6 +1633,16 @@ body.skin-stack .upnext:not([hidden]) {
   border-radius: 4px;
   background: var(--hover);
   color: var(--fg);
+}
+
+/* What Rust actually saw go wrong, under the general advice. */
+.setup-detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  opacity: 0.8;
+  overflow-wrap: anywhere;
 }
 
 .setup-actions {

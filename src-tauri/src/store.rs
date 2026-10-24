@@ -43,6 +43,33 @@ pub struct CornerButtons {
     pub playlists: bool,
 }
 
+impl CornerButtons {
+    /// Menu key and label for each button, in menu order. `flag` maps the
+    /// same keys, so a new button is one row here and one arm there.
+    pub const BUTTONS: [(&'static str, &'static str); 7] = [
+        ("queue", "Queue"),
+        ("lyrics", "Lyrics"),
+        ("playlists", "Playlists"),
+        ("search", "Search"),
+        ("shuffle", "Shuffle"),
+        ("repeat", "Repeat"),
+        ("trash", "Delete (local files)"),
+    ];
+
+    pub fn flag(&mut self, key: &str) -> Option<&mut bool> {
+        Some(match key {
+            "queue" => &mut self.queue,
+            "lyrics" => &mut self.lyrics,
+            "playlists" => &mut self.playlists,
+            "search" => &mut self.search,
+            "shuffle" => &mut self.shuffle,
+            "repeat" => &mut self.repeat,
+            "trash" => &mut self.trash,
+            _ => return None,
+        })
+    }
+}
+
 impl Default for CornerButtons {
     fn default() -> Self {
         Self {
@@ -321,7 +348,7 @@ impl Settings {
 
 /// Credit separators YouTube Music and common tag writers use.
 static ARTIST_SEPARATORS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"\s*(?:,|，|&|、|/|;|\bfeat\.?|\bft\.)\s*").expect("separator regex")
+    regex::Regex::new(r"\s*(?:,|，|&|、|/|;|(?-u:\b)feat(?-u:\b)\.?|(?-u:\b)ft\.)\s*").expect("separator regex")
 });
 
 /// Whether `names` has an entry for the whole credit, as `map_artist` tries
@@ -388,13 +415,33 @@ fn settings_path() -> PathBuf {
         .join("settings.json")
 }
 
+/// The settings file as it stands, without touching it; `None` if it is
+/// missing or does not parse. For `--doctor`, which must not move a broken
+/// file aside the way `Store::load` does.
+pub fn peek() -> Option<Settings> {
+    let text = std::fs::read_to_string(settings_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 impl Store {
     pub fn load() -> Self {
         let path = settings_path();
-        let settings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
-            .unwrap_or_default();
+        let settings = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<Settings>(&text).unwrap_or_else(|err| {
+                // The next write would replace a file we could not read with
+                // defaults, losing the token, sizes and saved folders to one
+                // stray comma. Keep it aside so a hand edit can be repaired.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let aside = path.with_extension(format!("json.broken-{stamp}"));
+                eprintln!("[store] settings.json does not parse ({err}); kept as {}", aside.display());
+                let _ = std::fs::rename(&path, &aside);
+                Settings::default()
+            }),
+            Err(_) => Settings::default(),
+        };
         Self {
             path,
             settings: Mutex::new(settings),
@@ -446,17 +493,7 @@ impl Store {
         if *written == text {
             return Ok(());
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = self.path.with_extension("json.tmp");
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temp)?;
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temp, &self.path)?;
+        crate::fsutil::write_atomic(&self.path, text.as_bytes())?;
         *written = text;
         Ok(())
     }
@@ -468,8 +505,8 @@ impl Store {
         self.get(|s| s.corners.get(skin).copied().unwrap_or_default())
     }
 
-    pub fn set_corners_for(&self, skin: &str, corners: CornerButtons) {
-        self.update(|s| {
+    pub fn set_corners_for(self: &Arc<Self>, skin: &str, corners: CornerButtons) {
+        self.update_soon(|s| {
             s.corners.insert(skin.to_string(), corners);
         });
     }

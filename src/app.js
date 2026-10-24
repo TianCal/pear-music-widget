@@ -43,8 +43,8 @@ const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 
  *  skin with no entry has never been changed, so everything is on. */
 const cornersOf = (snapshot) => (snapshot.corners || {})[skinOf(snapshot)] || {};
 
-/** Whether the snapshot's track is a file rather than a stream. */
-const isLocal = (snapshot) => snapshot.song?.mediaType === 'LOCAL';
+/** Whether a local folder is the source, rather than YouTube Music. */
+const isLocal = (snapshot) => snapshot.source === 'local' || snapshot.song?.mediaType === 'LOCAL';
 
 /** The corner buttons this snapshot actually draws. */
 const shownCorners = (snapshot) => {
@@ -58,6 +58,7 @@ const el = {
   card: $('card'),
   player: $('player'),
   cover: $('cover'),
+  art: $('art'),
   titles: document.querySelector('.titles'),
   title: $('title'),
   subtitle: $('subtitle'),
@@ -113,11 +114,16 @@ const el = {
   setupOpen: $('setup-open'),
 };
 
-/** Whether the playlist picker is showing. Declared up here because
- *  `renderStatus` reads it, and can run before the picker's own section. */
+/* What is open on the card. Read across the scripts (status, input, the
+   panels and overlays), so declared here, in the first of them. */
+/** Whether the playlist picker is showing. */
 let pickerOpen = false;
 /** The same, for the artist popup. */
 let artistOpen = false;
+/** 'queue' | 'lyrics' | 'search' | null — see `setPanel` in panels.js. */
+let openPanel = null;
+/** Whether the search panel is up; it owns the keyboard while it is. */
+let searching = false;
 
 /** Latest snapshot from the main process.
  *
@@ -125,7 +131,9 @@ let artistOpen = false;
  *  `queue` and `lyrics` arrive on their own events and are merged in here, so
  *  everything below still reads from one object. */
 let state = {
+  source: 'youtube',
   status: 'connecting',
+  statusMessage: '',
   skin: 'stack',
   panelSkin: 'stack',
   liquidGlass: true,
@@ -156,9 +164,25 @@ let state = {
 // we extrapolate between updates to keep the bar moving between pushes.
 const clock = { position: 0, at: performance.now(), playing: false };
 
+/** Where the playhead is now, interpolated since the last push. */
+const playhead = () => clock.position + (clock.playing ? (performance.now() - clock.at) / 1000 : 0);
+
 let seeking = false;
 let seekPreview = 0;
 let ignorePositionUntil = 0;
+
+/** How long after a seek we issued the pushes still carrying the old position
+ *  are ignored, so the bar does not snap back before the player catches up. */
+const SEEK_ECHO_MS = 1200;
+
+/** Move our playhead to `seconds` now and ask the player to follow. */
+const seekLocally = (seconds) => {
+  clock.position = seconds;
+  clock.at = performance.now();
+  ignorePositionUntil = clock.at + SEEK_ECHO_MS;
+  bumpProgress();
+  send('seek', { seconds });
+};
 
 let skinApplied = null;
 let lastCoverSrc = null;
@@ -387,6 +411,8 @@ const renderStatus = () => {
   else if ((offline || orphaned) && openPanel) setPanel(null);
   if (pickerOpen && (offline || corners.playlists === false)) closePicker();
   if (artistOpen && (offline || isLocal(state))) closeArtist();
+  // The double-click promise only holds while YouTube Music is the source.
+  el.art.title = isLocal(state) ? '' : 'Double-click to open YouTube Music';
 
   if (!showSetup) {
     el.setup.hidden = true;
@@ -399,18 +425,33 @@ const renderStatus = () => {
 
   if (state.status === 'connected') {
     el.setupTitle.textContent = 'Nothing playing';
-    el.setupBody.innerHTML = 'Start a track in YouTube Music and it will show up here.';
+    el.setupBody.textContent = isLocal(state)
+      ? 'Pick a folder from Source in the menu to play it here.'
+      : 'Start a track in YouTube Music and it will show up here.';
     el.setupRetry.hidden = true;
     el.setupOpen.hidden = true;
     return;
   }
 
-  const copy = STATUS_COPY[state.status] || STATUS_COPY.connecting;
-  el.setupTitle.textContent = copy.title;
-  el.setupBody.innerHTML = copy.body;
+  showStatusCopy(state.status, state.statusMessage);
   el.setupRetry.hidden = state.status === 'connecting';
   // Launching the app is the fix for 'offline'; the other states need a retry.
   el.setupOpen.hidden = state.status !== 'offline';
+};
+
+/** The setup screen's words for `status`, plus what actually went wrong when
+ *  Rust said (`statusMessage`): the specific error is what tells a wrong port
+ *  from a server that is not running. */
+const showStatusCopy = (status, detail = '') => {
+  const copy = STATUS_COPY[status] || STATUS_COPY.connecting;
+  el.setupTitle.textContent = copy.title;
+  el.setupBody.innerHTML = copy.body;
+  if (detail) {
+    const line = document.createElement('span');
+    line.className = 'setup-detail';
+    line.textContent = detail;
+    el.setupBody.append(line);
+  }
 };
 
 const renderCover = () => {
@@ -487,365 +528,6 @@ const renderSong = ({ restartMarquee = false } = {}) => {
 
 };
 
-// ------------------------------------------------------------------ queue
-
-/* One channel, two readers: Stack's "Next tracks" strip and the queue panel.
-   The event carries text only — artwork is asked for by id, for the rows a
-   surface is actually showing, because resolving every slot would be megabytes
-   for tracks nobody has scrolled to. */
-
-/** Artwork already resolved, keyed by videoId. Survives a queue change: the
- *  same track scrolled back to is already paid for. The Rust cache has the same
- *  byte and entry ceilings; bounding this copy matters because every webview
- *  owns its own JavaScript heap. Data URLs are ASCII, so a character budget
- *  mirrors the source-byte budget even if the engine's storage differs. */
-const ART_CACHE_CHARS = 4 * 1024 * 1024;
-const ART_CACHE_MAX = 256;
-let artChars = 0;
-
-const artOf = (videoId) => {
-  const art = state.art.get(videoId) || null;
-  if (art) {
-    // Map iteration order is the eviction order. Reinsert a hit to promote it.
-    state.art.delete(videoId);
-    state.art.set(videoId, art);
-  }
-  return art;
-};
-
-const cacheArt = (videoId, art) => {
-  const replaced = state.art.get(videoId);
-  if (replaced) {
-    artChars -= videoId.length + replaced.length;
-    state.art.delete(videoId);
-  }
-
-  state.art.set(videoId, art);
-  artChars += videoId.length + art.length;
-
-  while (state.art.size > ART_CACHE_MAX || artChars > ART_CACHE_CHARS) {
-    const oldestId = state.art.keys().next().value;
-    if (oldestId === undefined) break;
-    const dropped = state.art.get(oldestId);
-    state.art.delete(oldestId);
-    artChars -= oldestId.length + (dropped?.length || 0);
-  }
-};
-
-let artPending = null;
-let artTimer = null;
-
-/** Ask for artwork for `ids`, batched across a frame or two of scrolling so a
- *  drag does not fire a request per row it passes. */
-const wantArt = (ids, size) => {
-  const missing = ids.filter((id) => id && !state.art.has(id));
-  if (!missing.length) return;
-
-  artPending = artPending || { ids: new Set(), size };
-  artPending.size = Math.max(artPending.size, size);
-  for (const id of missing) artPending.ids.add(id);
-
-  clearTimeout(artTimer);
-  artTimer = setTimeout(async () => {
-    const batch = artPending;
-    artPending = null;
-    const reply = await window.widget.queueArt([...batch.ids], batch.size);
-    if (!reply?.ok) return;
-
-    const landed = new Set();
-    for (const [id, art] of Object.entries(reply.art || {})) {
-      cacheArt(id, art);
-      landed.add(id);
-    }
-    // Written straight into whatever is on screen rather than re-rendering: a
-    // reply usually lands mid-scroll, and rebuilding would fight the drag that
-    // asked for it.
-    if (landed.size) paintArt(landed);
-  }, 120);
-};
-
-/** Fill in any still-empty `<img data-art>` among the `ids` that just arrived.
- *  Read straight from the map rather than through `artOf`: promoting every
- *  row in the DOM would make the cache's order mean nothing. An image that
- *  already has a picture keeps it — reading `src` back would only resolve a
- *  data URL to compare it with the one it already is. */
-const paintArt = (ids) => {
-  for (const img of document.querySelectorAll('img[data-art]')) {
-    if (img.hasAttribute('src') || !ids.has(img.dataset.art)) continue;
-    const art = state.art.get(img.dataset.art);
-    if (art) img.src = art;
-  }
-};
-
-/** Ids of the rows in `rows[from, to)` whose image is still empty. A row keeps
- *  its picture after the cache has evicted it, so asking again would fetch
- *  artwork that is already on screen. The image is each row's first child. */
-const unpaintedIds = (rows, from, to) => {
-  const ids = [];
-  for (let at = Math.max(0, from); at < Math.min(rows.length, to); at += 1) {
-    if (!rows[at].firstElementChild.hasAttribute('src')) ids.push(rows[at].dataset.videoId);
-  }
-  return ids;
-};
-
-/** What a list draws from each item. The playing slot is left out on purpose:
- *  it moves once a track, and rebuilding every row — up to 500 of them — to
- *  move one marker was the whole cost of a track change. The title and artist
- *  are in because a rename of an artist re-sends the queue with new text. */
-const queueIdentity = (items) =>
-  items.map((item) => `${item.videoId}:${item.rating || ''}:${item.title}\t${item.artist}`).join('\n');
-
-/** What is currently drawn, so an unchanged queue is left alone. */
-let upnextRendered = null;
-
-const renderUpNext = () => {
-  // Hidden whenever the setup screen is up: a queue from a previous session is
-  // stale the moment YouTube Music goes away.
-  const playerShowing = state.status === 'connected' && !!state.song;
-  el.upnext.hidden = !playerShowing || skinOf(state) !== 'stack';
-  if (el.upnext.hidden) return;
-
-  const { items, current } = state.queue;
-
-  // The queue changes about once a track. Tearing the cards down and building
-  // them again — images and all — on every position tick was most of what this
-  // surface cost while a track played.
-  const identity = queueIdentity(items);
-  if (identity === upnextRendered) {
-    // Same list, so at most the playing mark moves — and only then is it worth
-    // measuring anything to re-centre.
-    const was = el.upnextGrid.querySelector(':scope > .now');
-    const now = el.upnextGrid.children[current] || null;
-    if (was === now) return;
-    was?.classList.remove('now');
-    now?.classList.add('now');
-    centreUpNext();
-    return;
-  }
-  upnextRendered = identity;
-
-  el.upnextGrid.replaceChildren();
-  items.forEach((item, at) => {
-    const card = document.createElement('button');
-    card.className = 'upnext-item';
-    // Only the playing track is marked. Already-played ones are left at full
-    // strength — they are as readable as anything else in the list, and dimming
-    // them made the strip look half broken.
-    if (at === current) card.className += ' now';
-    if (item.rating === 'DISLIKE') card.className += ' disliked';
-    card.type = 'button';
-    // Both: the slot index is what a jump takes, the id is what verifies it.
-    card.dataset.slot = String(item.index);
-    card.dataset.videoId = item.videoId;
-
-    const img = document.createElement('img');
-    img.alt = '';
-    img.dataset.art = item.videoId;
-    const art = artOf(item.videoId);
-    if (art) img.src = art;
-
-    const text = document.createElement('span');
-    text.className = 'upnext-text';
-
-    const name = document.createElement('span');
-    name.className = 'upnext-name';
-    name.textContent = item.title;
-
-    const artist = document.createElement('span');
-    artist.className = 'upnext-artist';
-    artist.textContent = item.artist;
-
-    text.append(name, artist);
-    card.append(img, text);
-    el.upnextGrid.append(card);
-  });
-
-  centreUpNext();
-};
-
-const centreUpNext = () => {
-  // Centre the playing track rather than parking it at the left edge, so what
-  // has just played sits to its left and what is coming to its right — with
-  // three columns that puts it in the middle one. Clamped at zero, so the start
-  // of a queue sits flush left rather than leaving a gap.
-  //
-  // Measured off the card rather than computed from a column width: the column
-  // is a percentage of the content box less the gap, and guessing at that
-  // drifts further with every column.
-  const now = el.upnextGrid.children[state.queue.current ?? 0];
-  if (now) {
-    const centred = now.offsetLeft + now.offsetWidth / 2 - el.upnextGrid.clientWidth / 2;
-    el.upnextGrid.scrollLeft = Math.max(0, centred);
-  }
-  upnextArtInView();
-};
-
-/** Artwork for the cards on screen, plus a screenful either side. */
-const upnextArtInView = () => {
-  // Indexed live rather than copied: this runs on every scroll event, and only
-  // a screenful of the list is wanted.
-  const cards = el.upnextGrid.children;
-  if (!cards.length) return;
-  // Two cards to a column, so a screenful is four and the step is one card's
-  // width plus the gap.
-  const step = (cards[0].offsetWidth || 140) + 8;
-  const first = Math.floor(el.upnextGrid.scrollLeft / step) * 2;
-  wantArt(unpaintedIds(cards, first - 4, first + 12), 128);
-};
-
-el.upnextGrid.addEventListener('scroll', upnextArtInView, { passive: true });
-
-/* The strip only overflows sideways, so a plain wheel would do nothing to it
-   and everything to the volume — the card's own handler owns the wheel.
-   Claiming the event here stops it reaching that handler at all, which is what
-   makes scrolling the queue never touch the sound, and maps a vertical wheel
-   onto the axis that actually moves. */
-el.upnext.addEventListener(
-  'wheel',
-  (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    el.upnextGrid.scrollLeft += event.deltaX || event.deltaY;
-  },
-  { passive: false },
-);
-
-/** What the panel has drawn, so scrolling it does not rebuild it. */
-let queueRendered = null;
-
-/** The equaliser on the playing row, its duration on every other. */
-const setQueueTail = (row, item, playing) => {
-  row.querySelector(':scope > .queue-eq, :scope > .queue-dur')?.remove();
-  if (playing) {
-    const eq = document.createElement('span');
-    eq.className = 'queue-eq';
-    eq.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
-    row.append(eq);
-  } else if (item?.duration) {
-    const dur = document.createElement('span');
-    dur.className = 'queue-dur';
-    dur.textContent = item.duration;
-    row.append(dur);
-  }
-};
-
-/** Scroll the playing row to the middle of the panel. */
-const centreQueue = () => {
-  const now = el.queueList.querySelector(':scope > .now');
-  if (now) {
-    el.queueList.scrollTop = now.offsetTop - el.queueList.clientHeight / 2 + now.offsetHeight / 2;
-  }
-};
-
-/** Which item the panel's `.now` row is, so moving it knows what to restore. */
-let queueNowAt = null;
-
-/** `centre` asks for the playing row in the middle even if nothing changed —
- *  opening the panel does, rather than coming back wherever the last browse
- *  left it. */
-const renderQueue = ({ centre = false } = {}) => {
-  if (el.queue.hidden) return;
-
-  // The note is the panel's only text now that the head is gone, and it earns
-  // its height only when there is something to say. A truncated queue used to
-  // say so with a `+` on the slot count up there; at the foot it sits where the
-  // list actually stops.
-  const { items, current } = state.queue;
-  const note = !items.length ? 'Nothing queued.' : state.queue.truncated ? `First ${items.length}.` : '';
-  el.queueNote.textContent = note;
-  el.queueNote.hidden = !note;
-
-  const identity = queueIdentity(items);
-  if (identity === queueRendered) {
-    // Same list: hand the playing mark and its equaliser over to the new row.
-    // Not re-centred on a track change — the user's scroll position is theirs.
-    const rows = el.queueList.children;
-    if (queueNowAt !== current) {
-      const was = rows[queueNowAt];
-      if (was) {
-        was.classList.remove('now');
-        setQueueTail(was, items[queueNowAt], false);
-      }
-      const now = rows[current];
-      if (now) {
-        now.classList.add('now');
-        setQueueTail(now, items[current], true);
-      }
-      queueNowAt = current;
-    }
-    if (centre) {
-      centreQueue();
-      queueArtInView();
-    }
-    return;
-  }
-  const first = queueRendered === null;
-  queueRendered = identity;
-  queueNowAt = current;
-
-  el.queueList.replaceChildren();
-  items.forEach((item, at) => {
-    const row = document.createElement('button');
-    row.className = 'queue-item';
-    if (at === current) row.className += ' now';
-    if (item.rating === 'DISLIKE') row.className += ' disliked';
-    row.type = 'button';
-    // Both: the slot index is what the jump takes, the id is what verifies it.
-    row.dataset.slot = String(item.index);
-    row.dataset.videoId = item.videoId;
-
-    const img = document.createElement('img');
-    img.alt = '';
-    img.dataset.art = item.videoId;
-    const art = artOf(item.videoId);
-    if (art) img.src = art;
-
-    const text = document.createElement('span');
-    text.className = 'queue-text';
-
-    const name = document.createElement('span');
-    name.className = 'queue-name';
-    name.textContent = item.title;
-
-    const artist = document.createElement('span');
-    artist.className = 'queue-artist';
-    artist.textContent = item.artist;
-
-    text.append(name, artist);
-    row.append(img, text);
-    setQueueTail(row, item, at === current);
-
-    el.queueList.append(row);
-  });
-
-  // Centre the playing track. On the first draw or an open only — after that
-  // the user's scroll position is theirs, and a track change should not yank
-  // the list out from under a browse.
-  if (first || centre) centreQueue();
-  queueArtInView();
-};
-
-/** Artwork for the rows on screen, plus a screenful either side. */
-const queueArtInView = () => {
-  // Indexed live rather than copied, as in the strip: this runs per scroll event.
-  const rows = el.queueList.children;
-  if (!rows.length) return;
-  const row = rows[0].offsetHeight || 40;
-  const first = Math.floor(el.queueList.scrollTop / row);
-  const visible = Math.ceil(el.queueList.clientHeight / row);
-  wantArt(unpaintedIds(rows, first - visible, first + visible * 2), 128);
-};
-
-el.queueList.addEventListener('scroll', queueArtInView, { passive: true });
-
-el.queueList.addEventListener('click', (event) => {
-  const row = event.target.closest('.queue-item');
-  if (!row) return;
-  // By slot index, not just by id: the panel shows already-played rows, and a
-  // forward-only search by id cannot reach those — it would queue a duplicate.
-  jumpTo(Number(row.dataset.slot), row.dataset.videoId);
-});
-
 /* Several player fields share this renderer. `classList.toggle` is already a
    no-op when the class is where it should be; `setAttribute` on a `<use>` is
    not — it re-resolves the reference — and neither is a style write. */
@@ -859,6 +541,11 @@ const REPEAT_TITLE = {
   ONE: 'Repeat: this track',
   NONE: 'Repeat: off',
 };
+
+/** Volume 0 reads as muted even when the player's own mute flag is off. */
+const silent = () => state.muted || state.volume === 0;
+const volumeLevel = () => clamp(state.muted ? 0 : state.volume, 0, 100);
+const volumeGlyph = () => (silent() ? '#i-muted' : '#i-volume');
 
 const renderControls = () => {
   if (written.play !== state.isPlaying) {
@@ -895,21 +582,20 @@ const renderControls = () => {
     el.like.title = like === 'LIKE' ? 'Remove like' : 'Like';
   }
 
-  // Volume 0 reads as muted even when the player's own mute flag is off.
-  const level = clamp(state.muted ? 0 : state.volume, 0, 100);
+  const level = volumeLevel();
   if (written.volume !== level) {
     written.volume = level;
-    const silent = state.muted || state.volume === 0;
     el.volFill.style.width = `${level}%`;
-    el.volumeIcon.firstElementChild.setAttribute('href', silent ? '#i-muted' : '#i-volume');
-    el.mute.classList.toggle('on', silent);
+    el.volumeIcon.firstElementChild.setAttribute('href', volumeGlyph());
+    el.mute.classList.toggle('on', silent());
     el.mute.title = `Volume ${Math.round(level)}%`;
   }
 };
 
 /* The rail's pixel width, cached. Measuring it inside the tick would force a
    layout flush every frame, which is most of what this whole path is trying to
-   avoid. A skin switch and a window resize both change it. */
+   avoid. A skin switch and a window resize both change it; the observer that
+   measures it is in boot.js. */
 let railWidth = 0;
 let seekX = -1; // last `--seek-x` written, in whole pixels
 
@@ -919,10 +605,8 @@ const renderProgress = () => {
 
   if (seeking) {
     position = seekPreview;
-  } else if (clock.playing) {
-    position = clock.position + (performance.now() - clock.at) / 1000;
   } else {
-    position = clock.position;
+    position = playhead();
   }
 
   position = clamp(position, 0, duration || position);
@@ -943,12 +627,6 @@ const renderProgress = () => {
   // actually changes.
   rollLyrics(position);
 };
-
-new ResizeObserver((entries) => {
-  railWidth = entries[entries.length - 1].contentRect.width;
-  seekX = -1; // the cached pixel is against the old width, so force a rewrite
-  renderProgress();
-}).observe(el.rail);
 
 // The playhead is quantised to whole pixels, so display-refresh cadence spends
 // almost every callback rediscovering the same pixel. Ten updates a second are
@@ -1004,6 +682,7 @@ const applyState = (next) => {
   const nextCorners = cornersOf(next);
   const chromeChanged =
     statusChanged ||
+    next.statusMessage !== state.statusMessage ||
     songPresenceChanged ||
     skinChanged ||
     next.cornersAutohide !== state.cornersAutohide ||
@@ -1092,1034 +771,6 @@ const applyLyrics = (view) => {
   bumpProgress();
 };
 
-el.upnextGrid.addEventListener('click', (event) => {
-  // The strip reaches behind the playing track now, and `play_queued`'s
-  // forward-only search cannot serve a card from there — it would queue a
-  // duplicate. Same slot-index jump the queue panel uses.
-  const card = event.target.closest('.upnext-item');
-  if (card) jumpTo(Number(card.dataset.slot), card.dataset.videoId);
-});
-
-/** Jump to a slot, moving our own idea of where the playhead is first.
- *
- *  The jump waits for the player to actually land before the queue is re-read,
- *  which can take a couple of seconds. With four upcoming rows that was
- *  invisible; with the whole list on screen, the wrong row wearing the playing
- *  mark for that long is not. Same bargain the transport already makes: move
- *  optimistically, and let the push correct us either way. */
-const jumpTo = (slot, videoId) => {
-  const at = state.queue.items.findIndex((item) => item.index === slot);
-  if (at >= 0) {
-    state.queue = { ...state.queue, current: at };
-    renderUpNext();
-    renderQueue();
-  }
-  window.widget.playQueueIndex(slot, videoId);
-};
-
-// ------------------------------------------------------------------ lyrics
-
-let lyricLines = [];       // [{ time, text }]
-let lyricSynced = false;
-let lyricActive = -1;
-let lyricManualUntil = 0;
-let lyricManualTimer = null;
-
-// How long a hand scroll holds the roll still before playback takes it back.
-const LYRIC_MANUAL_MS = 5000;
-
-/* What made the roll stutter was never the transition — it was that the target
-   moved underneath it. The active line used to grow from 12px to 13.5px, which
-   reflowed every line below it *while* the glide to it was still running, and
-   `offsetTop` was read back inside the animation frame, forcing a layout flush
-   on every line change.
-
-   So: the emphasis is a transform now (nothing below an active line moves), the
-   geometry is measured once per render, and the glide itself stays a CSS
-   transition — the compositor runs it with no per-frame JavaScript at all. All
-   this code does is write a destination and a duration, twice a verse. */
-let lyricCentres = [];     // the offset that puts each line in the middle
-let lyricRange = [0, 0];   // how far the roll may travel, first line to last
-let lyricMeasured = false;
-/** False until the roll has been put somewhere. The first placement after
- *  opening the panel or changing track snaps: gliding there would mean watching
- *  the words swoop up from the top every time you open the panel. */
-let lyricSettled = false;
-let lyricOffset = 0;
-
-const LYRIC_GLIDE_MIN_MS = 260;
-const LYRIC_GLIDE_MAX_MS = 620;
-/** Milliseconds per pixel travelled, between those two bounds. */
-const LYRIC_GLIDE_PACE = 5;
-
-/** The line being sung sits this far above the true middle. Dead centre reads
- *  as slightly low, because what you want to see next is underneath it — the
- *  lines already sung need less room than the ones coming. */
-const LYRIC_RAISE = 14;
-
-/** Where every line would have to sit to be centred. Costs one layout, taken
- *  when the panel is open and the lines have just changed shape. */
-const measureLyrics = () => {
-  const rows = el.lyricsLines.children;
-  const height = el.lyricsScroll.clientHeight;
-  // Nothing laid out yet — the panel is mid-open. Stay unmeasured and try again
-  // on the next frame rather than caching a viewport of zero.
-  if (!height) return false;
-  const middle = height / 2;
-
-  lyricCentres = [];
-  for (let i = 0; i < rows.length; i += 1) {
-    lyricCentres.push(rows[i].offsetTop + rows[i].offsetHeight / 2 - middle + LYRIC_RAISE);
-  }
-
-  // The roll travels between "first line centred" and "last line centred", and
-  // no further. Clamping the low end at 0 instead is what put the opening lines
-  // up in the top fade and let the closing ones drift down into the bottom one:
-  // a line was being sung while it sat outside the readable band. Both ends are
-  // allowed to be negative — a short lyric simply sits in the middle.
-  const first = lyricCentres[0] ?? 0;
-  const last = lyricCentres[lyricCentres.length - 1] ?? 0;
-  lyricRange = [Math.min(first, last), Math.max(first, last)];
-  lyricMeasured = true;
-  return true;
-};
-
-/** Send the roll to `target`, over a distance-appropriate glide. Two style
- *  writes, and the compositor does the rest. */
-const glideLyricsTo = (target, { instant = false } = {}) => {
-  const to = clamp(target, lyricRange[0], lyricRange[1]);
-  // A line-to-line step should feel immediate; a jump across a seek should not
-  // race. Distance picks where between those the glide lands.
-  const ms =
-    instant ? 0
-    : clamp(Math.abs(to - lyricOffset) * LYRIC_GLIDE_PACE, LYRIC_GLIDE_MIN_MS, LYRIC_GLIDE_MAX_MS);
-
-  lyricOffset = to;
-  el.lyricsLines.style.setProperty('--roll-ms', `${ms}ms`);
-  el.lyricsLines.style.transform = `translateY(${(-to).toFixed(2)}px)`;
-};
-
-/** Scrolling over the lyrics moves the lyrics, not the volume. */
-const scrollLyrics = (deltaY) => {
-  if (!lyricSynced) return; // unsynced is a plain block that scrolls natively
-  if (!lyricMeasured) measureLyrics();
-
-  lyricManualUntil = performance.now() + LYRIC_MANUAL_MS;
-  // Follows the wheel exactly: an eased glide would lag behind the fingers.
-  glideLyricsTo(lyricOffset + deltaY, { instant: true });
-
-  clearTimeout(lyricManualTimer);
-  lyricManualTimer = setTimeout(() => {
-    lyricActive = -1; // force the next tick to re-centre on the playing line
-    bumpProgress();
-  }, LYRIC_MANUAL_MS);
-};
-
-// A resize or a skin change rewraps the lines, so every measurement taken
-// against the old shape is stale.
-new ResizeObserver(() => {
-  lyricMeasured = false;
-  lyricSettled = false;
-  if (openPanel === 'lyrics') {
-    lyricActive = -1;
-    bumpProgress();
-  }
-}).observe(el.lyricsScroll);
-
-const LYRIC_NOTE = {
-  idle: '',
-  loading: 'Looking for lyrics…',
-  none: 'No lyrics found for this track.',
-};
-
-/* No dirty check here any more: the main process pushes the `lyrics` event only
-   when the words or the state actually change, so being called at all is the
-   signal that this has to be rebuilt. */
-const renderLyrics = () => {
-  const data = state.lyrics;
-  lyricLines = data?.lines || [];
-  lyricSynced = !!data?.synced;
-  lyricActive = -1;
-  lyricManualUntil = 0;
-  clearTimeout(lyricManualTimer);
-
-  lyricOffset = 0;
-  lyricMeasured = false;
-  lyricSettled = false;
-  lyricRange = [0, 0];
-
-  el.lyrics.classList.toggle('plain', !!data && !lyricSynced);
-  el.lyricsLines.replaceChildren();
-  el.lyricsLines.style.removeProperty('--roll-ms');
-  el.lyricsLines.style.transform = '';
-
-  if (!lyricLines.length) {
-    el.lyricsNote.textContent = LYRIC_NOTE[state.lyricsState] || LYRIC_NOTE.none;
-    el.lyricsNote.hidden = !el.lyricsNote.textContent;
-    return;
-  }
-
-  el.lyricsNote.textContent = lyricSynced ? '' : 'Unsynced lyrics — these do not follow along.';
-  el.lyricsNote.hidden = lyricSynced;
-
-  lyricLines.forEach((line, index) => {
-    const row = document.createElement(lyricSynced ? 'button' : 'p');
-    row.className = line.text ? 'lyric' : 'lyric gap';
-    if (lyricSynced) {
-      row.type = 'button';
-      row.dataset.index = String(index);
-    }
-    const text = document.createElement('span');
-    text.className = 'lyric-text';
-    text.textContent = line.text;
-    row.append(text);
-    if (line.jyutping) {
-      const jyutping = document.createElement('span');
-      jyutping.className = 'lyric-jyutping';
-      jyutping.textContent = line.jyutping;
-      row.append(jyutping);
-    }
-    el.lyricsLines.append(row);
-  });
-};
-
-/** Effective lyric timing from Rust: Song Time overrides the global Timing.
- *  Positive turns the lines over earlier; seeking subtracts the same shift. */
-const lyricShift = () => state.lyricsOffset || 0;
-
-/** Index of the last line whose timestamp has passed. */
-const lyricIndexAt = (position) => {
-  let lo = 0;
-  let hi = lyricLines.length - 1;
-  let found = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (lyricLines[mid].time <= position) {
-      found = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return found;
-};
-
-/** Called from the rAF tick with the interpolated playhead. */
-const rollLyrics = (position) => {
-  if (openPanel !== 'lyrics' || !lyricSynced || !lyricLines.length) return;
-  // Deferred to here rather than done at render: the panel may well have been
-  // closed then, and a hidden panel has no height to measure against.
-  if (!lyricMeasured && !measureLyrics()) return;
-
-  const index = lyricIndexAt(position + lyricShift());
-  if (index === lyricActive) return;
-  const previous = lyricActive;
-  lyricActive = index;
-
-  // Only the rows whose state actually changed. Repainting the class on all of
-  // them meant a hundred style invalidations per line on a long lyric, to move
-  // one word's worth of emphasis.
-  const rows = el.lyricsLines.children;
-  rows[previous]?.classList.remove('active');
-  rows[index]?.classList.add('active');
-  for (let i = Math.min(previous, index); i < Math.max(previous, index); i += 1) {
-    rows[i]?.classList.toggle('past', i < index);
-  }
-
-  // Leave the roll where the user parked it until their scroll times out.
-  if (performance.now() < lyricManualUntil) return;
-
-  // Centre the active line. Before the first cue there is no active line, so
-  // the roll waits on the opening one rather than pinning the list to the top
-  // and leaving it half inside the fade.
-  glideLyricsTo(lyricCentres[index] ?? lyricRange[0], { instant: !lyricSettled });
-  lyricSettled = true;
-};
-
-const toggleLyrics = () => {
-  if (openPanel === 'lyrics') {
-    setPanel(null);
-    return;
-  }
-  if (searching) resetSearch(false);
-  // Opening lands on the line being sung rather than gliding to it from
-  // wherever the roll happened to be left.
-  lyricActive = -1;
-  lyricMeasured = false;
-  lyricSettled = false;
-  setPanel('lyrics');
-};
-
-el.cornerLyrics.addEventListener('click', (event) => {
-  event.stopPropagation();
-  toggleLyrics();
-});
-
-const toggleQueue = () => {
-  if (openPanel === 'queue') {
-    setPanel(null);
-    return;
-  }
-  if (searching) resetSearch(false);
-  // Re-centred on the playing track each time it is opened, rather than coming
-  // back wherever the last browse left it. Only a changed list is rebuilt.
-  setPanel('queue');
-  renderQueue({ centre: true });
-};
-
-el.cornerQueue.addEventListener('click', (event) => {
-  event.stopPropagation();
-  toggleQueue();
-});
-
-/* Asks first, natively, in Rust: the dialog names the file and the command
-   refuses if the track changed before the answer. Nothing optimistic here — a
-   file only leaves the queue once it is really in the Trash. */
-el.cornerTrash.addEventListener('click', (event) => {
-  event.stopPropagation();
-  if (isLocal(state)) send('trash');
-});
-
-/* Not a panel: it presses the player's repeat button and the bar stays as it
-   was. The press means "the other mode", which is the same rule the command
-   applies in Rust — and like it, a mode we have not been told yet is left alone
-   rather than guessed at, since the round trip is the only thing that knows
-   where the player's own cycle will land. */
-el.cornerRepeat.addEventListener('click', (event) => {
-  event.stopPropagation();
-  if (state.repeat) {
-    state.repeat = (state.repeat || '').toUpperCase() === 'ALL' ? 'ONE' : 'ALL';
-    renderControls();
-  }
-  send('repeat');
-});
-
-/* ----------------------------------------------------------- playlist picker
-
-   YouTube Music playlists and saved folders in one list. Picking a row plays
-   it, switching source first when the row belongs to the other one — so both
-   halves are listed whichever source is playing, and Rust does the switching.
-   The list is fetched fresh unless the hover prefetch below is recent:
-   playlists change in YouTube Music itself, and a drive can come or go. */
-
-/** Bumped on every open and close, so a reply that lands after the picker
- *  was closed (or reopened) is dropped rather than drawn. */
-let pickerSeq = 0;
-
-const pickerNote = (text) => {
-  const note = document.createElement('div');
-  note.className = 'playlists-note';
-  note.textContent = text;
-  return note;
-};
-
-const pickerHead = (text) => {
-  const head = document.createElement('div');
-  head.className = 'playlists-head';
-  head.textContent = text;
-  return head;
-};
-
-/** Covers already resolved, by source URL: reopening draws them at once. */
-const pickerArt = new Map();
-
-const pickerRow = ({ kind, id, title, sub, art, current, disabled }) => {
-  const row = document.createElement('button');
-  row.className = 'result';
-  row.type = 'button';
-  row.setAttribute('role', 'menuitem');
-  row.dataset.kind = kind;
-  row.dataset.id = id;
-  row.disabled = !!disabled;
-  if (current) {
-    row.classList.add('current');
-    row.setAttribute('aria-current', 'true');
-  }
-
-  if (kind === 'folder') {
-    const tile = document.createElement('span');
-    tile.className = 'folder-tile';
-    tile.innerHTML = '<svg><use href="#i-folder" /></svg>';
-    row.append(tile);
-  } else {
-    const img = document.createElement('img');
-    img.alt = '';
-    if (art && pickerArt.get(art)) img.src = pickerArt.get(art);
-    else if (art) img.dataset.art = art;
-    row.append(img);
-  }
-
-  const text = document.createElement('span');
-  text.className = 'result-text';
-  const titleNode = document.createElement('span');
-  titleNode.className = 'result-title';
-  titleNode.textContent = title;
-  const subNode = document.createElement('span');
-  subNode.className = 'result-sub';
-  subNode.textContent = sub || '';
-  text.append(titleNode, subNode);
-  row.append(text);
-  return row;
-};
-
-const renderPicker = (data) => {
-  const youtube = [pickerHead('YouTube Music')];
-  if (!data.youtube?.ok) {
-    youtube.push(pickerNote(data.youtube?.error || 'YouTube Music did not answer.'));
-  } else if (!data.youtube.playlists.length) {
-    youtube.push(pickerNote('No playlists in your library.'));
-  } else {
-    for (const item of data.youtube.playlists) {
-      youtube.push(
-        pickerRow({
-          kind: 'youtube',
-          id: item.id,
-          title: item.title,
-          sub: item.subtitle,
-          art: item.art,
-          current: item.id === data.currentPlaylist,
-        }),
-      );
-    }
-  }
-
-  const folders = [pickerHead('Folders')];
-  if (!data.folders.length) {
-    folders.push(pickerNote('Add a folder from Source > Choose Folder… in the menu.'));
-  }
-  for (const folder of data.folders) {
-    folders.push(
-      pickerRow({
-        kind: 'folder',
-        id: folder.path,
-        title: folder.name,
-        sub: folder.present ? folder.parent : 'Not connected',
-        current: folder.current,
-        disabled: !folder.present,
-      }),
-    );
-  }
-
-  // The source that is playing leads.
-  el.playlistsScroll.replaceChildren(
-    ...(data.local ? [...folders, ...youtube] : [...youtube, ...folders]),
-  );
-  el.playlistsScroll.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
-  loadVisiblePickerArt();
-};
-
-/* Covers come from Rust (the CSP allows data: URLs only), and only for the rows
-   in view: a library of a hundred playlists should not wait on, or fill the
-   image cache with, covers nobody sees. Measured by hand rather than with an
-   IntersectionObserver or animation frames, which a hidden WebKit document —
-   the widget always reports hidden — may never deliver. */
-const PICKER_ART_MARGIN = 60;
-const pickerArtPending = new Set();
-
-const loadVisiblePickerArt = () => {
-  const scroll = el.playlistsScroll;
-  const top = scroll.scrollTop - PICKER_ART_MARGIN;
-  const bottom = scroll.scrollTop + scroll.clientHeight + PICKER_ART_MARGIN;
-  const urls = [];
-  for (const img of scroll.querySelectorAll('img[data-art]')) {
-    const row = img.closest('.result');
-    if (row.offsetTop + row.offsetHeight < top || row.offsetTop > bottom) continue;
-    const url = img.dataset.art;
-    if (!pickerArtPending.has(url)) {
-      pickerArtPending.add(url);
-      urls.push(url);
-    }
-  }
-  if (!urls.length) return;
-  window.widget
-    .playlistArt(urls)
-    .then((reply) => {
-      for (const [url, data] of Object.entries(reply?.art || {})) {
-        if (data) pickerArt.set(url, data);
-      }
-      for (const img of scroll.querySelectorAll('img[data-art]')) {
-        const data = pickerArt.get(img.dataset.art);
-        if (data) {
-          img.src = data;
-          delete img.dataset.art;
-        }
-      }
-    })
-    .catch(() => {})
-    // A failed cover can be asked for again when it scrolls back into view.
-    .finally(() => urls.forEach((url) => pickerArtPending.delete(url)));
-};
-
-// Scroll events belong to the rendering steps a hidden document may skip, so
-// while the picker is open the rows in view are also rechecked on a timer. It
-// measures a few dozen rows and asks for nothing that is already loading.
-const PICKER_ART_CHECK_MS = 300;
-let pickerArtTimer = null;
-
-/** The list fetched when the pointer reached the button. Moving onto it is
- *  the cue that a click may follow, so by the time it does the reply is
- *  usually in. Reused only while fresh: playlists change in YouTube Music
- *  itself, and a drive can come or go. */
-const PICKER_PREFETCH_MS = 15000;
-let pickerPrefetch = null;
-
-const fetchPicker = () => {
-  if (pickerPrefetch && performance.now() - pickerPrefetch.at < PICKER_PREFETCH_MS) {
-    return pickerPrefetch.reply;
-  }
-  const reply = window.widget.playlists().catch(() => null);
-  pickerPrefetch = { at: performance.now(), reply };
-  // A failed fetch is not worth keeping: the click should try again.
-  reply.then((data) => {
-    if (!data?.ok && pickerPrefetch?.reply === reply) pickerPrefetch = null;
-  });
-  return reply;
-};
-
-// Only once the pointer rests there: passing over the button on the way
-// somewhere else should not cost a library fetch.
-const PICKER_HOVER_MS = 150;
-let pickerHoverTimer = null;
-el.cornerPlaylists.addEventListener('pointerenter', () => {
-  clearTimeout(pickerHoverTimer);
-  pickerHoverTimer = setTimeout(() => {
-    if (!pickerOpen) fetchPicker();
-  }, PICKER_HOVER_MS);
-});
-el.cornerPlaylists.addEventListener('pointerleave', () => clearTimeout(pickerHoverTimer));
-
-const openPicker = async () => {
-  if (artistOpen) closeArtist();
-  const seq = ++pickerSeq;
-  pickerOpen = true;
-  el.playlists.hidden = false;
-  el.cornerPlaylists.classList.add('on');
-  el.cornerPlaylists.setAttribute('aria-expanded', 'true');
-  // The bar stays up while the picker hangs from it; see `armCornerFade`.
-  setCornerIdle(false);
-  clearTimeout(cornerIdleTimer);
-  el.playlistsScroll.replaceChildren(pickerNote('Loading playlists…'));
-
-  clearInterval(pickerArtTimer);
-  pickerArtTimer = setInterval(loadVisiblePickerArt, PICKER_ART_CHECK_MS);
-
-  const data = await fetchPicker();
-  if (seq !== pickerSeq) return;
-  if (!data?.ok) {
-    el.playlistsScroll.replaceChildren(pickerNote('Could not load playlists.'));
-    return;
-  }
-  renderPicker(data);
-};
-
-const closePicker = () => {
-  pickerSeq += 1;
-  pickerOpen = false;
-  el.playlists.hidden = true;
-  el.cornerPlaylists.classList.remove('on');
-  el.cornerPlaylists.setAttribute('aria-expanded', 'false');
-  clearInterval(pickerArtTimer);
-  armCornerFade();
-};
-
-el.cornerPlaylists.addEventListener('click', (event) => {
-  event.stopPropagation();
-  if (pickerOpen) closePicker();
-  else openPicker();
-});
-
-/** One pick at a time: a second click while one is starting would race it. */
-let pickerPlaying = false;
-
-el.playlists.addEventListener('click', async (event) => {
-  event.stopPropagation();
-  const row = event.target.closest('.result');
-  if (!row || row.disabled || pickerPlaying) return;
-
-  const seq = pickerSeq;
-  pickerPlaying = true;
-  row.classList.add('busy');
-  let reply;
-  try {
-    reply = await window.widget.playPlaylist(row.dataset.kind, row.dataset.id);
-  } catch (err) {
-    reply = { ok: false, error: String(err) };
-  } finally {
-    pickerPlaying = false;
-  }
-  if (seq !== pickerSeq) return;
-  row.classList.remove('busy');
-  if (reply?.ok) {
-    // What is current just changed, so the kept list is out of date.
-    pickerPrefetch = null;
-    closePicker();
-    return;
-  }
-  const sub = row.querySelector('.result-sub');
-  if (sub) sub.textContent = reply?.error || 'Could not play that.';
-});
-
-// A click anywhere else on the card dismisses it, like a menu.
-document.addEventListener('click', (event) => {
-  if (pickerOpen && !event.target.closest('#playlists, #btn-playlists')) closePicker();
-});
-
-/* ------------------------------------------------------------ artist popup
-
-   The Top songs of every artist on the playing track, one section each,
-   dropped from the credit under the title. A page is ~0.4 s away through the
-   API server, so it is warmed the way the picker is: once the pointer rests
-   on the card, and again if the track changes while it is there. Nothing is
-   fetched just because a track started. Rust keeps pages (see artist.rs) and
-   so does this side, so reopening skips even the IPC. */
-
-let artistSeq = 0;
-
-/** Replies by artist id, or by name for an artist without one:
- *  `{ at, reply, data }`, where `data` is set once a good reply lands so an
- *  open can draw it in the same frame. */
-const ARTIST_REUSE_MS = 10 * 60 * 1000;
-const ARTIST_PAGES_MAX = 24;
-const artistPages = new Map();
-
-/** `query` is YouTube Music's own name, which an artist without an id is
- *  found by; `name` may be an `artistNames` rename. */
-const fetchArtist = ({ id, query }) => {
-  const key = id || `~${query}`;
-  const held = artistPages.get(key);
-  if (held && performance.now() - held.at < ARTIST_REUSE_MS) return held;
-  const entry = { at: performance.now(), data: null };
-  entry.reply = window.widget
-    .artistPage(id, query)
-    .catch((err) => ({ ok: false, error: String(err) }));
-  entry.reply.then((data) => {
-    // A failure is not kept here: Rust decides what is worth asking again.
-    if (data?.ok) entry.data = data;
-    else if (artistPages.get(key) === entry) artistPages.delete(key);
-  });
-  artistPages.delete(key);
-  artistPages.set(key, entry);
-  if (artistPages.size > ARTIST_PAGES_MAX) artistPages.delete(artistPages.keys().next().value);
-  return entry;
-};
-
-/** Artists warmed and shown for one track: a credit can list more names
- *  than a popup has room for. */
-const ARTISTS_MAX = 4;
-const songArtists = () => (state.song?.artists || []).slice(0, ARTISTS_MAX);
-
-/** One artist's section: their name and Play all, then their songs. */
-const artistSection = (artist, data) => {
-  const head = document.createElement('div');
-  head.className = 'artist-pop-head';
-  const name = document.createElement('span');
-  name.className = 'artist-pop-name';
-  name.textContent = artist.name;
-  head.append(name);
-
-  const section = document.createElement('div');
-  section.className = 'artist-section';
-  section.append(head);
-  if (!data) {
-    section.append(pickerNote('Loading top songs…'));
-    return section;
-  }
-  if (!data.ok) {
-    section.append(pickerNote(data.error || 'Could not load this artist.'));
-    return section;
-  }
-  const { songs, allSongs } = data.page;
-  if (allSongs) {
-    const all = document.createElement('button');
-    all.className = 'artist-play-all';
-    all.type = 'button';
-    all.dataset.id = allSongs;
-    all.textContent = 'Play all';
-    head.append(all);
-  }
-  if (!songs.length) section.append(pickerNote('No top songs on YouTube Music.'));
-  for (const song of songs) {
-    const row = pickerRow({
-      kind: 'song',
-      id: song.videoId,
-      title: song.title,
-      sub: song.subtitle,
-      current: song.videoId === state.song?.videoId,
-    });
-    const img = row.querySelector('img');
-    if (song.thumbnail) img.src = song.thumbnail;
-    section.append(row);
-  }
-  return section;
-};
-
-/** Under the subtitle, starting at the credit, kept inside the card. */
-const placeArtistPop = (link) => {
-  const card = el.card.getBoundingClientRect();
-  const line = el.subtitle.parentElement.getBoundingClientRect();
-  const name = link.getBoundingClientRect();
-  const pop = el.artistPop;
-  const top = Math.round(line.bottom - card.top + 4);
-  pop.style.top = `${top}px`;
-  pop.style.maxHeight = `${Math.max(80, card.height - top - 7)}px`;
-  const left = clamp(name.left - card.left - 6, 7, card.width - pop.offsetWidth - 7);
-  pop.style.left = `${Math.round(left)}px`;
-};
-
-/** A section still loading only says so if its reply is not in quickly, so
- *  warm pages never flash a note. */
-const ARTIST_LOADING_NOTE_MS = 150;
-
-const openArtist = (link) => {
-  if (pickerOpen) closePicker();
-  const seq = ++artistSeq;
-  artistOpen = true;
-  const artists = songArtists();
-  const entries = artists.map(fetchArtist);
-  let late = false;
-  const draw = () => {
-    if (seq !== artistSeq) return;
-    const shown = artists
-      .map((artist, i) => {
-        const data = entries[i].data || entries[i].settled || null;
-        return data || late ? artistSection(artist, data) : null;
-      })
-      .filter(Boolean);
-    el.artistPopScroll.replaceChildren(...shown);
-    placeArtistPop(link);
-  };
-
-  el.artistPop.hidden = false;
-  draw();
-  const notes = setTimeout(() => {
-    late = true;
-    draw();
-  }, ARTIST_LOADING_NOTE_MS);
-  // Each section fills in as its page lands, in credit order.
-  for (const entry of entries) {
-    entry.reply.then((data) => {
-      entry.settled = data;
-      draw();
-    });
-  }
-  Promise.all(entries.map((entry) => entry.reply)).then(() => clearTimeout(notes));
-};
-
-const closeArtist = () => {
-  artistSeq += 1;
-  artistOpen = false;
-  el.artistPop.hidden = true;
-};
-
-el.subtitle.addEventListener('click', (event) => {
-  const link = event.target.closest('.artist-link');
-  if (!link) return;
-  event.stopPropagation();
-  if (artistOpen) closeArtist();
-  else openArtist(link);
-});
-
-const ARTIST_CARD_HOVER_MS = 150;
-let pointerOnCard = false;
-let artistWarmTimer = null;
-
-const warmArtists = () => {
-  clearTimeout(artistWarmTimer);
-  artistWarmTimer = setTimeout(() => {
-    if (!pointerOnCard || state.status !== 'connected') return;
-    songArtists().forEach(fetchArtist);
-  }, ARTIST_CARD_HOVER_MS);
-};
-
-el.card.addEventListener('pointerenter', () => {
-  pointerOnCard = true;
-  warmArtists();
-});
-el.card.addEventListener('pointerleave', () => {
-  pointerOnCard = false;
-  clearTimeout(artistWarmTimer);
-});
-
-/** One play at a time, as in the picker. */
-let artistPlaying = false;
-
-el.artistPop.addEventListener('click', async (event) => {
-  event.stopPropagation();
-  const target = event.target.closest('.result, .artist-play-all');
-  if (!target || artistPlaying) return;
-
-  const seq = artistSeq;
-  const all = target.classList.contains('artist-play-all');
-  artistPlaying = true;
-  target.classList.add('busy');
-  let reply;
-  try {
-    reply = all
-      ? await window.widget.playPlaylist('youtube', target.dataset.id)
-      : await window.widget.playResult(target.dataset.id);
-  } catch (err) {
-    reply = { ok: false, error: String(err) };
-  } finally {
-    artistPlaying = false;
-  }
-  if (seq !== artistSeq) return;
-  target.classList.remove('busy');
-  if (reply?.ok) {
-    closeArtist();
-    return;
-  }
-  const sub = all ? null : target.querySelector('.result-sub');
-  if (sub) sub.textContent = reply?.error || 'Could not play that.';
-});
-
-document.addEventListener('click', (event) => {
-  if (artistOpen && !event.target.closest('#artist-pop, .artist-link')) closeArtist();
-});
-
-// Clicking a line seeks to it — the timestamps are right there. `dataset.index`
-// is not tested for truthiness: the first line's is the string "0", which is
-// falsy, and guarding on it is what used to make the opening line unclickable.
-// A `<p>` from an unsynced block has no index at all, so the lookup misses.
-el.lyricsLines.addEventListener('click', (event) => {
-  const row = event.target.closest('.lyric');
-  if (!row || !lyricSynced) return;
-  const line = lyricLines[Number(row.dataset.index)];
-  if (!line) return;
-
-  // Land the audio where this line *sounds*, which is the same correction the
-  // roll is already applying — otherwise a nudged roll would seek you to a
-  // point that then lights up a different line.
-  const seconds = Math.max(0, line.time - lyricShift());
-  clock.position = seconds;
-  clock.at = performance.now();
-  ignorePositionUntil = performance.now() + 1200;
-  bumpProgress();
-  send('seek', { seconds });
-});
-
-// ------------------------------------------------------------------ search
-
-let openPanel = null; // 'queue' | 'lyrics' | 'search' | null
-
-/** Write the open panel to the DOM. Shared by `setPanel` and the teardown the
- *  dropdown's blur pushes at us, so the two can never drift apart. */
-const paintPanel = (which) => {
-  document.body.classList.toggle('panel-open', !!which);
-  for (const panel of PANELS) {
-    el[panel.section].hidden = which !== panel.key;
-    el[panel.corner].classList.toggle('on', which === panel.key);
-  }
-};
-
-const setPanel = (which) => {
-  // A panel opening below would sit under the picker.
-  if (which && pickerOpen) closePicker();
-  if (which && artistOpen) closeArtist();
-  openPanel = which;
-  paintPanel(which);
-  // Opening or closing one is an interaction, so it restarts the countdown
-  // rather than pausing it.
-  el.cornerBar.classList.remove('idle');
-  armCornerFade();
-  return window.widget.setPanel(which);
-};
-
-let searching = false;
-let searchSeq = 0;
-let searchTimer = null;
-let results = [];
-let activeResult = -1;
-
-const SEARCH_DEBOUNCE_MS = 400;
-
-const setNote = (text) => {
-  el.searchNote.textContent = text || '';
-  el.searchNote.hidden = !text;
-};
-
-const renderResults = () => {
-  el.results.replaceChildren();
-
-  results.forEach((item, index) => {
-    const row = document.createElement('button');
-    row.className = 'result';
-    row.type = 'button';
-    row.dataset.index = String(index);
-    if (index === activeResult) row.classList.add('active');
-
-    if (item.thumbnail) {
-      const img = document.createElement('img');
-      img.src = item.thumbnail;
-      img.alt = '';
-      row.append(img);
-    } else {
-      const blank = document.createElement('img');
-      blank.alt = '';
-      row.append(blank);
-    }
-
-    const text = document.createElement('span');
-    text.className = 'result-text';
-
-    const title = document.createElement('span');
-    title.className = 'result-title';
-    title.textContent = item.title;
-
-    const sub = document.createElement('span');
-    sub.className = 'result-sub';
-    sub.textContent = item.subtitle;
-
-    text.append(title, sub);
-    row.append(text);
-    el.results.append(row);
-  });
-};
-
-const highlight = (index) => {
-  if (!results.length) return;
-  activeResult = Math.min(results.length - 1, Math.max(0, index));
-  [...el.results.children].forEach((row, i) => row.classList.toggle('active', i === activeResult));
-  el.results.children[activeResult]?.scrollIntoView({ block: 'nearest' });
-};
-
-const runSearch = async (query) => {
-  const seq = ++searchSeq;
-  const trimmed = query.trim();
-
-  if (!trimmed) {
-    results = [];
-    activeResult = -1;
-    renderResults();
-    setNote('Type to search.');
-    return;
-  }
-
-  setNote('Searching…');
-  const res = await window.widget.search(trimmed);
-  if (seq !== searchSeq || !searching) return; // a newer query won, or we closed
-  // Rust saw an older query start after this one; this is still the newest.
-  if (res?.superseded) return runSearch(query);
-
-  if (!res?.ok) {
-    results = [];
-    renderResults();
-    setNote(res?.error || 'Search failed.');
-    return;
-  }
-
-  results = res.results || [];
-  activeResult = results.length ? 0 : -1;
-  renderResults();
-  setNote(results.length ? '' : 'No results.');
-};
-
-const openSearch = async () => {
-  if (searching || state.status !== 'connected') return;
-  if (pickerOpen) closePicker();
-  if (artistOpen) closeArtist();
-  searching = true;
-  results = [];
-  activeResult = -1;
-  renderResults();
-  setNote('Type to search.');
-  await setPanel('search');
-  el.searchInput.focus();
-  el.searchInput.select();
-};
-
-/** Local teardown; `pushed` is true when main already shrank the window for us. */
-const resetSearch = (pushed) => {
-  searching = false;
-  searchSeq += 1;
-  clearTimeout(searchTimer);
-  el.searchInput.value = '';
-  results = [];
-  activeResult = -1;
-  el.results.replaceChildren();
-  if (pushed) {
-    openPanel = null;
-    paintPanel(null);
-  } else {
-    setPanel(null);
-  }
-};
-
-const closeSearch = () => {
-  if (!searching) return;
-  resetSearch(false);
-};
-
-el.cornerSearch.addEventListener('click', (event) => {
-  event.stopPropagation();
-  if (searching) closeSearch();
-  else openSearch();
-});
-
-el.searchClose.addEventListener('click', (event) => {
-  event.stopPropagation();
-  closeSearch();
-});
-
-el.searchInput.addEventListener('input', () => {
-  clearTimeout(searchTimer);
-  const query = el.searchInput.value;
-  searchTimer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
-});
-
-el.results.addEventListener('click', (event) => {
-  const row = event.target.closest('.result');
-  if (!row) return;
-  const item = results[Number(row.dataset.index)];
-  if (!item) return;
-  window.widget.playResult(item.videoId);
-  closeSearch();
-});
-
-// The dropdown collapses itself when it loses focus; mirror that here.
-window.widget.onPanelCollapsed(() => {
-  if (searching) resetSearch(true);
-  else if (openPanel) {
-    openPanel = null;
-    paintPanel(null);
-  }
-});
-
-// And reopens the queue or lyrics it was last left showing. Main has already
-// sized the window for it; this draws it and tells main someone is watching.
-window.widget.onPanelRestore((which) => {
-  if (openPanel === which || searching) return;
-  if (which === 'lyrics') toggleLyrics();
-  else if (which === 'queue') toggleQueue();
-});
-
-// Double-clicking brings YouTube Music forward. The artwork is the guaranteed
-// target because it opts out of the drag region; the document-level listener
-// covers the rest of the card for the case where the events do get through.
-// Controls are excluded — a double click on one would fire it twice as well.
-const INTERACTIVE =
-  'button, input, .seek, .vol-hit, .result, .upnext-item, .queue-item, .playlists, .artist-link';
-
-const openMusicApp = () => window.widget.openApp();
-
-document.addEventListener('dblclick', (event) => {
-  if (event.target.closest(INTERACTIVE)) return;
-  // The dropdown gets the gesture on the artwork alone. It is a menu, and a
-  // double click on any old part of a menu launching an app would be a
-  // surprise — but the cover carries the tooltip that promises it on both
-  // surfaces, so on the dropdown it was promising nothing.
-  if (IS_PANEL && !event.target.closest('.art')) return;
-  openMusicApp();
-});
-
-// Right-click either surface for a subset of the menu-bar menu — the widget
-// gets its own layout and chrome, the dropdown gets its layout. Inputs keep
-// their own menu, and the heart already uses right-click for dislike.
-document.addEventListener('contextmenu', (event) => {
-  if (event.target.closest('input')) return;
-  event.preventDefault();
-  window.widget.contextMenu();
-});
-
 // ---------------------------------------------------------------- commands
 
 const send = (name, payload) => window.widget.command(name, payload);
@@ -2131,7 +782,7 @@ document.querySelectorAll('[data-cmd]').forEach((button) => {
 
     // Optimistic feedback: the round trip through YouTube Music is ~100ms.
     if (cmd === 'togglePlay') {
-      clock.position = seeking ? seekPreview : clock.position + (clock.playing ? (performance.now() - clock.at) / 1000 : 0);
+      clock.position = seeking ? seekPreview : playhead();
       clock.at = performance.now();
       clock.playing = !clock.playing;
       state.isPlaying = clock.playing;
@@ -2157,341 +808,24 @@ el.like.addEventListener('contextmenu', (event) => {
   send('dislike');
 });
 
-// -------------------------------------------------------------- seek drag
-
-const ratioFromEvent = (event, node) => {
-  const rect = node.getBoundingClientRect();
-  return clamp((event.clientX - rect.left) / rect.width, 0, 1);
-};
-
-/** Pointer capture throws if the id is no longer active; a failed capture just
- *  means the drag ends when the pointer leaves the element. */
-const capturePointer = (node, pointerId) => {
-  try {
-    node.setPointerCapture(pointerId);
-  } catch {
-    /* not capturable */
-  }
-};
-
-el.seek.addEventListener('pointerdown', (event) => {
-  const duration = state.song?.songDuration || 0;
-  if (!duration) return;
-
-  seeking = true;
-  el.seek.classList.add('dragging');
-  capturePointer(el.seek, event.pointerId);
-  seekPreview = ratioFromEvent(event, el.seek) * duration;
-  bumpProgress();
+/* Asks first, natively, in Rust: the dialog names the file and the command
+   refuses if the track changed before the answer. Nothing optimistic here — a
+   file only leaves the queue once it is really in the Trash. */
+el.cornerTrash.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (isLocal(state)) send('trash');
 });
 
-el.seek.addEventListener('pointermove', (event) => {
-  if (!seeking) return;
-  seekPreview = ratioFromEvent(event, el.seek) * (state.song?.songDuration || 0);
-  renderProgress();
-});
-
-const endSeek = (event) => {
-  if (!seeking) return;
-  seeking = false;
-  el.seek.classList.remove('dragging');
-  try {
-    el.seek.releasePointerCapture(event.pointerId);
-  } catch {
-    /* pointer already released */
+/* Not a panel: it presses the player's repeat button and the bar stays as it
+   was. The press means "the other mode", which is the same rule the command
+   applies in Rust — and like it, a mode we have not been told yet is left alone
+   rather than guessed at, since the round trip is the only thing that knows
+   where the player's own cycle will land. */
+el.cornerRepeat.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (state.repeat) {
+    state.repeat = (state.repeat || '').toUpperCase() === 'ALL' ? 'ONE' : 'ALL';
+    renderControls();
   }
-
-  clock.position = seekPreview;
-  clock.at = performance.now();
-  ignorePositionUntil = performance.now() + 1200;
-  bumpProgress();
-  send('seek', { seconds: seekPreview });
-};
-
-el.seek.addEventListener('pointerup', endSeek);
-el.seek.addEventListener('pointercancel', endSeek);
-
-// ------------------------------------------------------------ volume drag
-
-let volumeDragging = false;
-let volumeSendTimer = null;
-let volumePeekTimer = null;
-
-// Every volume we POST comes back as a VOLUME_CHANGED echo. While the user is
-// dragging there are several in flight at once, and the last ones to land are
-// not necessarily the newest — that is what made the slider jump on release.
-// So: throttle what we send, always send the final value, and ignore echoes
-// until the server has had time to settle on it.
-let ignoreVolumeUntil = 0;
-const VOLUME_SETTLE_MS = 900;
-const VOLUME_THROTTLE_MS = 70;
-
-const holdingVolume = () => volumeDragging || performance.now() < ignoreVolumeUntil;
-
-/** Briefly show a wheel or keyboard change, both ways the card has of showing
- *  one: the slider peeks out from under the speaker, and the progress bar turns
- *  into the volume. Which of the two you see is the stylesheet's business — the
- *  speaker is hidden on Stack. */
-const peekVolume = () => {
-  el.volPop.classList.add('peek');
-
-  const level = clamp(state.muted ? 0 : state.volume, 0, 100);
-  el.seekVolFill.style.width = `${level}%`;
-  el.seekVolLevel.textContent = String(Math.round(level));
-  el.seekVolIcon.firstElementChild.setAttribute(
-    'href',
-    state.muted || state.volume === 0 ? '#i-muted' : '#i-volume',
-  );
-  el.seek.classList.add('showing-volume');
-
-  clearTimeout(volumePeekTimer);
-  volumePeekTimer = setTimeout(() => {
-    el.volPop.classList.remove('peek');
-    el.seek.classList.remove('showing-volume');
-  }, 1100);
-};
-
-const flushVolume = () => {
-  clearTimeout(volumeSendTimer);
-  volumeSendTimer = null;
-  send('volume', { volume: Math.round(state.volume) });
-};
-
-const setVolume = (value, { immediate = false } = {}) => {
-  const volume = clamp(value, 0, 100);
-  if (state.muted && volume > 0) state.muted = false;
-  state.volume = volume;
-  ignoreVolumeUntil = performance.now() + VOLUME_SETTLE_MS;
-  renderControls();
-
-  if (immediate) {
-    flushVolume();
-    return;
-  }
-  if (volumeSendTimer) return;
-  volumeSendTimer = setTimeout(() => {
-    volumeSendTimer = null;
-    send('volume', { volume: Math.round(state.volume) });
-  }, VOLUME_THROTTLE_MS);
-};
-
-// Events land on the padded hit area, but the ratio is measured against the
-// visible rail so the ends of the slider map to 0 and 100.
-const volumeFromEvent = (event) => ratioFromEvent(event, el.volRail) * 100;
-
-el.volHit.addEventListener('pointerdown', (event) => {
-  volumeDragging = true;
-  el.volPop.classList.add('dragging');
-  capturePointer(el.volHit, event.pointerId);
-  setVolume(volumeFromEvent(event));
+  send('repeat');
 });
-
-el.volHit.addEventListener('pointermove', (event) => {
-  if (volumeDragging) setVolume(volumeFromEvent(event));
-});
-
-const endVolume = (event) => {
-  if (!volumeDragging) return;
-  volumeDragging = false;
-  el.volPop.classList.remove('dragging');
-  try {
-    el.volHit.releasePointerCapture(event.pointerId);
-  } catch {
-    /* pointer already released */
-  }
-  // Whatever the throttle last sent, the value under the cursor wins.
-  setVolume(state.volume, { immediate: true });
-};
-
-el.volHit.addEventListener('pointerup', endVolume);
-el.volHit.addEventListener('pointercancel', endVolume);
-
-// ------------------------------------------------- wheel / trackpad / keys
-
-// A trackpad emits many small deltas where a mouse wheel emits few large ones.
-// Carrying a float between events lets both feel proportional instead of the
-// trackpad being ignored to rounding.
-let wheelVolume = null;
-let wheelResetTimer = null;
-const WHEEL_SENSITIVITY = 0.12;
-
-el.card.addEventListener(
-  'wheel',
-  (event) => {
-    if (searching) return; // the wheel belongs to the result list
-    if (openPanel === 'lyrics' && event.target.closest('#lyrics')) {
-      scrollLyrics(event.deltaY);
-      return;
-    }
-    // These scroll on their own; the wheel belongs to them, not to volume.
-    if (event.target.closest('#queue, #upnext, #playlists, #artist-pop')) return;
-    if (state.status !== 'connected') return;
-    // With macOS natural scrolling, swiping up reports a positive deltaY, so
-    // adding it is what makes "scroll up" raise the volume.
-    const from = wheelVolume ?? (state.muted ? 0 : state.volume);
-    wheelVolume = clamp(from + event.deltaY * WHEEL_SENSITIVITY, 0, 100);
-
-    clearTimeout(wheelResetTimer);
-    wheelResetTimer = setTimeout(() => {
-      wheelVolume = null;
-    }, 400);
-
-    setVolume(wheelVolume);
-    peekVolume();
-  },
-  { passive: true },
-);
-
-const VOLUME_STEP = 5;
-const VOLUME_STEP_FINE = 1;
-
-// While the search panel is open the arrows belong to the result list, and
-// Escape closes it. Volume only gets the keys once search is out of the way.
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && pickerOpen) {
-    event.preventDefault();
-    closePicker();
-    return;
-  }
-  if (event.key === 'Escape' && artistOpen) {
-    event.preventDefault();
-    closeArtist();
-    return;
-  }
-  if (event.key === 'Escape' && !searching && openPanel) {
-    event.preventDefault();
-    setPanel(null);
-    return;
-  }
-  if (!searching) return;
-
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    closeSearch();
-    return;
-  }
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault();
-    highlight(activeResult + (event.key === 'ArrowDown' ? 1 : -1));
-    return;
-  }
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    clearTimeout(searchTimer);
-    const item = results[activeResult];
-    if (item) {
-      window.widget.playResult(item.videoId);
-      closeSearch();
-    } else {
-      runSearch(el.searchInput.value);
-    }
-  }
-});
-
-// Playback and volume shortcuts belong to the focused surface, outside editors.
-document.addEventListener('keydown', (event) => {
-  if (searching || pickerOpen || artistOpen || event.defaultPrevented || event.isComposing) return;
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
-  if (event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
-  if (state.status !== 'connected') return;
-
-  if (event.key === ' ') {
-    event.preventDefault();
-    if (!event.repeat) el.play.click();
-    return;
-  }
-  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-    const duration = state.song?.songDuration || 0;
-    if (!duration || seeking) return;
-    event.preventDefault();
-    const now = performance.now();
-    const position = clock.position + (clock.playing ? (now - clock.at) / 1000 : 0);
-    clock.position = clamp(position + (event.key === 'ArrowRight' ? 5 : -5), 0, duration);
-    clock.at = now;
-    ignorePositionUntil = now + 1200;
-    bumpProgress();
-    send('seek', { seconds: clock.position });
-    return;
-  }
-  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-
-  event.preventDefault();
-  const step = event.shiftKey ? VOLUME_STEP_FINE : VOLUME_STEP;
-  const from = state.muted ? 0 : state.volume;
-  wheelVolume = null;
-  setVolume(from + (event.key === 'ArrowUp' ? step : -step), { immediate: true });
-  peekVolume();
-});
-
-// ------------------------------------------------------------------- boot
-
-const showConnecting = () => {
-  el.setupTitle.textContent = 'Connecting…';
-  el.setupBody.textContent = 'Looking for the YouTube Music API server.';
-  el.setupRetry.hidden = true;
-  el.setupOpen.hidden = true;
-};
-
-el.setupRetry.addEventListener('click', () => {
-  showConnecting();
-  window.widget.retry();
-});
-
-el.setupOpen.addEventListener('click', () => {
-  el.setupTitle.textContent = 'Starting YouTube Music…';
-  el.setupBody.textContent = 'The widget will connect as soon as the app is up.';
-  el.setupRetry.hidden = true;
-  el.setupOpen.hidden = true;
-  window.widget.openApp();
-});
-
-// The page is authored at a fixed base size and scaled by the main process, so
-// the CSS corner radius has to shrink as the zoom grows to stay flush with the
-// window's own native rounding.
-window.widget.onOnScreen(({ label, shown }) => {
-  if (IS_PANEL || label !== 'widget') return;
-  widgetOnScreen = shown;
-  if (shown) bumpProgress();
-});
-
-window.widget.onZoom((zoom) => {
-  document.documentElement.style.setProperty('--radius', `${(12 / zoom).toFixed(2)}px`);
-});
-
-/* Channels that have heard a live event. Each event is a whole snapshot of its
-   channel, so once one has landed the cold-load reply below is older than what
-   is on screen — applying it anyway put a previous source's song on a card
-   already showing the new source's artwork and queue. */
-const heardLive = new Set();
-const live = (channel, apply) => (payload) => {
-  heardLive.add(channel);
-  apply(payload);
-};
-
-window.widget.onState(live('state', applyState));
-window.widget.onCover(live('cover', applyCover));
-window.widget.onQueue(live('queue', applyQueue));
-window.widget.onQueueArtReady(() => {
-  queueArtInView();
-  upnextArtInView();
-});
-window.widget.onLyrics(live('lyrics', applyLyrics));
-
-// One reply carries all four channels: a window loading from cold cannot wait a
-// track for the artwork to change.
-window.widget.getState().then((boot) => {
-  if (!heardLive.has('cover')) applyCover(boot.cover);
-  if (!heardLive.has('queue')) applyQueue(boot.queue);
-  if (!heardLive.has('lyrics')) applyLyrics(boot.lyrics);
-  if (!heardLive.has('state')) applyState(boot.state);
-
-  // The widget reopens the panel it was left showing. The main process has
-  // already sized the window for it; this is what tells the page to draw it and
-  // the main process that somebody is watching, so the lyrics get fetched.
-  if (!IS_PANEL && boot.panel === 'lyrics') toggleLyrics();
-  else if (!IS_PANEL && boot.panel === 'queue') toggleQueue();
-});
-
-window.addEventListener('resize', refreshMarquees);
-
-bumpProgress();

@@ -5,8 +5,10 @@
 mod api;
 mod artist;
 mod artwork;
+mod audio;
 mod commands;
 mod doctor;
+mod fsutil;
 mod jyutping;
 mod likes;
 mod local;
@@ -32,7 +34,7 @@ use tauri_plugin_autostart::MacosLauncher;
 use crate::api::Api;
 use crate::state::Core;
 use crate::store::Store;
-use crate::window::{WindowState, PANEL, WIDGET};
+use crate::window::{WindowState, DROPDOWN, WIDGET};
 use crate::ws::Realtime;
 
 /// Like state has no push channel. It is re-read on every track change and
@@ -75,14 +77,24 @@ pub fn on_screen(app: &AppHandle, label: &str, shown: bool) {
 /// Quit for real. Windows hide rather than close, so something has to say when
 /// "hide" stops being the right answer.
 pub fn quit(app: &AppHandle) {
-    // Where the folder was left, so the next launch picks it back up.
+    before_exit(app);
+    app.exit(0);
+}
+
+/// Save where the folder was left, so the next launch picks it back up, and
+/// let windows close. Runs once: `quit` calls it and then `exit`, which raises
+/// `ExitRequested` and comes here again; Cmd-Q and logout come only that way.
+fn before_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<WindowState>>() else {
+        return;
+    };
+    if state.is_quitting() {
+        return;
+    }
+    state.begin_quit();
     if let Some(core) = app.try_state::<Arc<Core>>() {
         core.local().remember(&core);
     }
-    if let Some(state) = app.try_state::<Arc<WindowState>>() {
-        state.begin_quit();
-    }
-    app.exit(0);
 }
 
 /// Pressing play when YouTube Music is not up should start it. Resetting the
@@ -98,7 +110,7 @@ pub fn launch_music_app(app: &AppHandle) {
 
     let connected = app
         .try_state::<Arc<Core>>()
-        .map(|core| core.status() == "connected")
+        .map(|core| core.status() == crate::state::Status::Connected)
         .unwrap_or(false);
     if !connected {
         ws::retry(app);
@@ -112,18 +124,15 @@ fn spawn_pollers(core: Arc<Core>) {
         loop {
             ticker.tick().await;
             let snapshot = like.snapshot();
-            if snapshot.status != "connected"
+            if snapshot.status != crate::state::Status::Connected
                 || like.is_local()
                 || snapshot.song.is_none()
                 || !showing_anything(&like.app)
             {
                 continue;
             }
-            if let Ok(Some(value)) = like.api.like_state().await {
-                let state = value
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+            let state = crate::state::like_of(like.api.like_state().await);
+            if state.is_some() {
                 like.update_remote(|player| player.like = state);
             }
         }
@@ -135,7 +144,7 @@ fn spawn_pollers(core: Arc<Core>) {
         loop {
             ticker.tick().await;
             let snapshot = core.snapshot();
-            if snapshot.status != "connected"
+            if snapshot.status != crate::state::Status::Connected
                 || core.is_local()
                 || snapshot.song.is_none()
                 || !showing_anything(&core.app)
@@ -189,8 +198,8 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
         }
 
         // A dropdown that stays up after you click elsewhere is not a dropdown.
-        WindowEvent::Focused(false) if label == PANEL => {
-            if let Some(window) = app.get_webview_window(PANEL) {
+        WindowEvent::Focused(false) if label == DROPDOWN => {
+            if let Some(window) = app.get_webview_window(DROPDOWN) {
                 panel::on_blur(app, &window);
             }
         }
@@ -295,7 +304,6 @@ fn main() {
             commands::open_app,
             commands::search_tracks,
             commands::play_result,
-            commands::play_queued,
             commands::play_queue_index,
             commands::list_playlists,
             commands::play_playlist,
@@ -307,7 +315,6 @@ fn main() {
             commands::hide_widget,
             commands::hide_panel,
             commands::retry,
-            commands::quit,
             sorter::sorter_view,
             sorter::sorter_extras,
             sorter::sorter_choose_folder,
@@ -326,13 +333,7 @@ fn main() {
 
     app.run(|app, event| {
         if let RunEvent::ExitRequested { .. } = event {
-            // Cmd-Q and logout come this way rather than through `quit`.
-            if let Some(core) = app.try_state::<Arc<Core>>() {
-                core.local().remember(&core);
-            }
-            if let Some(state) = app.try_state::<Arc<WindowState>>() {
-                state.begin_quit();
-            }
+            before_exit(app);
         }
     });
 }

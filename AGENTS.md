@@ -30,12 +30,20 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/lyrics.rs` | Lyrics lookup, matching, and LRC parsing |
 | `src-tauri/src/lyrics_cache.rs` | Memory and disk lyrics cache |
 | `src-tauri/src/local.rs` | Local-folder scanning and playback |
+| `src-tauri/src/audio.rs` | Output streams and decoders shared by both local players |
+| `src-tauri/src/fsutil.rs` | Atomic file writes and the stable on-disk hash |
 | `src-tauri/src/artwork.rs` | Online covers for local files, disk cache |
 | `src-tauri/src/likes.rs` | Local like/dislike, stored on the drive |
 | `src-tauri/src/store.rs` | `settings.json` |
 | `src-tauri/src/sorter/` | Sort Songs window: chorus finding, clip player, ratings |
 | `src/bridge.js` | `window.widget` IPC wrapper and dragging |
-| `src/app.js` | Rendering and interaction |
+| `src/app.js` | Shared state, card rendering, commands (loads first) |
+| `src/queue.js` | Next tracks strip, queue panel, their artwork |
+| `src/lyrics.js` | Lyrics panel and roll |
+| `src/overlays.js` | Playlist picker and artist popup |
+| `src/panels.js` | Panel slot, search, card gestures |
+| `src/input.js` | Seek, volume, wheel and keys |
+| `src/boot.js` | Rust event wiring and first state (loads last) |
 | `src/palette.js` | Cover colour extraction |
 | `src/sorter/` | Sort Songs page (its own HTML, CSS and JS) |
 
@@ -66,6 +74,10 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
    stale embedded assets.
 7. **Renderer globals are shared.** Keep `bridge.js` inside its IIFE; duplicate
    top-level declarations across scripts can prevent both scripts from loading.
+   The renderer is several classic scripts in one scope, in `index.html`
+   order. State read by more than one file is declared in `app.js`. Anything
+   whose callback can run before the last script loads (`window.widget.on*`,
+   `ResizeObserver`s, the first state) is wired in `boot.js`.
 8. **Every feature works in both sources.** YouTube Music and Local Music are
    one card, so any control, menu item, panel or setting must be designed and
    tested for both, or must say on screen why it is source-specific (Delete
@@ -90,8 +102,15 @@ The app targets `/api/v1`, verified with YouTube Music 3.12.0.
 - Search/queue: `POST /search`, `POST /queue`, `PATCH /queue`
 - Fork only (TianCal/pear-desktop): `GET /library/playlists`,
   `POST /library/playlists/{id}/play`, `GET /browse/{browseId}`. A 404 means
-  stock pear-desktop; say so on screen rather than failing silently.
-- Auth: `POST /auth/{clientId}`; Bearer token for REST and query token for WS
+  stock pear-desktop; say so on screen rather than failing silently. A 404
+  arrives as `ErrorCode::NotFound`; decide on the code, never on the message.
+- Auth: `POST /auth/{clientId}`; Bearer token for REST and query token for WS.
+  One authorisation at a time (`auth_slot`): concurrent 401s share it, and a
+  late 401 clears the token only if it is still the one that was rejected.
+
+Status, source, repeat and like reach the renderer as their wire strings but
+are enums in Rust (`state::Status`, `Source`, `Repeat`, `Like`). Settings keep
+a folder's repeat as a string so an unknown value cannot fail the file's parse.
 
 Repeat is a button cycle, not a setter. `/switch-repeat` accepts an iteration
 count for `NONE → ALL → ONE → NONE`; `commands::command` calculates the presses.
@@ -163,7 +182,11 @@ Classic was removed; stored `"classic"` values fall back to Stack
 through `valid_skin`. The skin plumbing stays so a new skin is a table row. The renderer does not reflow;
 it zooms by the tighter `width/base_width` ratio. Stored sizes contain only
 width, and height is derived from the skin ratio. The AppKit corner radius stays
-in points, so CSS divides its radius by the zoom.
+in points, so CSS divides its radius by the zoom; the `zoom` event carries both
+(`{ zoom, radius }`) so the radius lives only in `window.rs`. The dropdown's
+window label is `DROPDOWN` ("panel" on disk and in its URL); in code "panel"
+otherwise means the section that opens inside a card. While a panel is open,
+persistence saves the collapsed rectangle, never the slid-up one.
 
 Apply min/max limits before the resize they permit. A visible panel adds its
 height to the window's shape; `shape_of` must be used by every constraint.
@@ -240,8 +263,8 @@ The cache holds 60 entries in memory and JSON files under
 `~/Library/Caches/pear-music-widget/lyrics`. Disk hits return to memory. Evict
 oldest-written files to 90% of `lyricsCacheMb`; `0` disables new caching without
 deleting existing files. Hits do not expire, while misses expire after one week.
-Corrupt records behave as cache misses. Keep `how` mapped to the known static
-source labels.
+Corrupt records behave as cache misses. `how` is the `lyrics::How` enum; an
+unknown stored value reads back as `cached`.
 Lyrics → Cache → Clear negative cache removes remembered misses from disk and
 memory, preserving synced and unsynced hits. Retry a current `none` result after
 clearing; keep cache expiry independent of provider/matching changes.
@@ -505,10 +528,18 @@ from its chorus. ← likes, → dislikes, ↓ skips.
 - **Activation policy.** It is `Regular` while the window is open, so the
   window gets a Dock icon and keyboard focus, and `Accessory` again after it
   closes.
-- **Own player.** It has its own player (`sorter/player.rs`) under the same
-  rules as `local.rs`: fresh decoder and `Sink` per start, never
-  `Sink::clear` or `Sink::try_seek`. Play starts at the chorus and runs to the
-  end of the song. Nothing loops or advances on its own.
+- **Own player.** It has its own player (`sorter/player.rs`) on the same
+  `audio.rs` streams and decoders as `local.rs`: fresh decoder and `Sink` per
+  start, never `Sink::clear` or `Sink::try_seek`. A dead or changed output
+  device restarts the card where it was. Play starts at the chorus and runs
+  to the end of the song. Nothing loops or advances on its own. A restart or
+  seek replaces the sink only if the same card is still up.
+- **Main thread.** Commands that touch the drive (`sorter_rate`,
+  `sorter_undo`) are async and do their work on a blocking thread.
+- **One rating write at a time.** `Sorter.ratings` is held from re-reading
+  the likes file to writing it back, in rate, undo, reset and trash.
+- **Trash.** Trashed songs are taken out of the player too
+  (`Local::forget_tracks`), when it has that folder open.
 - **Lyrics one at a time.** Lookups go through `lyrics::fetch_lyrics`, one at
   a time (`Sorter::lookup`). Run side by side, providers time out and the
   failures are cached as misses for a week. A miss is retried once after 3 s.
@@ -585,12 +616,13 @@ Settings live at
 `~/Library/Application Support/pear-music-widget/settings.json`, preserving the
 legacy Electron path and unknown keys. `Store::write` serialises the latest
 settings under its write lock, skips unchanged text, and writes via temp file,
-`sync_all` and rename: a truncated file would load as defaults and lose the
-token, sizes and saved folders.
+`sync_all` and rename (`fsutil::write_atomic`, which every store uses): a
+truncated file would load as defaults and lose the token, sizes and saved
+folders. A file that does not parse is renamed to `settings.json.broken-<secs>`
+before defaults are used, so a hand edit with a typo can be repaired.
 
 `corners` is keyed by skin. `corners_from_file` must continue accepting the old
-flat shape; a parse failure falls back to defaults and would also lose position,
-sizes, and token. The state snapshot includes the whole map because the two
+flat shape; a parse failure sets the whole file aside and starts from defaults. The state snapshot includes the whole map because the two
 surfaces could use different skins. Menu IDs follow `corner:<skin>:<button>`.
 
 `cornersAutohide` is renderer-driven. Keep the 200 ms `wakeChrome` guard, allow

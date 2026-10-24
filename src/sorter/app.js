@@ -11,15 +11,25 @@
   };
 
   let view = null;
-  let covers = {};
-  let choruses = {};
+  /* Per song, by id. Only the card and the few after it are wanted, so each map
+     keeps the newest `KEEP`: a long sitting on a big folder must not hold
+     every 600 px cover it has shown. */
+  const KEEP = 16;
+  const covers = new Map();
+  const choruses = new Map();
   /** id → lyrics, `null` for none found. Absent while still looking. */
-  let lyricsById = {};
+  const lyricsById = new Map();
+  const keep = (map, id, value) => {
+    map.delete(id);
+    map.set(id, value);
+    while (map.size > KEEP) map.delete(map.keys().next().value);
+  };
   /** Line start times and centres of the rendered lyrics, for the roll. */
   let rolled = { times: [], centres: [], active: -1, offset: 0 };
-  /** Wheel scrolling pauses the roll until then (ms since epoch). */
+  /** Wheel scrolling pauses the roll until then (`performance.now()`). */
   let manualUntil = 0;
-  const MANUAL_MS = 4000;
+  /** The widget's `LYRIC_MANUAL_MS`, so a hand scroll holds as long in both. */
+  const MANUAL_MS = 5000;
   let dragging = false;
   /** A rating sent and its card not yet replaced: ignore further input. */
   let busy = false;
@@ -40,6 +50,10 @@
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => (t.hidden = true), 4000);
   }
+
+  /** `invoke`, with a failure shown rather than left unhandled. Resolves to
+   *  `undefined` when the command failed. */
+  const call = (command, args) => invoke(command, args).catch((err) => toast(String(err)));
 
   // ------------------------------------------------------------- rendering
 
@@ -73,7 +87,7 @@
   function renderChorus() {
     const card = view?.card;
     if (!card) return;
-    const c = choruses[card.id] || card.chorus;
+    const c = choruses.get(card.id) || card.chorus;
     const d = card.duration || 1;
     if (!c) {
       $("chorus-label").textContent = "正在找副歌…";
@@ -88,7 +102,7 @@
 
   function markChorusLines() {
     const card = view?.card;
-    const c = card && (choruses[card.id] || card.chorus);
+    const c = card && (choruses.get(card.id) || card.chorus);
     $("lyrics-lines").querySelectorAll("button").forEach((b) => {
       const t = Number(b.dataset.time);
       b.classList.toggle("chorus", !!c && b.dataset.time !== undefined && t >= c.start && t < c.start + 15);
@@ -106,11 +120,11 @@
     rolled = { times: [], centres: [], active: -1, offset: 0 };
     manualUntil = 0;
     if (!card) return;
-    const words = lyricsById[card.id];
-    if (words === undefined || words === null || !words.lines?.length) {
+    const words = lyricsById.get(card.id);
+    if (!words?.lines?.length) {
       const note = document.createElement("div");
       note.className = "note";
-      note.textContent = words === undefined ? "正在找歌词…" : "没有找到歌词";
+      note.textContent = lyricsById.has(card.id) ? "没有找到歌词" : "正在找歌词…";
       pane.append(note);
       return;
     }
@@ -167,7 +181,7 @@
       rolled.active = active;
       if (active >= 0) box.children[active]?.classList.add("active");
     }
-    if (Date.now() < manualUntil) return;
+    if (performance.now() < manualUntil) return;
     const at = active < 0 ? 0 : active;
     const target = $("lyrics").clientHeight / 2 - centres[at];
     if (Math.abs(target - rolled.offset) > 0.5) setOffset(target, true);
@@ -179,7 +193,7 @@
     (e) => {
       if (!rolled.centres.length) return;
       e.preventDefault();
-      manualUntil = Date.now() + MANUAL_MS;
+      manualUntil = performance.now() + MANUAL_MS;
       setOffset(rolled.offset - e.deltaY, false);
     },
     { passive: false },
@@ -187,15 +201,17 @@
 
   function renderCover() {
     const card = view?.card;
-    const url = card && covers[card.id];
+    const url = card && covers.get(card.id);
     $("cover-img").hidden = !url;
     if (url) $("cover-img").src = url;
     else $("cover-img").removeAttribute("src");
   }
 
   async function render(next) {
-    const changed = view?.card?.id !== next.card?.id;
     await leaving;
+    // Decided after the wait: a second view for the same card can arrive while
+    // the last one leaves, and must not count as a change once this one lands.
+    const changed = view?.card?.id !== next.card?.id;
     view = next;
     renderStatus();
     if (view.scanning) {
@@ -251,10 +267,11 @@
 
   /** Catch up on a cover or lyrics sent before this page was listening. */
   async function fetchExtras(id) {
-    if (covers[id] !== undefined && lyricsById[id] !== undefined) return;
-    const got = await invoke("sorter_extras", { id });
-    if ("cover" in got && covers[id] === undefined) covers[id] = got.cover;
-    if ("lyrics" in got && lyricsById[id] === undefined) lyricsById[id] = got.lyrics;
+    if (covers.has(id) && lyricsById.has(id)) return;
+    const got = await call("sorter_extras", { id });
+    if (!got) return;
+    if ("cover" in got && !covers.has(id)) keep(covers, id, got.cover);
+    if ("lyrics" in got && !lyricsById.has(id)) keep(lyricsById, id, got.lyrics);
     if (view?.card?.id === id) {
       renderCover();
       renderLyrics();
@@ -313,18 +330,19 @@
   function skip() {
     if (busy || !view?.card || view.remaining < 2) return;
     busy = true;
-    invoke("sorter_skip").finally(() => (busy = false));
+    call("sorter_skip").finally(() => (busy = false));
   }
 
   function undo() {
     if (busy || !view?.canUndo) return;
-    invoke("sorter_undo");
+    call("sorter_undo");
   }
 
   // ----------------------------------------------------------------- sheet
 
   async function openSheet() {
-    const rows = await invoke("sorter_disliked");
+    const rows = await call("sorter_disliked");
+    if (!rows) return;
     const list = $("sheet-list");
     list.replaceChildren(
       ...rows.map((row) => {
@@ -395,13 +413,13 @@
 
   $("folder").onclick = chooseFolder;
   $("review").onclick = openSheet;
-  $("reset").onclick = () => invoke("sorter_reset_ratings");
+  $("reset").onclick = () => call("sorter_reset_ratings");
   $("like").onclick = () => decide(true);
   $("dislike").onclick = () => decide(false);
   $("skip").onclick = skip;
   $("undo").onclick = undo;
-  $("play").onclick = () => invoke("sorter_toggle_play");
-  $("replay").onclick = () => invoke("sorter_replay");
+  $("play").onclick = () => call("sorter_toggle_play");
+  $("replay").onclick = () => call("sorter_replay");
 
   // Drag (or click) anywhere on the bar to play from there.
   const track = $("track");
@@ -463,9 +481,9 @@
       ArrowLeft: () => decide(true),
       ArrowRight: () => decide(false),
       ArrowDown: skip,
-      " ": () => invoke("sorter_toggle_play"),
-      r: () => invoke("sorter_replay"),
-      R: () => invoke("sorter_replay"),
+      " ": () => call("sorter_toggle_play"),
+      r: () => call("sorter_replay"),
+      R: () => call("sorter_replay"),
     };
     const run = keys[e.key];
     if (run && view?.card) {
@@ -478,15 +496,15 @@
 
   listen("sorter-view", (e) => render(e.payload));
   listen("sorter-cover", (e) => {
-    covers[e.payload.id] = e.payload.url;
+    keep(covers, e.payload.id, e.payload.url);
     if (view?.card?.id === e.payload.id) renderCover();
   });
   listen("sorter-chorus", (e) => {
-    choruses[e.payload.id] = e.payload.chorus;
+    keep(choruses, e.payload.id, e.payload.chorus);
     if (view?.card?.id === e.payload.id) renderChorus();
   });
   listen("sorter-lyrics", (e) => {
-    lyricsById[e.payload.id] = e.payload.lyrics;
+    keep(lyricsById, e.payload.id, e.payload.lyrics);
     if (view?.card?.id === e.payload.id) renderLyrics();
   });
   listen("sorter-progress", (e) => {
@@ -501,5 +519,5 @@
   });
   listen("sorter-error", (e) => toast(e.payload));
 
-  invoke("sorter_view").then((v) => v && render(v));
+  call("sorter_view").then((v) => v && render(v));
 })();

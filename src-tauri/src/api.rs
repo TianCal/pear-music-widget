@@ -6,8 +6,8 @@
 //! CSP closed to the network *and* lets `<canvas>` read the pixels for colour
 //! extraction without cross-origin tainting.
 //!
-//! If the plugin bumps to `/api/v2`: change `API` here and the socket path in
-//! `ws.rs`. Verified against YouTube Music 3.12.0.
+//! If the plugin bumps to `/api/v2`: change `API` here; `ws.rs` and the
+//! doctor build their paths from it. Verified against YouTube Music 3.12.0.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -50,12 +50,16 @@ const IMAGE_CACHE_MAX: usize = 256;
 ///   Offline      - nothing listening; YouTube Music closed or API Server plugin disabled
 ///   Unauthorized - no token yet, or the stored token was rejected
 ///   Denied       - the user pressed "Deny" on the in-app authorisation dialog
+///   NotFound     - HTTP 404: the route or the thing it names does not exist
+///   NoBrowse     - the API server has no `/browse` (stock pear-desktop)
 ///   Error        - anything else
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     Offline,
     Unauthorized,
     Denied,
+    NotFound,
+    NoBrowse,
     Error,
 }
 
@@ -206,10 +210,16 @@ pub struct Api {
     /// delays one they did.
     searches_waiting: std::sync::atomic::AtomicUsize,
     queue_slot: tokio::sync::Mutex<()>,
+    /// Held while asking for a token. Requests that all hit a 401 at once
+    /// (a rotated secret under `refresh_all`'s `join!`) would otherwise each
+    /// open YouTube Music's authorisation dialog.
+    auth_slot: tokio::sync::Mutex<()>,
 }
 
 /// `browse`'s error when the API server has no `/browse` (stock pear-desktop).
 pub const NO_BROWSE: &str = "Artist pages need TianCal/pear-desktop's API server";
+/// `library_playlists`' error for the same reason.
+const NO_PLAYLISTS: &str = "Playlists need TianCal/pear-desktop's API server";
 
 impl Api {
     pub fn new(store: Arc<Store>) -> Self {
@@ -225,6 +235,7 @@ impl Api {
             search_slot: tokio::sync::Mutex::new(()),
             searches_waiting: std::sync::atomic::AtomicUsize::new(0),
             queue_slot: tokio::sync::Mutex::new(()),
+            auth_slot: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -237,7 +248,7 @@ impl Api {
     /// Ask the API server for a JWT. Pops a dialog inside YouTube Music the
     /// first time, so this deliberately has no timeout: it blocks until the
     /// user answers.
-    pub async fn authorize(&self) -> Result<String> {
+    async fn authorize(&self) -> Result<String> {
         let url = format!(
             "{}/auth/{}",
             self.store.http_base(),
@@ -275,7 +286,7 @@ impl Api {
             .ok_or_else(|| ApiError::new(ErrorCode::Error, "Auth response contained no token"))?
             .to_string();
 
-        self.store.update(|s| s.token = Some(token.clone()));
+        self.store.update_soon(|s| s.token = Some(token.clone()));
         Ok(token)
     }
 
@@ -285,6 +296,11 @@ impl Api {
     /// network, so a dead API server produces no error *here at all*. The
     /// websocket's close is the only signal — see `ws.rs`.
     pub async fn ensure_token(&self) -> Result<String> {
+        if let Some(token) = self.store.get(|s| s.token.clone()) {
+            return Ok(token);
+        }
+        let _turn = self.auth_slot.lock().await;
+        // Someone else may have been authorised while we queued.
         match self.store.get(|s| s.token.clone()) {
             Some(token) => Ok(token),
             None => self.authorize().await,
@@ -292,7 +308,17 @@ impl Api {
     }
 
     pub fn clear_token(&self) {
-        self.store.update(|s| s.token = None);
+        self.store.update_soon(|s| s.token = None);
+    }
+
+    /// Forget `used` after the server rejected it — unless a newer token has
+    /// already replaced it, which a late 401 must not throw away.
+    fn reject_token(&self, used: &str) {
+        self.store.update_soon(|s| {
+            if s.token.as_deref() == Some(used) {
+                s.token = None;
+            }
+        });
     }
 
     // --------------------------------------------------------------- request
@@ -325,7 +351,7 @@ impl Api {
             let status = res.status().as_u16();
 
             if status == 401 || status == 403 {
-                self.clear_token();
+                self.reject_token(&token);
                 if !retried {
                     retried = true;
                     continue;
@@ -339,10 +365,8 @@ impl Api {
                 return Ok(None);
             }
             if !res.status().is_success() {
-                return Err(ApiError::new(
-                    ErrorCode::Error,
-                    format!("HTTP {status} on {path}"),
-                ));
+                let code = if status == 404 { ErrorCode::NotFound } else { ErrorCode::Error };
+                return Err(ApiError::new(code, format!("HTTP {status} on {path}")));
             }
 
             let text = res.text().await.map_err(|err| classify(&err))?;
@@ -511,6 +535,14 @@ impl Api {
         )
         .await
         .map(|value| value.unwrap_or(Value::Null))
+        .map_err(|err| {
+            // Stock pear-desktop has no `/library/playlists` either.
+            if err.code == ErrorCode::NotFound {
+                ApiError::new(ErrorCode::NoBrowse, NO_PLAYLISTS)
+            } else {
+                err
+            }
+        })
     }
 
     /// A raw browse page, such as an artist's (`UC…`); `search::parse_artist_page`
@@ -525,8 +557,8 @@ impl Api {
             .map(|value| value.unwrap_or(Value::Null))
             .map_err(|err| {
                 // Stock pear-desktop has no `/browse`; it comes with the fork.
-                if err.message.starts_with("HTTP 404") {
-                    ApiError::new(ErrorCode::Error, NO_BROWSE)
+                if err.code == ErrorCode::NotFound {
+                    ApiError::new(ErrorCode::NoBrowse, NO_BROWSE)
                 } else {
                     err
                 }
@@ -551,7 +583,7 @@ impl Api {
         .map_err(|err| {
             // 404: YouTube Music gave no songs for it. "Episodes for later" is
             // the usual one — a podcast list the music queue will not take.
-            if err.message.starts_with("HTTP 404") {
+            if err.code == ErrorCode::NotFound {
                 ApiError::new(ErrorCode::Error, "YouTube Music can't play this one")
             } else {
                 err
@@ -648,8 +680,8 @@ mod tests {
     }
 }
 
-/// Minimal percent-encoding for the one path segment we interpolate.
-fn urlencode(value: &str) -> String {
+/// Minimal percent-encoding for a path segment or query value.
+pub fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {

@@ -13,8 +13,8 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::api::{COVER_PX, THUMB_PX};
 use crate::search;
-use crate::state::{Bootstrap, Core};
-use crate::window::{self, PANEL, WIDGET};
+use crate::state::{Bootstrap, Core, Repeat};
+use crate::window::{self, DROPDOWN, WIDGET};
 
 /// Backoff for waiting on the player after an insert or a jump: a handful of
 /// checks, early ones close together, rather than a fixed-rate burst. Each
@@ -156,7 +156,7 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
             .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }));
     }
 
-    if PLAYBACK_COMMANDS.contains(&name.as_str()) && core.status() == "offline" {
+    if PLAYBACK_COMMANDS.contains(&name.as_str()) && core.status() == crate::state::Status::Offline {
         crate::launch_music_app(&app);
         return json!({ "ok": true, "launched": true });
     }
@@ -197,16 +197,16 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
         // two presses to do anything visible.
         "repeat" => {
             let known = core.snapshot().repeat;
-            let (target, presses) = match known.as_deref() {
-                Some("ALL") => ("ONE", 1),
-                Some("ONE") => ("ALL", 2),
-                _ => ("ALL", 1),
+            let (target, presses) = match known {
+                Some(Repeat::All) => (Repeat::One, 1),
+                Some(Repeat::One) => (Repeat::All, 2),
+                _ => (Repeat::All, 1),
             };
             // Optimistic, exactly as `togglePlay` is — but only from a mode we
             // actually knew. From an unknown one the press lands somewhere we
             // cannot predict, so the read-back below is the first honest answer.
             if known.is_some() {
-                core.update(|state| state.repeat = Some(target.to_string()));
+                core.update(|state| state.repeat = Some(target));
             }
 
             let result = core.api.switch_repeat(presses).await;
@@ -214,11 +214,10 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
                 // REPEAT_CHANGED covers this too, but only once the player's own
                 // observer fires; reading back is what makes the button correct
                 // itself when it does not.
-                let mode = core.api.repeat_mode().await.ok().flatten().and_then(|value| {
-                    value.get("mode").and_then(Value::as_str).map(str::to_string)
-                });
+                let mode = crate::state::repeat_of(core.api.repeat_mode().await);
                 if mode.is_some() {
-                    core.update(|state| state.repeat = mode);
+                    // A folder may have taken over while this was out.
+                    core.update_remote(|state| state.repeat = mode);
                 }
             }
             result
@@ -230,10 +229,11 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
                 core.api.dislike().await
             };
             if result.is_ok() {
-                let like = core.api.like_state().await.ok().flatten().and_then(|value| {
-                    value.get("state").and_then(Value::as_str).map(str::to_string)
-                });
-                core.update(|state| state.like = like);
+                // A failed read says nothing about the heart: keep it.
+                let like = crate::state::like_of(core.api.like_state().await);
+                if like.is_some() {
+                    core.update_remote(|state| state.like = like);
+                }
             }
             result
         }
@@ -471,12 +471,12 @@ pub async fn playlist_art(app: AppHandle, urls: Vec<String>) -> Value {
 /// A typed reply rather than `json!`: the page's covers are `data:` URLs, and
 /// building a `Value` would copy them once more before Tauri serialises it.
 #[tauri::command]
-pub async fn artist_page(app: AppHandle, id: String, name: String) -> ArtistReply {
+pub async fn artist_page(app: AppHandle, id: String, query: String) -> ArtistReply {
     let core = core(&app);
     if core.is_local() {
         return ArtistReply::failed("Artist pages are a YouTube Music feature".into());
     }
-    match crate::artist::page(&core.api, &id, &name).await {
+    match crate::artist::page(&core.api, &id, &query).await {
         Ok(page) => ArtistReply { ok: true, page: Some(page), error: None },
         Err(failed) => ArtistReply::failed(failed.message),
     }
@@ -682,11 +682,11 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     // lyrics or the queue, both modes you left open. Not a search: that is a
     // query you have finished with. Only while connected: going offline closes
     // the panel on its own, and that is not you choosing to close it.
-    if core.status() == "connected" {
+    if core.status() == crate::state::Status::Connected {
         let remembered = which
             .clone()
             .filter(|which| window::panel_is_restorable(which));
-        let dropdown = window.label() == PANEL;
+        let dropdown = window.label() == DROPDOWN;
         let stored = core.store.get(|s| {
             if dropdown {
                 s.dropdown_panel.clone()
@@ -709,7 +709,7 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     // with the setters it posts (see AGENTS.md, main-thread rules).
     let (handle, target, panel) = (app.clone(), window.clone(), which.clone());
     let _ = app.run_on_main_thread(move || {
-        if target.label() == PANEL {
+        if target.label() == DROPDOWN {
             crate::panel::set_expanded(&handle, &target, panel.as_deref());
         } else {
             window::set_expanded(&handle, &target, panel.as_deref());
@@ -717,7 +717,7 @@ pub fn set_panel(app: AppHandle, window: WebviewWindow, which: Option<String>) -
     });
 
     // A hidden dropdown keeps its panel but wants nothing; showing it asks again.
-    let watching = window.label() != PANEL || crate::panel::is_visible(&app);
+    let watching = window.label() != DROPDOWN || crate::panel::is_visible(&app);
     core.set_lyrics_wanted(window.label(), watching && which.as_deref() == Some("lyrics"));
     core.set_queue_wanted(window.label(), watching && which.as_deref() == Some("queue"));
 
@@ -851,7 +851,7 @@ pub fn context_menu(app: AppHandle, window: WebviewWindow) {
         let Some(target) = handle.get_webview_window(&label) else {
             return;
         };
-        if label == PANEL {
+        if label == DROPDOWN {
             if let Ok(menu) = crate::tray::build_panel_menu(&handle) {
                 crate::panel::popup_menu(&handle, &target, &menu);
             }
@@ -876,7 +876,7 @@ pub fn hide_widget(app: AppHandle) {
 /// Escape inside the dropdown closes it, like a real menu.
 #[tauri::command]
 pub fn hide_panel(app: AppHandle) {
-    if let Some(panel) = app.get_webview_window(PANEL) {
+    if let Some(panel) = app.get_webview_window(DROPDOWN) {
         crate::panel::hide(&app, &panel);
     }
 }
@@ -885,11 +885,6 @@ pub fn hide_panel(app: AppHandle) {
 pub fn retry(app: AppHandle) -> Value {
     crate::ws::retry(&app);
     json!({ "ok": true })
-}
-
-#[tauri::command]
-pub fn quit(app: AppHandle) {
-    crate::quit(&app);
 }
 
 #[cfg(test)]

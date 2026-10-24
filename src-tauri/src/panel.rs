@@ -13,7 +13,7 @@ use window_vibrancy::NSVisualEffectMaterial;
 use crate::macos;
 use crate::state::Core;
 use crate::store::Store;
-use crate::window::{self, Rect, PANEL};
+use crate::window::{self, Rect, DROPDOWN};
 
 const EDGE_MARGIN: f64 = 8.0;
 const GAP_BELOW_MENU_BAR: f64 = 6.0;
@@ -61,7 +61,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // which skin to follow and drops the resize edges.
     let panel = WebviewWindowBuilder::new(
         app,
-        PANEL,
+        DROPDOWN,
         WebviewUrl::App("index.html?mode=panel".into()),
     )
     .title("Perch Player")
@@ -108,9 +108,7 @@ fn resize(app: &AppHandle, panel: &WebviewWindow) -> Rect {
         .unwrap_or(0.0);
 
     let height = size.1 + extra;
-    let area = window::work_area_matching(app, bounds);
-    let max_y = area.y + area.height - height;
-    let y = bounds.y.min(max_y.max(area.y)).round();
+    let y = window::fit_top(window::work_area_matching(app, bounds), bounds.y, height);
 
     let rect = Rect {
         x: bounds.x,
@@ -148,8 +146,8 @@ fn expanded_by(app: &AppHandle) -> Option<String> {
 /// Tell `Core` whether the dropdown's open panel is worth fetching for.
 fn set_wanted(app: &AppHandle, open: Option<&str>) {
     if let Some(core) = app.try_state::<Arc<Core>>() {
-        core.set_lyrics_wanted(PANEL, open == Some("lyrics"));
-        core.set_queue_wanted(PANEL, open == Some("queue"));
+        core.set_lyrics_wanted(DROPDOWN, open == Some("lyrics"));
+        core.set_queue_wanted(DROPDOWN, open == Some("queue"));
     }
 }
 
@@ -172,7 +170,7 @@ fn collapse(app: &AppHandle, panel: &WebviewWindow) {
         return;
     }
     set_expanded(app, panel, None);
-    let _ = app.emit_to(PANEL, "panel-collapsed", ());
+    let _ = app.emit_to(DROPDOWN, "panel-collapsed", ());
 }
 
 /// Before the dropdown shows: reopen the panel it was last left showing if it
@@ -181,7 +179,7 @@ fn restore(app: &AppHandle) {
     let open = expanded_by(app).or_else(|| {
         let connected = app
             .try_state::<Arc<Core>>()
-            .is_some_and(|core| core.status() == "connected");
+            .is_some_and(|core| core.status() == crate::state::Status::Connected);
         let remembered = app
             .state::<Arc<Store>>()
             .get(|s| s.dropdown_panel.clone())
@@ -190,7 +188,7 @@ fn restore(app: &AppHandle) {
         // Sized here, before the window is on screen, so it drops at its full
         // height; the renderer's own `set_panel` then finds nothing to do.
         *state(app).expanded_by.lock().expect("panel lock") = Some(remembered.clone());
-        let _ = app.emit_to(PANEL, "panel-restore", remembered.clone());
+        let _ = app.emit_to(DROPDOWN, "panel-restore", remembered.clone());
         Some(remembered)
     });
     set_wanted(app, open.as_deref());
@@ -201,7 +199,7 @@ fn restore(app: &AppHandle) {
 /// up — from either starting point, and `toggle` would reopen it from the one
 /// where the first click had just closed it.
 pub fn dismiss(app: &AppHandle) {
-    let Some(panel) = app.get_webview_window(PANEL) else {
+    let Some(panel) = app.get_webview_window(DROPDOWN) else {
         return;
     };
     if state(app).visible.load(Ordering::SeqCst) || panel.is_visible().unwrap_or(false) {
@@ -211,7 +209,7 @@ pub fn dismiss(app: &AppHandle) {
 
 pub fn hide(app: &AppHandle, panel: &WebviewWindow) {
     let _ = panel.hide();
-    crate::on_screen(app, PANEL, false);
+    crate::on_screen(app, DROPDOWN, false);
     collapse(app, panel);
     let state = state(app);
     state.visible.store(false, Ordering::SeqCst);
@@ -259,10 +257,9 @@ fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) -> Rect {
         .and_then(window::panel_height)
         .unwrap_or(0.0);
     let height = size.1 + extra;
-    let max_y = area.y + area.height - height;
     let rect = Rect {
         x,
-        y: y.min(max_y.max(area.y)).round(),
+        y: window::fit_top(area, y, height),
         width: size.0,
         height,
     };
@@ -271,7 +268,7 @@ fn position(app: &AppHandle, panel: &WebviewWindow, icon: Rect) -> Rect {
 }
 
 pub fn toggle(app: &AppHandle, icon: Rect) {
-    let Some(panel) = app.get_webview_window(PANEL) else {
+    let Some(panel) = app.get_webview_window(DROPDOWN) else {
         return;
     };
     let state = state(app);
@@ -296,6 +293,6 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
     window::apply_zoom_to(app, &panel, rect);
     state.visible.store(true, Ordering::SeqCst);
     let _ = panel.show();
-    crate::on_screen(app, PANEL, true);
+    crate::on_screen(app, DROPDOWN, true);
     let _ = panel.set_focus();
 }

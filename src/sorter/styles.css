@@ -235,7 +235,9 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 }
 .lyrics-lines button:hover { background: var(--fill); }
 .lyrics-lines button.chorus { color: var(--secondary); }
-.lyrics-lines button.active { color: var(--label); font-weight: 600; transform: scale(1.06); }
+/* Emphasis by scale and colour only: a bolder weight could rewrap the line and
+   move every centre measured for the roll. */
+.lyrics-lines button.active { color: var(--label); transform: scale(1.06); }
 .lyrics-lines button.gap { min-height: 10px; padding: 0; }
 .lyrics .note {
   position: absolute;

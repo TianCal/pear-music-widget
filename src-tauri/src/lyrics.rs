@@ -1,9 +1,9 @@
 //! Synced lyrics from YouTube Music, LRCLib, and Kugeci. The
 //! api-server exposes no lyrics route, so the widget has to ask for them itself.
 //!
-//! **This is the only place the app talks to anything other than localhost.**
-//! Keep it that way: the renderer's CSP allows no network at all, so anything
-//! fetched has to come through here. Hosts are `lrclib.net`,
+//! **This and `artwork.rs` are the only places the app talks to anything other
+//! than localhost.** Keep it that way: the renderer's CSP allows no network at
+//! all, so anything fetched has to come through Rust. Hosts are `lrclib.net`,
 //! `music.youtube.com`, and `www.kugeci.com`; requests use the track's title,
 //! artist and video id.
 
@@ -42,20 +42,35 @@ pub struct Lyrics {
     pub lines: Vec<LyricLine>,
     /// Which of the matching tiers found it; useful when a track comes back
     /// with someone else's words.
-    pub how: &'static str,
+    pub how: How,
 }
 
-/// The lookup tiers, by name, for a record read back off disk — `how` is a
-/// `&'static str` and stays one. Anything else came from a file someone edited,
-/// and says so.
-pub fn how_from(name: &str) -> &'static str {
-    match name {
-        "exact" => "exact",
-        "cleaned" => "cleaned",
-        "search" => "search",
-        "ytmusic" => "ytmusic",
-        "kugeci" => "kugeci",
-        _ => "cached",
+/// The lookup tier that found a set of lyrics. Stored in the disk cache and
+/// sent to the renderer as its lowercase name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum How {
+    Exact,
+    Cleaned,
+    Search,
+    Ytmusic,
+    Kugeci,
+    /// A record whose tier is not one of the above: a file someone edited.
+    #[serde(other)]
+    Cached,
+}
+
+impl std::fmt::Display for How {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            How::Exact => "exact",
+            How::Cleaned => "cleaned",
+            How::Search => "search",
+            How::Ytmusic => "ytmusic",
+            How::Kugeci => "kugeci",
+            How::Cached => "cached",
+        };
+        f.write_str(name)
     }
 }
 
@@ -91,8 +106,11 @@ static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap(
 static STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(\d+):(\d{1,2}(?:[.:]\d{1,3})?)\]").unwrap());
 static BRACKETED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\]]*\]").unwrap());
-static ARTIST_SPLIT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)、|,|&|\band\b|feat\.?|ft\.?|with").unwrap());
+/// Separators are whole words, but against ASCII letters only (`(?-u:\b)`): a
+/// Han character next to "feat." is a boundary, so "陈奕迅feat.王菲" splits.
+static ARTIST_SPLIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)、|,|&|(?-u:\b)(?:and|with|feat|ft)(?-u:\b)\.?").unwrap()
+});
 
 /// YouTube Music titles carry a lot that LRCLib will not match on — bracketed
 /// soundtrack credits, 《…》 wrappers, "Official Music Video". Strip them for the
@@ -152,7 +170,7 @@ pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
 }
 
 /// Turn an LRCLib record into what the roll needs, preferring synced words.
-fn shape(record: Option<&Value>, how: &'static str) -> Option<Lyrics> {
+fn shape(record: Option<&Value>, how: How) -> Option<Lyrics> {
     let record = record?;
 
     if let Some(synced) = record.get("syncedLyrics").and_then(Value::as_str) {
@@ -362,7 +380,7 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
             return Some(Lyrics {
                 synced: true,
                 lines,
-                how: "ytmusic",
+                how: How::Ytmusic,
             });
         }
     }
@@ -397,7 +415,7 @@ pub fn shape_ytmusic(browse: &Value) -> Option<Lyrics> {
         .then(|| Lyrics {
             synced: false,
             lines,
-            how: "ytmusic",
+            how: How::Ytmusic,
         })
 }
 
@@ -462,17 +480,13 @@ fn kugeci_title_matches(candidate: &str, title: &str) -> bool {
             .any(|title| kugeci_key(title) == candidate)
 }
 
+/// `artwork::fold`, plus 迴→回, which the site's titles use interchangeably.
 fn kugeci_key(text: &str) -> String {
-    fast2s::convert(text)
-        .replace('迴', "回")
-        .to_lowercase()
-        .chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .collect()
+    crate::artwork::fold(text).replace('迴', "回")
 }
 
 static KUGECI_ARTIST_SPLIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)、|,|，|/|&|\band\b|\bfeat\.?|\bft\.?|\bwith\b|和|与|與|及").unwrap()
+    Regex::new(r"(?i)、|,|，|/|&|(?-u:\b)(?:and|with|feat|ft)(?-u:\b)\.?|和|与|與|及").unwrap()
 });
 
 fn kugeci_artist_key(artist: &str) -> String {
@@ -621,7 +635,7 @@ fn shape_kugeci(html: &str, title: &str, artist: &str, duration: f64) -> Option<
     Some(Lyrics {
         synced: true,
         lines,
-        how: "kugeci",
+        how: How::Kugeci,
     })
 }
 
@@ -850,39 +864,18 @@ async fn lookup_streamed(http: &reqwest::Client, song: &Song) -> Option<Lyrics> 
 
     // 2. Exact, with everything we know.
     if result.is_none() && !title.is_empty() && !artist.is_empty() {
-        let mut params = vec![
-            ("track_name", title.clone()),
-            ("artist_name", artist.clone()),
-        ];
-        if !song.album.is_empty() {
-            params.push(("album_name", song.album.clone()));
-        }
-        if duration > 0.0 {
-            params.push(("duration", format!("{duration:.0}")));
-        }
-        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
-        result = shape(payload.as_ref(), "exact");
+        result = lrclib_exact(http, &title, &artist, &song.album, duration).await;
     }
 
     // 3. Exact again on a cleaned title, without album or duration to pin it.
     let simple = clean_title(&title);
     if result.is_none() && !simple.is_empty() && simple != title && !artist.is_empty() {
-        let params = [
-            ("track_name", simple.clone()),
-            ("artist_name", artist.clone()),
-        ];
-        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
-        result = shape(payload.as_ref(), "cleaned");
+        result = lrclib_cleaned(http, &simple, &artist).await;
     }
 
     // 4. Free-text search — this is what rescues soundtrack and 《…》 titles.
     if result.is_none() && !simple.is_empty() {
-        let q = format!("{simple} {artist}").trim().to_string();
-        let payload = request(http, &format!("/search?{}", query_string(&[("q", q)]))).await;
-        result = payload
-            .as_ref()
-            .and_then(|hits| best_search_hit(hits, duration))
-            .and_then(|hit| shape(Some(hit), "search"));
+        result = lrclib_search(http, &simple, &artist, duration, None).await;
     }
 
     // 5. Kugeci carries timed lyrics for Chinese tracks the other sources miss.
@@ -921,15 +914,8 @@ async fn lookup_local(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
 
     // 1.
     if !title.is_empty() && !artist.is_empty() {
-        let mut params = vec![("track_name", title.clone()), ("artist_name", artist.clone())];
-        if !song.album.is_empty() {
-            params.push(("album_name", song.album.clone()));
-        }
-        if duration > 0.0 {
-            params.push(("duration", format!("{duration:.0}")));
-        }
-        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
-        if let Some(found) = settle(shape(payload.as_ref(), "exact"), &mut plain) {
+        let found = lrclib_exact(http, &title, &artist, &song.album, duration).await;
+        if let Some(found) = settle(found, &mut plain) {
             return Some(found);
         }
     }
@@ -944,22 +930,15 @@ async fn lookup_local(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
     // 3.
     let simple = clean_title(&title);
     if !simple.is_empty() && simple != title && !artist.is_empty() {
-        let params = [("track_name", simple.clone()), ("artist_name", artist.clone())];
-        let payload = request(http, &format!("/get?{}", query_string(&params))).await;
-        if let Some(found) = settle(shape(payload.as_ref(), "cleaned"), &mut plain) {
+        if let Some(found) = settle(lrclib_cleaned(http, &simple, &artist).await, &mut plain) {
             return Some(found);
         }
     }
 
     // 4.
     if !simple.is_empty() {
-        let q = format!("{simple} {artist}").trim().to_string();
-        let payload = request(http, &format!("/search?{}", query_string(&[("q", q)]))).await;
-        let hit = payload
-            .as_ref()
-            .and_then(|hits| best_search_hit(hits, duration))
-            .filter(|hit| within_duration(hit, duration));
-        if let Some(found) = settle(hit.and_then(|hit| shape(Some(hit), "search")), &mut plain) {
+        let found = lrclib_search(http, &simple, &artist, duration, Some(LOCAL_DURATION_SLACK)).await;
+        if let Some(found) = settle(found, &mut plain) {
             return Some(found);
         }
     }
@@ -972,6 +951,50 @@ async fn lookup_local(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
     }
 
     plain
+}
+
+/// LRCLib exact match with everything known; LRCLib checks the duration.
+async fn lrclib_exact(
+    http: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration: f64,
+) -> Option<Lyrics> {
+    let mut params = vec![("track_name", title.to_string()), ("artist_name", artist.to_string())];
+    if !album.is_empty() {
+        params.push(("album_name", album.to_string()));
+    }
+    if duration > 0.0 {
+        params.push(("duration", format!("{duration:.0}")));
+    }
+    let payload = request(http, &format!("/get?{}", query_string(&params))).await;
+    shape(payload.as_ref(), How::Exact)
+}
+
+/// LRCLib exact match on a cleaned title, without album or duration to pin it.
+async fn lrclib_cleaned(http: &reqwest::Client, title: &str, artist: &str) -> Option<Lyrics> {
+    let params = [("track_name", title.to_string()), ("artist_name", artist.to_string())];
+    let payload = request(http, &format!("/get?{}", query_string(&params))).await;
+    shape(payload.as_ref(), How::Cleaned)
+}
+
+/// LRCLib free-text search, ranked by duration. With `slack`, a best hit
+/// further than that from `duration` is rejected.
+async fn lrclib_search(
+    http: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: f64,
+    slack: Option<f64>,
+) -> Option<Lyrics> {
+    let q = format!("{title} {artist}").trim().to_string();
+    let payload = request(http, &format!("/search?{}", query_string(&[("q", q)]))).await;
+    let hit = payload
+        .as_ref()
+        .and_then(|hits| best_search_hit(hits, duration))
+        .filter(|hit| slack.is_none_or(|slack| within_duration(hit, duration, slack)))?;
+    shape(Some(hit), How::Search)
 }
 
 /// How far a local file's duration may be from a search hit's.
@@ -992,9 +1015,9 @@ fn settle(found: Option<Lyrics>, plain: &mut Option<Lyrics>) -> Option<Lyrics> {
 
 /// An LRCLib hit within `LOCAL_DURATION_SLACK` of the file, or any hit when
 /// either duration is unknown.
-fn within_duration(hit: &Value, duration: f64) -> bool {
+fn within_duration(hit: &Value, duration: f64, slack: f64) -> bool {
     match hit.get("duration").and_then(Value::as_f64) {
-        Some(theirs) if duration > 0.0 && theirs > 0.0 => (theirs - duration).abs() <= LOCAL_DURATION_SLACK,
+        Some(theirs) if duration > 0.0 && theirs > 0.0 => (theirs - duration).abs() <= slack,
         _ => true,
     }
 }
@@ -1052,7 +1075,7 @@ async fn find_ytmusic_video(
 mod local_order_tests {
     use super::*;
 
-    fn words(synced: bool, how: &'static str) -> Lyrics {
+    fn words(synced: bool, how: How) -> Lyrics {
         Lyrics {
             synced,
             lines: Vec::new(),
@@ -1063,10 +1086,10 @@ mod local_order_tests {
     #[test]
     fn settle_stops_on_synced_and_keeps_the_first_plain() {
         let mut plain = None;
-        assert!(settle(Some(words(false, "exact")), &mut plain).is_none());
-        assert!(settle(Some(words(false, "search")), &mut plain).is_none());
-        assert_eq!(plain.as_ref().map(|w| w.how), Some("exact"));
-        assert_eq!(settle(Some(words(true, "kugeci")), &mut plain).map(|w| w.how), Some("kugeci"));
+        assert!(settle(Some(words(false, How::Exact)), &mut plain).is_none());
+        assert!(settle(Some(words(false, How::Search)), &mut plain).is_none());
+        assert_eq!(plain.as_ref().map(|w| w.how), Some(How::Exact));
+        assert_eq!(settle(Some(words(true, How::Kugeci)), &mut plain).map(|w| w.how), Some(How::Kugeci));
     }
 
     #[test]
@@ -1089,10 +1112,10 @@ mod local_order_tests {
         let near = serde_json::json!({ "duration": 271.0 });
         let far = serde_json::json!({ "duration": 300.0 });
         let unknown = serde_json::json!({});
-        assert!(within_duration(&near, 272.0));
-        assert!(!within_duration(&far, 272.0));
-        assert!(within_duration(&unknown, 272.0));
-        assert!(within_duration(&far, 0.0));
+        assert!(within_duration(&near, 272.0, LOCAL_DURATION_SLACK));
+        assert!(!within_duration(&far, 272.0, LOCAL_DURATION_SLACK));
+        assert!(within_duration(&unknown, 272.0, LOCAL_DURATION_SLACK));
+        assert!(within_duration(&far, 0.0, LOCAL_DURATION_SLACK));
     }
 
     /// `cargo test local_lyrics_live -- --ignored --nocapture` — hits the network.
@@ -1156,7 +1179,7 @@ mod tests {
         let words = Lyrics {
             synced: false,
             lines: Vec::new(),
-            how: "ytmusic",
+            how: How::Ytmusic,
         };
         let mut cache = (
             vec!["miss".into(), "found".into()],
@@ -1185,8 +1208,7 @@ mod tests {
         )
         .unwrap();
         assert!(lyrics.synced);
-        assert_eq!(lyrics.how, "kugeci");
-        assert_eq!(how_from(lyrics.how), "kugeci");
+        assert_eq!(lyrics.how, How::Kugeci);
         assert_eq!(lyrics.lines.len(), 3);
         assert_eq!(lyrics.lines[0].text, "First & second");
         assert_eq!(lyrics.lines[0].time, Some(1.2));
@@ -1333,7 +1355,7 @@ mod tests {
             .await
             .expect("uploader title resolves to synced Kugeci lyrics");
         assert!(words.synced);
-        assert_eq!(words.how, "kugeci");
+        assert_eq!(words.how, How::Kugeci);
         assert!(words.lines.len() > 20);
     }
 
@@ -1423,7 +1445,7 @@ mod tests {
                 .await
                 .unwrap_or_else(|| panic!("no result for {title}"));
             assert!(words.synced);
-            assert_eq!(words.how, "kugeci");
+            assert_eq!(words.how, How::Kugeci);
             assert!(words.lines.len() > 20);
         }
     }
@@ -1441,7 +1463,7 @@ mod tests {
             .await
             .expect("explicit video title credit resolves to Kugeci");
         assert!(words.synced);
-        assert_eq!(words.how, "kugeci");
+        assert_eq!(words.how, How::Kugeci);
     }
 
     #[tokio::test]
@@ -1456,7 +1478,7 @@ mod tests {
         .await
         .expect("alternate title matches the same recording");
         assert!(words.synced);
-        assert_eq!(words.how, "kugeci");
+        assert_eq!(words.how, How::Kugeci);
     }
 
     #[tokio::test]
@@ -1508,7 +1530,7 @@ mod tests {
             .await
             .expect("current track matches the collaboration and timings");
         assert!(words.synced);
-        assert_eq!(words.how, "kugeci");
+        assert_eq!(words.how, How::Kugeci);
         assert!(words.lines.len() > 20);
     }
 
@@ -1519,7 +1541,7 @@ mod tests {
             .await
             .expect("supplied song found through title search");
         assert!(words.synced);
-        assert_eq!(words.how, "kugeci");
+        assert_eq!(words.how, How::Kugeci);
         assert!(words.lines.len() > 20);
     }
 
@@ -1588,7 +1610,7 @@ mod tests {
         .expect("synced lyrics");
 
         assert!(lyrics.synced);
-        assert_eq!(lyrics.how, "ytmusic");
+        assert_eq!(lyrics.how, How::Ytmusic);
         // A held-open first line, so the roll does not sit on the opening lyric
         // through the intro.
         assert_eq!(lyrics.lines[0].time, Some(0.0));
@@ -1644,6 +1666,16 @@ mod tests {
         assert_eq!(lead_artist("A、B"), "A");
         assert_eq!(lead_artist("A & B"), "A");
         assert_eq!(lead_artist("Solo"), "Solo");
+        assert_eq!(lead_artist("A ft. B"), "A");
+        assert_eq!(lead_artist("A with B"), "A");
+        // Separators are whole words, not letters inside a name.
+        assert_eq!(lead_artist("Taylor Swift"), "Taylor Swift");
+        assert_eq!(lead_artist("Bill Withers"), "Bill Withers");
+        assert_eq!(lead_artist("Daft Punk"), "Daft Punk");
+        assert_eq!(lead_artist("Feather Lane"), "Feather Lane");
+        // Glued to Han characters, as Chinese credits often are.
+        assert_eq!(lead_artist("陈奕迅feat.王菲"), "陈奕迅");
+        assert_eq!(lead_artist("周杰倫ft.費玉清"), "周杰倫");
     }
 }
 

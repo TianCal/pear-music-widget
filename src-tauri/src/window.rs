@@ -24,7 +24,9 @@ use crate::macos;
 use crate::store::{Position, StoredSize, Store};
 
 pub const WIDGET: &str = "widget";
-pub const PANEL: &str = "panel";
+/// The menu-bar dropdown's window. Its label is "panel" for history; in code
+/// "panel" means the queue/lyrics/search section that opens inside a card.
+pub const DROPDOWN: &str = "panel";
 
 /// Natural size per skin. A flat table on purpose — there are no variants and no
 /// automatic switching, so dragging an edge only ever scales the skin showing.
@@ -218,6 +220,12 @@ fn primary_work_area(app: &AppHandle) -> Rect {
         })
 }
 
+/// `y` moved up, if need be, so a window `height` tall stays inside `area`,
+/// but never above its top.
+pub fn fit_top(area: Rect, y: f64, height: f64) -> f64 {
+    y.min((area.y + area.height - height).max(area.y)).round()
+}
+
 /// The work area of the display holding most of `rect`, falling back to the
 /// primary one.
 pub fn work_area_matching(app: &AppHandle, rect: Rect) -> Rect {
@@ -320,7 +328,7 @@ pub fn apply_zoom(app: &AppHandle, window: &WebviewWindow) {
 /// the previous skin's scale, stranded in a corner of the new one.
 pub fn apply_zoom_to(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
     let store = app.state::<Arc<Store>>();
-    let skin = if window.label() == PANEL {
+    let skin = if window.label() == DROPDOWN {
         panel_skin_of(&store)
     } else {
         skin_of(&store)
@@ -336,8 +344,13 @@ pub fn apply_zoom_to(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
 
     let _ = window.set_zoom(zoom);
     // The corner radius is fixed in device pixels, so the CSS radius has to
-    // shrink as the page scales up or the two stop lining up.
-    let _ = app.emit_to(window.label(), "zoom", zoom);
+    // shrink as the page scales up or the two stop lining up. Sent with the
+    // zoom so the renderer never keeps its own copy of the number.
+    let _ = app.emit_to(
+        window.label(),
+        "zoom",
+        serde_json::json!({ "zoom": zoom, "radius": CORNER_RADIUS }),
+    );
 }
 
 // ------------------------------------------------------------------ chrome
@@ -511,8 +524,9 @@ pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow) {
 // ------------------------------------------------------------- persistence
 
 /// Debounced write of position and per-skin width. Growing for a panel is our
-/// own doing and must never be persisted as the user's preferred size, so the
-/// caller checks `expanded_by` first.
+/// own doing and must never be persisted as the user's preferred geometry:
+/// while a panel is open the collapsed rectangle is what gets saved, since the
+/// expanded window may have slid up to fit the screen.
 pub fn schedule_persist(app: &AppHandle) {
     let state = state(app).inner().clone();
     let seq = state.persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -527,7 +541,9 @@ pub fn schedule_persist(app: &AppHandle) {
             return;
         };
         let store = app.state::<Arc<Store>>().inner().clone();
-        let rect = bounds_of(&window);
+        let collapsed =
+            state.with_extras(WIDGET, |extras| extras.expanded_by.as_ref().and(extras.collapsed));
+        let rect = collapsed.unwrap_or_else(|| bounds_of(&window));
 
         // One write, not one per field, and off this async worker.
         let skin = skin_of(&store);
@@ -575,9 +591,7 @@ pub fn set_expanded(app: &AppHandle, window: &WebviewWindow, panel: Option<&str>
         let height = collapsed.height + (extra * zoom).round();
 
         // Slide up if the taller window would hang off the bottom of the screen.
-        let area = work_area_matching(app, collapsed);
-        let max_y = area.y + area.height - height;
-        let y = collapsed.y.min(max_y.max(area.y)).round();
+        let y = fit_top(work_area_matching(app, collapsed), collapsed.y, height);
 
         let shape = shape_of(&skin_of(&app.state::<Arc<Store>>()), Some(which));
         apply_size_limits(window, shape);

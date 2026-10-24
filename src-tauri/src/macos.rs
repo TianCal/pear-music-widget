@@ -113,11 +113,13 @@ pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
 /// percentages. The alert is dispatched onto AppKit's thread and returns its
 /// result through the callback, so menu handling never reaches across threads.
 pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
-    prompt_number(
+    prompt_field(
         app,
-        c"Custom Widget Opacity",
-        c"Enter a whole number from 1 to 100%.",
+        "Custom Widget Opacity".into(),
+        "Enter a whole number from 1 to 100%.".into(),
         (current.clamp(0.01, 1.0) * 100.0).round().to_string(),
+        "Apply",
+        220.0,
         move |text| {
             if let Ok(percent) = text.trim().parse::<u32>() {
                 if (1..=100).contains(&percent) {
@@ -129,72 +131,19 @@ pub fn prompt_opacity(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + S
 }
 
 pub fn prompt_song_time(app: &AppHandle, current: f64, apply: impl FnOnce(f64) + Send + 'static) {
-    prompt_number(
-        app, c"Custom Song Time",
-        c"Enter seconds from -20 to 20. Positive moves lyrics earlier; negative moves them later. Decimals are allowed.",
+    prompt_field(
+        app,
+        "Custom Song Time".into(),
+        "Enter seconds from -20 to 20. Positive moves lyrics earlier; negative moves them later. Decimals are allowed.".into(),
         current.to_string(),
+        "Apply",
+        220.0,
         move |text| {
             if let Ok(seconds) = text.trim().parse::<f64>() {
                 if seconds.is_finite() && (-20.0..=20.0).contains(&seconds) { apply(seconds); }
             }
         },
     );
-}
-
-/// Shared native numeric entry. Callers validate units and range before saving.
-fn prompt_number(
-    app: &AppHandle,
-    title: &'static CStr,
-    detail: &'static CStr,
-    current: String,
-    apply: impl FnOnce(String) + Send + 'static,
-) {
-    let _ = app.run_on_main_thread(move || unsafe {
-        let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
-        let field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
-        let field: *mut AnyObject = msg_send![field, initWithFrame: NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(220.0, 24.0),
-        )];
-
-        let message: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: title.as_ptr()
-        ];
-        let detail: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: detail.as_ptr()
-        ];
-        let apply_title: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Apply".as_ptr()];
-        let cancel_title: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Cancel".as_ptr()];
-        let value = CString::new(current).expect("numeric value contains no NUL");
-        let value: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: value.as_ptr()];
-
-        let _: () = msg_send![alert, setMessageText: message];
-        let _: () = msg_send![alert, setInformativeText: detail];
-        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: apply_title];
-        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: cancel_title];
-        let _: () = msg_send![field, setStringValue: value];
-        let _: () = msg_send![alert, setAccessoryView: field];
-        let _: () = msg_send![field, release];
-
-        let response: isize = msg_send![alert, runModal];
-        let text: *mut AnyObject = msg_send![field, stringValue];
-        let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
-        let value = if utf8.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr(utf8).to_string_lossy().into_owned()
-        };
-        let _: () = msg_send![alert, release];
-        // NSAlertFirstButtonReturn; invalid input leaves the setting unchanged.
-        if response == 1000 {
-            apply(value);
-        }
-    });
 }
 
 pub fn set_level(window: &WebviewWindow, level: isize) {
@@ -316,16 +265,31 @@ pub fn prompt_text(
     current: String,
     apply: impl FnOnce(String) + Send + 'static,
 ) {
+    prompt_field(app, title, detail, current, "Save", 260.0, apply);
+}
+
+/// An alert with one text field, brought to the front. `apply` gets the
+/// trimmed text only when `button` (the first) is chosen; callers validate
+/// it, and invalid input leaves the setting unchanged.
+fn prompt_field(
+    app: &AppHandle,
+    title: String,
+    detail: String,
+    current: String,
+    button: &'static str,
+    width: f64,
+    apply: impl FnOnce(String) + Send + 'static,
+) {
     let _ = app.run_on_main_thread(move || unsafe {
         let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
         let field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
         let field: *mut AnyObject = msg_send![field, initWithFrame: NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(260.0, 24.0),
+            NSSize::new(width, 24.0),
         )];
         let _: () = msg_send![alert, setMessageText: ns_string(&title)];
         let _: () = msg_send![alert, setInformativeText: ns_string(&detail)];
-        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string("Save")];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string(button)];
         let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
         let _: () = msg_send![field, setStringValue: ns_string(&current)];
         let _: () = msg_send![alert, setAccessoryView: field];
@@ -341,6 +305,7 @@ pub fn prompt_text(
             CStr::from_ptr(utf8).to_string_lossy().trim().to_string()
         };
         let _: () = msg_send![alert, release];
+        // NSAlertFirstButtonReturn.
         if response == 1000 {
             apply(value);
         }
