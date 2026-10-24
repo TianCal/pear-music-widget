@@ -2,10 +2,12 @@
 //! `src/bridge.js` hands to `app.js`, which was written against the Electron
 //! preload and is unchanged.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::future;
+use futures_util::{future, StreamExt};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
@@ -14,9 +16,41 @@ use crate::search;
 use crate::state::{Bootstrap, Core};
 use crate::window::{self, PANEL, WIDGET};
 
-/// Polling budget for a queued track to show up (see `play_result`).
-const PLAY_POLL_ATTEMPTS: usize = 20;
-const PLAY_POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// Backoff for waiting on the player after an insert or a jump: a handful of
+/// checks, early ones close together, rather than a fixed-rate burst. Each
+/// `/queue` is a full round trip into the YouTube Music renderer.
+const POLL_BACKOFF_MS: [u64; 5] = [150, 300, 600, 1200, 2400];
+
+/// How long after a jump lands the queue is read once more, for the selection.
+const JUMP_CONFIRM: Duration = Duration::from_millis(600);
+
+/// Search thumbnails fetched at once.
+const SEARCH_ART_CONCURRENCY: usize = 4;
+
+/// The latest search each surface started, so a superseded one stops before
+/// parsing its reply or fetching artwork. Per window: the widget and the
+/// dropdown each type their own queries.
+static SEARCH_SEQ: AtomicU64 = AtomicU64::new(0);
+static SEARCH_LATEST: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+
+fn search_begin(label: &str) -> u64 {
+    let seq = SEARCH_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    SEARCH_LATEST
+        .lock()
+        .expect("search lock")
+        .get_or_insert_with(HashMap::new)
+        .insert(label.to_string(), seq);
+    seq
+}
+
+fn search_current(label: &str, seq: u64) -> bool {
+    SEARCH_LATEST
+        .lock()
+        .expect("search lock")
+        .as_ref()
+        .and_then(|latest| latest.get(label))
+        == Some(&seq)
+}
 
 /// Ceiling on one `queue_art` request. A surface asks for what it is showing
 /// plus a screenful either side; anything past that is a runaway loop, not a
@@ -32,23 +66,68 @@ fn core(app: &AppHandle) -> Arc<Core> {
 
 /// Refresh "Next tracks" once the player has actually landed on `index`.
 ///
-/// The queue can change without the *track* changing — jumping between two
-/// copies of the same song is the obvious case — and `apply_song` only refreshes
-/// it when the videoId moves. So the jump says so itself rather than relying on
-/// a track change that may never come. Waiting for the slot to go selected
-/// first, because reading the queue before the player has switched just returns
-/// the list we already had.
-fn refresh_queue_after_jump(core: Arc<Core>, index: usize) {
+/// Usually the jump changes the track, and then VIDEO_CHANGED → `apply_song`
+/// refreshes the queue on its own; this only watches the cheap `/song` (after
+/// checking whether the socket already delivered) in case that message never
+/// comes. The queue can also change without the *track* changing — jumping
+/// between two copies of the same song is the obvious case — and then no
+/// VIDEO_CHANGED is coming, so the queue itself is polled until the slot goes
+/// selected: read before the player has switched, it is the list we already
+/// had. Either way the queue is published once.
+fn refresh_queue_after_jump(
+    core: Arc<Core>,
+    index: usize,
+    target: Option<String>,
+    from: Option<String>,
+) {
     tauri::async_runtime::spawn(async move {
-        for _ in 0..12 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
-            if entries.get(index).map(|entry| entry.selected).unwrap_or(false) {
-                break;
+        let moves = from.is_none() || target != from;
+        for delay in POLL_BACKOFF_MS {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            if core.is_local() {
+                return;
+            }
+            if moves {
+                let playing = || core.snapshot().song.map(|song| song.video_id);
+                // Either the socket delivered, or `/song` shows the switch.
+                let landed = playing() != from
+                    || match core.api.song().await {
+                        Ok(Some(song)) => {
+                            let id = song.get("videoId").and_then(Value::as_str).map(str::to_string);
+                            let switched = id.is_some() && id != from;
+                            // Skip a reply the socket has overtaken: a second
+                            // quick jump may already be showing.
+                            if switched && playing() == from {
+                                core.apply_song(Some(&song));
+                            }
+                            switched
+                        }
+                        _ => false,
+                    };
+                if landed {
+                    // `apply_song` refreshed the queue on the track change, but
+                    // that read can land before the queue marks the new slot
+                    // selected. Confirm once.
+                    tokio::time::sleep(JUMP_CONFIRM).await;
+                    core.refresh_queue().await;
+                    return;
+                }
+            } else if let Ok(Some(queue)) = core.api.queue().await {
+                let entries = search::queue_entries(Some(&queue));
+                if entries.get(index).is_some_and(|entry| entry.selected) {
+                    core.adopt_queue(&queue);
+                    return;
+                }
             }
         }
+        // Never saw it land; show whatever the player has now.
         core.refresh_queue().await;
     });
+}
+
+/// The playing video id, for `refresh_queue_after_jump` to watch it change.
+fn playing_id(core: &Core) -> Option<String> {
+    core.snapshot().song.map(|song| song.video_id)
 }
 
 /// The state, the artwork, the queue and the lyrics in one reply. They travel
@@ -225,7 +304,13 @@ async fn local_jump(core: &Arc<Core>, index: Option<usize>, id: &str) -> Value {
 }
 
 #[tauri::command]
-pub async fn search_tracks(app: AppHandle, query: String) -> Value {
+pub async fn search_tracks(app: AppHandle, window: WebviewWindow, query: String) -> Value {
+    let label = window.label().to_string();
+    let seq = search_begin(&label);
+    let current = || search_current(&label, seq);
+    // The renderer ignores a superseded reply anyway; this only stops the work.
+    let superseded = || json!({ "ok": true, "results": [], "superseded": true });
+
     let query = query.trim().to_string();
     if query.is_empty() {
         return json!({ "ok": true, "results": [] });
@@ -240,26 +325,42 @@ pub async fn search_tracks(app: AppHandle, query: String) -> Value {
             .unwrap_or_default();
         return json!({ "ok": true, "results": results });
     }
-    let payload = match core.api.search(&query).await {
-        Ok(payload) => payload,
-        Err(err) => return json!({ "ok": false, "error": err.message }),
+    // Serialised with every other `/search` (see `Api::search_if`); a query
+    // typed over while it waited for its turn is never sent.
+    let payload = match core.api.search_if(&query, current).await {
+        None => return superseded(),
+        Some(Ok(payload)) => payload,
+        Some(Err(err)) => return json!({ "ok": false, "error": err.message }),
     };
+    if !current() {
+        return superseded();
+    }
 
     let results = search::parse_search_results(&payload);
 
     // Artwork goes through here for the same reason cover art does: the
     // renderer's CSP allows data: URLs only. Ten of them one after another put
-    // ten round trips between typing and seeing the list.
-    let resolved = future::join_all(results.into_iter().map(|item| {
-        let core = Arc::clone(&core);
-        async move {
-            search::SearchResult {
-                thumbnail: core.api.fetch_cover(item.thumbnail.as_deref(), THUMB_PX).await,
-                ..item
+    // ten round trips between typing and seeing the list; all ten at once
+    // compete with the playing cover. A few at a time, in order.
+    let resolved: Vec<search::SearchResult> = futures_util::stream::iter(results)
+        .map(|item| {
+            let core = Arc::clone(&core);
+            let wanted = current();
+            async move {
+                let thumbnail = if wanted {
+                    core.api.fetch_cover(item.thumbnail.as_deref(), THUMB_PX).await
+                } else {
+                    None
+                };
+                search::SearchResult { thumbnail, ..item }
             }
-        }
-    }))
-    .await;
+        })
+        .buffered(SEARCH_ART_CONCURRENCY)
+        .collect()
+        .await;
+    if !current() {
+        return superseded();
+    }
 
     json!({ "ok": true, "results": resolved })
 }
@@ -286,8 +387,10 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
         return json!({ "ok": false, "error": err.message });
     }
 
-    for _ in 0..PLAY_POLL_ATTEMPTS {
-        tokio::time::sleep(PLAY_POLL_INTERVAL).await;
+    // Only the queue can show the insert (`/song` does not change until the
+    // jump), so this one does poll it — with backoff, not at a fixed rate.
+    for delay in POLL_BACKOFF_MS {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
 
         let entries = search::queue_entries(core.api.queue().await.ok().flatten().as_ref());
         let Some(current) = entries.iter().position(|entry| entry.selected) else {
@@ -306,9 +409,10 @@ pub async fn play_result(app: AppHandle, video_id: String) -> Value {
             continue;
         }
 
+        let (target, from) = (entries[current + 1].video_id.clone(), playing_id(&core));
         return match core.api.set_queue_index(current + 1).await {
             Ok(()) => {
-                refresh_queue_after_jump(Arc::clone(&core), current + 1);
+                refresh_queue_after_jump(Arc::clone(&core), current + 1, target, from);
                 json!({ "ok": true, "index": current + 1 })
             }
             Err(err) => json!({ "ok": false, "error": err.message }),
@@ -351,13 +455,17 @@ pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
         .map(|(index, _)| index);
 
     match found {
-        Some(index) => match core.api.set_queue_index(index).await {
-            Ok(()) => {
-                refresh_queue_after_jump(Arc::clone(&core), index);
-                json!({ "ok": true, "index": index })
+        Some(index) => {
+            // Taken before the jump: VIDEO_CHANGED can beat the PATCH's reply.
+            let (target, from) = (entries[index].video_id.clone(), playing_id(&core));
+            match core.api.set_queue_index(index).await {
+                Ok(()) => {
+                    refresh_queue_after_jump(Arc::clone(&core), index, target, from);
+                    json!({ "ok": true, "index": index })
+                }
+                Err(err) => json!({ "ok": false, "error": err.message }),
             }
-            Err(err) => json!({ "ok": false, "error": err.message }),
-        },
+        }
         // The queue moved on between the row being drawn and clicked; queueing
         // it is then the honest fallback.
         None => play_result(app, video_id).await,
@@ -523,9 +631,10 @@ pub async fn play_queue_index(app: AppHandle, index: usize, video_id: String) ->
         return play_queued(app, video_id).await;
     }
 
+    let from = playing_id(&core);
     match core.api.set_queue_index(index).await {
         Ok(()) => {
-            refresh_queue_after_jump(Arc::clone(&core), index);
+            refresh_queue_after_jump(Arc::clone(&core), index, Some(video_id), from);
             json!({ "ok": true, "index": index })
         }
         Err(err) => json!({ "ok": false, "error": err.message }),

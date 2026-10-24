@@ -338,6 +338,77 @@ fn solve_volume_curve(sent: f64, echoed: f64) -> Option<f64> {
     Some((lo * hi).sqrt())
 }
 
+// -------------------------------------------------------------- coalescing
+
+/// How long a finished `refresh_all` (or a queue fetch it would repeat) counts
+/// as fresh. Opening the dropdown, the widget and a menu in quick succession
+/// would otherwise ask the player the same five questions each time.
+const REFRESH_TTL: Duration = Duration::from_millis(2500);
+
+/// A queue fetched longer ago than this is refetched when any surface comes on
+/// screen. The queue has no push channel, so edits made inside YouTube Music
+/// would otherwise wait for the next track change while the widget stays up.
+const QUEUE_SHOW_TTL: Duration = Duration::from_secs(5);
+
+/// How long after a track change its like state is read a second time.
+const LIKE_RECHECK: Duration = Duration::from_millis(1500);
+
+/// One run at a time. A caller arriving while a run is in flight either gives
+/// up (the run in flight answers it) or, with `rerun`, asks the holder to go
+/// round once more, so a request made after a change always gets a fetch that
+/// started after it — however many requests pile up, that is two fetches.
+#[derive(Default)]
+struct Gate {
+    busy: AtomicBool,
+    again: AtomicBool,
+}
+
+impl Gate {
+    /// Whether the caller now holds the gate and should run.
+    fn enter(&self, rerun: bool) -> bool {
+        if !self.busy.swap(true, Ordering::SeqCst) {
+            self.again.store(false, Ordering::SeqCst);
+            return true;
+        }
+        if !rerun {
+            return false;
+        }
+        self.again.store(true, Ordering::SeqCst);
+        // The holder may have let go between the two lines above.
+        if !self.busy.swap(true, Ordering::SeqCst) {
+            self.again.store(false, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    /// Done with one run. `true` means a rerun was asked for and the caller
+    /// still holds the gate: run again, then call `leave` again.
+    fn leave(&self) -> bool {
+        if self.again.swap(false, Ordering::SeqCst) {
+            return true;
+        }
+        self.busy.store(false, Ordering::SeqCst);
+        // A rerun asked for between the two lines above.
+        self.again.swap(false, Ordering::SeqCst) && !self.busy.swap(true, Ordering::SeqCst)
+    }
+}
+
+/// `/like-state`'s `{ "state": "LIKE" | … }`, read leniently.
+fn like_of(reply: crate::api::Result<Option<Value>>) -> Option<String> {
+    reply.ok().flatten().and_then(|value| {
+        value
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// `elapsed`, or `None` for never.
+fn age(at: &Mutex<Option<Instant>>) -> Option<Duration> {
+    at.lock().expect("time lock").map(|at| at.elapsed())
+}
+
 // --------------------------------------------------------------------- core
 
 /// Everything the app shares. Held as Tauri managed state and cloned (as an
@@ -385,6 +456,19 @@ pub struct Core {
     /// Guards background display conversion independently of network fetches.
     /// A setting change or new source invalidates work already in flight.
     lyrics_style_token: AtomicU64,
+    /// One `refresh_all` at a time, and none again within `REFRESH_TTL`.
+    refresh_gate: Gate,
+    /// Set by a forced `refresh_all` that found one already running, so the
+    /// rerun it asked for is forced too.
+    refresh_forced: AtomicBool,
+    refreshed_at: Mutex<Option<Instant>>,
+    /// One `/queue` fetch at a time; overlapping refreshes merge (see `Gate`).
+    queue_gate: Gate,
+    queue_fetched_at: Mutex<Option<Instant>>,
+    /// The last `POSITION_CHANGED`. It arrives about once a second while the
+    /// player plays and not at all while it is paused, which is what lets the
+    /// play-state poller tell when the glyph is likely to be wrong.
+    position_at: Mutex<Option<Instant>>,
 }
 
 impl Core {
@@ -440,6 +524,33 @@ impl Core {
             lyrics_token: AtomicU64::new(0),
             lyrics_superseded: tokio::sync::Notify::new(),
             lyrics_style_token: AtomicU64::new(0),
+            refresh_gate: Gate::default(),
+            refresh_forced: AtomicBool::new(false),
+            refreshed_at: Mutex::new(None),
+            queue_gate: Gate::default(),
+            queue_fetched_at: Mutex::new(None),
+            position_at: Mutex::new(None),
+        }
+    }
+
+    /// Seconds since the last `POSITION_CHANGED`, or `None` if none came yet.
+    pub fn position_age(&self) -> Option<Duration> {
+        age(&self.position_at)
+    }
+
+    /// Push `state` to the surfaces on screen only. A hidden webview would
+    /// still have Tauri format and evaluate the payload once a second for
+    /// nobody; `set_on_screen` hands one the latest as it comes back.
+    fn emit_state(&self, state: &PlayerState) {
+        let labels: Vec<String> = self
+            .on_screen
+            .lock()
+            .expect("screen lock")
+            .iter()
+            .cloned()
+            .collect();
+        for label in labels {
+            let _ = self.app.emit_to(label.as_str(), "state", state);
         }
     }
 
@@ -459,8 +570,10 @@ impl Core {
     /// report the old answer.
     ///
     /// Coming on screen catches up on what was skipped while hidden: the
-    /// latest `state` (whose emits were dropped), and the queue and lyrics if
-    /// a track change left them stale.
+    /// latest `state` (emits go only to surfaces on screen), and the queue and
+    /// lyrics if a track change left them stale. When nothing at all was on
+    /// screen the pollers were standing down, so the player's ground truth is
+    /// pulled too (`refresh_all`, which skips itself if one just ran).
     pub fn set_on_screen(self: &Arc<Self>, label: &str, shown: bool) {
         let woke = {
             let mut on_screen = self.on_screen.lock().expect("screen lock");
@@ -480,15 +593,32 @@ impl Core {
         if !shown {
             return;
         }
-        if woke {
-            let _ = self.app.emit("state", &self.snapshot());
-        }
-        let queue = self.queue_stale.swap(false, Ordering::SeqCst);
+        // This surface heard no `state` while it was hidden.
+        let _ = self.app.emit_to(label, "state", &self.snapshot());
+        let remote = !self.is_local() && self.status() == "connected";
+        let queue_old = remote
+            && self
+                .queue_fetched_at
+                .lock()
+                .expect("time lock")
+                .is_none_or(|at| at.elapsed() >= QUEUE_SHOW_TTL);
+        let queue = self.queue_stale.swap(false, Ordering::SeqCst) || queue_old;
         let lyrics = self.lyrics_stale.swap(false, Ordering::SeqCst);
-        if queue || lyrics {
+        let resync = woke && remote;
+        if queue || lyrics || resync {
             let core = Arc::clone(self);
+            let since = Instant::now();
             tauri::async_runtime::spawn(async move {
-                if queue {
+                if resync {
+                    // Fetches the queue as well, unless one just ran.
+                    core.refresh_all(false).await;
+                }
+                let fetched = core
+                    .queue_fetched_at
+                    .lock()
+                    .expect("time lock")
+                    .is_some_and(|at| at >= since);
+                if queue && !fetched {
                     core.refresh_queue().await;
                 }
                 if lyrics {
@@ -630,10 +760,7 @@ impl Core {
         });
         let Some(next) = next else { return };
         // Nobody to draw it; `set_on_screen` sends the latest when one shows.
-        if !self.showing() {
-            return;
-        }
-        let _ = self.app.emit("state", &next);
+        self.emit_state(&next);
     }
 
     /// `update` for writes that come from YouTube Music. Dropped once a folder
@@ -731,12 +858,18 @@ impl Core {
 
     // ---------------------------------------------------------------- tracks
 
-    /// Swap in a new song, then resolve its artwork and like state out of band.
-    pub async fn apply_song(self: &Arc<Self>, raw: Option<&Value>) {
+    /// Swap in a new song now, then resolve its artwork and like state out of
+    /// band. Never waits on the network: the realtime loop calls this inline,
+    /// and a cover fetch (up to 8 s) must not hold up the position, play-state
+    /// and volume messages queued behind it. `cover_token` drops a cover or
+    /// like state that lands after a newer track (or a folder) took over.
+    ///
+    /// Returns whether it started a queue refresh, i.e. the track changed.
+    pub fn apply_song(self: &Arc<Self>, raw: Option<&Value>) -> bool {
         // Callers awaited the player to get here; a folder may have taken over
         // meanwhile, and a stale YouTube track must not replace its track.
         if self.is_local() {
-            return;
+            return false;
         }
         let song = Song::from_value(raw).map(|mut song| {
             song.artist = self.store.get(|s| s.artist_name(&song.raw_artist));
@@ -749,7 +882,7 @@ impl Core {
             if let Some(song) = song {
                 self.update_remote(|state| state.song = Some(song));
             }
-            return;
+            return false;
         }
 
         self.update_remote(|state| {
@@ -759,31 +892,37 @@ impl Core {
         });
         self.set_cover(None);
 
-        let Some(song) = song else { return };
+        let Some(song) = song else { return false };
 
+        // The like state is asked for here, on every track change, rather
+        // than on a timer: the server has no push for it.
         let token = self.cover_token.fetch_add(1, Ordering::SeqCst) + 1;
-        let (cover, like) = tokio::join!(
-            self.api.fetch_cover(song.image_src.as_deref(), COVER_PX),
-            self.api.like_state(),
-        );
-        if token != self.cover_token.load(Ordering::SeqCst) {
-            return; // a newer song won the race
-        }
-
-        let like = like.ok().flatten().and_then(|value| {
-            value
-                .get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let (cover, like) = tokio::join!(
+                core.api.fetch_cover(song.image_src.as_deref(), COVER_PX),
+                core.api.like_state(),
+            );
+            if token != core.cover_token.load(Ordering::SeqCst) {
+                return; // a newer song won the race
+            }
+            core.set_cover(cover);
+            core.update_remote(|state| state.like = like_of(like));
+            // The server reads the like button off the page, which can still
+            // show the previous track's state this early. Ask once more.
+            tokio::time::sleep(LIKE_RECHECK).await;
+            let like = like_of(core.api.like_state().await);
+            if like.is_some() && token == core.cover_token.load(Ordering::SeqCst) {
+                core.update_remote(|state| state.like = like);
+            }
         });
-        self.set_cover(cover);
-        self.update_remote(|state| state.like = like);
 
         let core = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             core.refresh_queue().await;
             core.refresh_lyrics().await;
         });
+        true
     }
 
     /// Whether any surface is looking at the queue — a skin whose layout draws
@@ -823,36 +962,48 @@ impl Core {
     /// No artwork is resolved here. That is the difference from the four-item
     /// version this replaced: a full queue's worth of `data:` URLs would be
     /// megabytes on an event, and the two surfaces want different sizes anyway.
+    ///
+    /// Each `/queue` is a full round trip into the YouTube Music renderer, so
+    /// overlapping refreshes merge: one in flight, at most one more queued
+    /// behind it (see `Gate`).
     pub async fn refresh_queue(self: &Arc<Self>) {
-        // Hidden: keep what is drawn rather than flash it empty, and refetch
-        // when a surface shows.
+        if !self.queue_gate.enter(true) {
+            return;
+        }
+        loop {
+            self.refresh_queue_once().await;
+            if !self.queue_gate.leave() {
+                break;
+            }
+        }
+    }
+
+    /// Whether a queue view would be shown right now; marks it stale if not.
+    fn queue_visible(self: &Arc<Self>) -> bool {
         if !self.showing() {
             self.queue_stale.store(true, Ordering::SeqCst);
-            return;
+            return false;
         }
         if !self.queue_wanted() {
             self.set_queue(QueueView::empty());
-            return;
+            return false;
         }
-        if self.is_local() {
-            self.publish_local_queue();
-            return;
-        }
+        true
+    }
 
-        let token = self.queue_token.fetch_add(1, Ordering::SeqCst) + 1;
-        let Ok(Some(queue)) = self.api.queue().await else {
-            return;
-        };
-        if self.is_local() {
-            return;
-        }
-        // One await inside the guarded region, so one check: if a newer refresh
-        // started while this response was in flight, its result is the truth.
-        if token != self.queue_token.load(Ordering::SeqCst) {
+    /// Publish a `/queue` reply someone else fetched (the jump path polls the
+    /// queue itself), superseding any refresh still in flight.
+    pub fn adopt_queue(self: &Arc<Self>, queue: &Value) {
+        if self.is_local() || !self.queue_visible() {
             return;
         }
+        self.queue_token.fetch_add(1, Ordering::SeqCst);
+        *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
+        self.publish_queue(queue);
+    }
 
-        let mut view = search::parse_queue(Some(&queue), QUEUE_MAX);
+    fn publish_queue(&self, queue: &Value) {
+        let mut view = search::parse_queue(Some(queue), QUEUE_MAX);
         let names = self.store.get(|s| s.artist_names.clone());
         if !names.is_empty() {
             let items: Vec<_> = view
@@ -867,6 +1018,33 @@ impl Core {
             view.items = Arc::from(items);
         }
         self.set_queue(view);
+    }
+
+    async fn refresh_queue_once(self: &Arc<Self>) {
+        // Hidden: keep what is drawn rather than flash it empty, and refetch
+        // when a surface shows.
+        if !self.queue_visible() {
+            return;
+        }
+        if self.is_local() {
+            self.publish_local_queue();
+            return;
+        }
+
+        let token = self.queue_token.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
+        let Ok(Some(queue)) = self.api.queue().await else {
+            return;
+        };
+        if self.is_local() {
+            return;
+        }
+        // One await inside the guarded region, so one check: if a newer refresh
+        // started while this response was in flight, its result is the truth.
+        if token != self.queue_token.load(Ordering::SeqCst) {
+            return;
+        }
+        self.publish_queue(&queue);
     }
 
     /// Lyrics come from LRCLib (see `lyrics.rs`) and are only fetched while a
@@ -946,15 +1124,42 @@ impl Core {
     /// `REPEAT_CHANGED` only ever fires on a *change*, so the mode has to be
     /// asked for once per connection or the loop would sit unlit until someone
     /// pressed it.
-    pub async fn refresh_all(self: &Arc<Self>) {
+    ///
+    /// Showing a surface asks too, but that is `force: false`: skipped while
+    /// one is in flight or finished within `REFRESH_TTL`. A new connection
+    /// forces it, because the cached answers belong to the previous one.
+    pub async fn refresh_all(self: &Arc<Self>, force: bool) {
         if self.is_local() {
             return;
         }
-        let (song, shuffle, volume, repeat) = tokio::join!(
+        if !force && age(&self.refreshed_at).is_some_and(|age| age < REFRESH_TTL) {
+            return;
+        }
+        if force {
+            self.refresh_forced.store(true, Ordering::SeqCst);
+        }
+        if !self.refresh_gate.enter(force) {
+            return;
+        }
+        loop {
+            let forced = self.refresh_forced.swap(false, Ordering::SeqCst);
+            self.refresh_all_once(forced).await;
+            *self.refreshed_at.lock().expect("time lock") = Some(Instant::now());
+            if !self.refresh_gate.leave() {
+                break;
+            }
+        }
+    }
+
+    async fn refresh_all_once(self: &Arc<Self>, force: bool) {
+        let started = Instant::now();
+        let track = self.cover_token.load(Ordering::SeqCst);
+        let (song, shuffle, volume, repeat, like) = tokio::join!(
             self.api.song(),
             self.api.shuffle_state(),
             self.api.volume_state(),
-            self.api.repeat_mode()
+            self.api.repeat_mode(),
+            self.api.like_state()
         );
         // The same race as `apply_song`: a folder opened while these were out.
         if self.is_local() {
@@ -962,17 +1167,12 @@ impl Core {
         }
 
         let song = song.ok().flatten();
-        if let Some(song) = &song {
-            self.apply_song(Some(song)).await;
-        }
-
-        // `apply_song` only refreshes the queue when the track actually
-        // changed, so a reconnect on the same track would otherwise leave
-        // "Next tracks" empty until the song ended.
-        {
-            let core = Arc::clone(self);
-            tauri::async_runtime::spawn(async move { core.refresh_queue().await });
-        }
+        let changed = song.as_ref().is_some_and(|song| self.apply_song(Some(song)));
+        // A changed track asks for its own like state; this answer may predate
+        // it, as it does when the socket delivered a new track meanwhile.
+        let like = like_of(like).filter(|_| {
+            !changed && song.is_some() && self.cover_token.load(Ordering::SeqCst) == track
+        });
 
         let shuffle = shuffle
             .ok()
@@ -1014,6 +1214,9 @@ impl Core {
             if let Some(muted) = muted {
                 state.muted = muted;
             }
+            if like.is_some() {
+                state.like = like.clone();
+            }
             if let Some(song) = &song {
                 if let Some(paused) = song.get("isPaused").and_then(Value::as_bool) {
                     state.is_playing = !paused;
@@ -1023,6 +1226,20 @@ impl Core {
                 }
             }
         });
+
+        // `apply_song` only refreshes the queue when the track actually
+        // changed, so a reconnect on the same track would otherwise leave
+        // "Next tracks" empty until the song ended. Skipped when a fetch
+        // already started during this refresh (PLAYER_INFO's track change on
+        // connect) or, when not forced, within the TTL.
+        let recent = self
+            .queue_fetched_at
+            .lock()
+            .expect("time lock")
+            .is_some_and(|at| at >= started || (!force && at.elapsed() < REFRESH_TTL));
+        if !changed && !recent {
+            self.refresh_queue().await;
+        }
     }
 
     // -------------------------------------------------------------- realtime
@@ -1046,7 +1263,7 @@ impl Core {
 
         if status == "connected" {
             let core = Arc::clone(self);
-            tauri::async_runtime::spawn(async move { core.refresh_all().await });
+            tauri::async_runtime::spawn(async move { core.refresh_all(true).await });
         } else if status != "connecting" {
             // Drop the queue too: it belongs to a player we can no longer see.
             self.update_remote(|state| state.is_playing = false);
@@ -1056,7 +1273,8 @@ impl Core {
         crate::tray::refresh(&self.app);
     }
 
-    pub async fn handle_message(self: &Arc<Self>, msg: &Value) {
+    /// Never awaits: see `apply_song`.
+    pub fn handle_message(self: &Arc<Self>, msg: &Value) {
         if self.is_local() {
             return;
         }
@@ -1066,8 +1284,17 @@ impl Core {
 
         match kind {
             "PLAYER_INFO" => {
-                self.apply_song(msg.get("song")).await;
+                self.apply_song(msg.get("song"));
                 let volume = number("volume");
+                // The server starts from `NONE` until the player reports a
+                // mode, so only a mode it could not have defaulted to is taken
+                // as an answer; `refresh_all`'s `/repeat-mode` settles the rest
+                // (and keeps "unknown" apart from `NONE`).
+                let repeat = msg
+                    .get("repeat")
+                    .and_then(Value::as_str)
+                    .filter(|mode| matches!(*mode, "ALL" | "ONE"))
+                    .map(str::to_string);
                 self.update_remote(|state| {
                     state.is_playing = flag("isPlaying");
                     state.apply_position(number("position").unwrap_or(0.0));
@@ -1076,10 +1303,13 @@ impl Core {
                     }
                     state.muted = flag("muted");
                     state.shuffle = flag("shuffle");
+                    if repeat.is_some() {
+                        state.repeat = repeat.clone();
+                    }
                 });
             }
             "VIDEO_CHANGED" => {
-                self.apply_song(msg.get("song")).await;
+                self.apply_song(msg.get("song"));
                 // The payload carries the new track's paused flag; the player
                 // does not always follow a track change with PLAYER_STATE_CHANGED.
                 let paused = msg
@@ -1103,6 +1333,7 @@ impl Core {
                 });
             }
             "POSITION_CHANGED" => {
+                *self.position_at.lock().expect("time lock") = Some(Instant::now());
                 let position = number("position").unwrap_or(0.0);
                 self.update_remote(|state| state.apply_position(position));
             }
@@ -1202,6 +1433,24 @@ mod tests {
             ..Song::default()
         });
         state
+    }
+
+    #[test]
+    fn the_gate_merges_overlapping_runs_into_one_rerun() {
+        let gate = Gate::default();
+        assert!(gate.enter(true));
+        // A non-rerun caller is answered by the run in flight.
+        assert!(!gate.enter(false));
+        assert!(!gate.leave(), "nothing asked for a rerun");
+        assert!(gate.enter(true));
+        // Several callers during one run: one more run, not several.
+        assert!(!gate.enter(true));
+        assert!(!gate.enter(true));
+        assert!(gate.leave(), "a rerun was asked for");
+        assert!(!gate.leave());
+        // Released: the next caller runs straight away.
+        assert!(gate.enter(false));
+        assert!(!gate.leave());
     }
 
     #[test]

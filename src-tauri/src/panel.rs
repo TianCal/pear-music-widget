@@ -298,6 +298,4 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
     let _ = panel.show();
     crate::on_screen(app, PANEL, true);
     let _ = panel.set_focus();
-    // Nothing was on screen a moment ago, so the pollers were standing down.
-    crate::resync(app);
 }

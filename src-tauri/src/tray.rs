@@ -987,10 +987,9 @@ pub fn show_widget(app: &AppHandle) {
     };
     if !widget.is_visible().unwrap_or(false) {
         let _ = widget.show();
-        crate::on_screen(app, WIDGET, true);
         // The pollers stand down while nothing is on screen, so a widget coming
-        // back could be showing a stale glyph.
-        crate::resync(app);
+        // back could be showing a stale glyph: `on_screen` resyncs if so.
+        crate::on_screen(app, WIDGET, true);
     }
     let _ = widget.set_focus();
 }

@@ -162,18 +162,21 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
         match next {
             Some(Ok(Message::Text(raw))) => {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    core.handle_message(&payload).await;
+                    core.handle_message(&payload);
                 }
             }
             Some(Ok(Message::Binary(raw))) => {
                 if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                    core.handle_message(&payload).await;
+                    core.handle_message(&payload);
                 }
             }
             Some(Ok(Message::Close(frame))) => {
                 policy_rejection = frame.map(|frame| u16::from(frame.code) == 1008).unwrap_or(false);
                 break;
             }
+            // Pings need no handling here: tungstenite queues the pong and
+            // flushes it at the start of the next read, which is the very
+            // next turn of this loop now that no message handler awaits.
             Some(Ok(_)) => {}
             // An error is always followed by the stream ending; both land here.
             Some(Err(_)) | None => break,

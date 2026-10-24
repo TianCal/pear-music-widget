@@ -1468,6 +1468,8 @@ const runSearch = async (query) => {
   setNote('Searching…');
   const res = await window.widget.search(trimmed);
   if (seq !== searchSeq || !searching) return; // a newer query won, or we closed
+  // Rust saw an older query start after this one; this is still the newest.
+  if (res?.superseded) return runSearch(query);
 
   if (!res?.ok) {
     results = [];

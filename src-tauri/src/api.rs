@@ -197,6 +197,11 @@ pub struct Api {
     store: Arc<Store>,
     http: reqwest::Client,
     images: Mutex<ImageCache>,
+    /// The server answers `/search` and `/queue` by asking the YouTube Music
+    /// renderer and taking the *first* reply that comes back, so two of either
+    /// in flight can be handed each other's answer. One at a time each.
+    search_slot: tokio::sync::Mutex<()>,
+    queue_slot: tokio::sync::Mutex<()>,
 }
 
 impl Api {
@@ -210,6 +215,8 @@ impl Api {
                 .build()
                 .expect("build http client"),
             images: Mutex::new(ImageCache::new()),
+            search_slot: tokio::sync::Mutex::new(()),
+            queue_slot: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -436,14 +443,32 @@ impl Api {
     }
 
     pub async fn search(&self, query: &str) -> Result<Value> {
-        self.request(
-            reqwest::Method::POST,
-            "/search",
-            Some(serde_json::json!({ "query": query })),
-            SEARCH_TIMEOUT,
-        )
-        .await
-        .map(|value| value.unwrap_or(Value::Null))
+        self.search_if(query, || true)
+            .await
+            .unwrap_or_else(|| Ok(Value::Null))
+    }
+
+    /// `search`, unless `still_wanted` says otherwise once it is this caller's
+    /// turn: a query typed over while it waited is never sent at all.
+    pub async fn search_if(
+        &self,
+        query: &str,
+        still_wanted: impl Fn() -> bool,
+    ) -> Option<Result<Value>> {
+        let _slot = self.search_slot.lock().await;
+        if !still_wanted() {
+            return None;
+        }
+        let result = self
+            .request(
+                reqwest::Method::POST,
+                "/search",
+                Some(serde_json::json!({ "query": query })),
+                SEARCH_TIMEOUT,
+            )
+            .await
+            .map(|value| value.unwrap_or(Value::Null));
+        Some(result)
     }
 
     pub async fn add_to_queue(&self, video_id: &str) -> Result<()> {
@@ -490,6 +515,7 @@ impl Api {
         self.get("/volume").await
     }
     pub async fn queue(&self) -> Result<Option<Value>> {
+        let _slot = self.queue_slot.lock().await;
         self.get("/queue").await
     }
 }

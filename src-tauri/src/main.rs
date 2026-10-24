@@ -34,19 +34,26 @@ use crate::store::Store;
 use crate::window::{WindowState, PANEL, WIDGET};
 use crate::ws::Realtime;
 
-/// Like state has no push channel, so poll it while we are connected.
-const LIKE_POLL: Duration = Duration::from_secs(20);
+/// Like state has no push channel. It is re-read on every track change and
+/// whenever a surface comes on screen (`refresh_all`); this slow poll only
+/// catches a like pressed inside YouTube Music while a surface stays up.
+const LIKE_POLL: Duration = Duration::from_secs(120);
 /// PLAYER_STATE_CHANGED only fires on the player's own play/pause events, so a
-/// missed one would leave the wrong glyph up indefinitely. Reconcile against the
-/// player often enough that it is never wrong for long.
-const PLAY_STATE_POLL: Duration = Duration::from_secs(5);
+/// missed one would leave the wrong glyph up indefinitely. The poller looks
+/// every `PLAY_STATE_TICK` but only asks `/song` every `PLAY_STATE_POLL`, or
+/// after `PLAY_STATE_SUSPECT` when the position ticks disagree with the glyph
+/// (shown playing with no tick for `TICK_GAP`, or shown paused while ticking).
+const PLAY_STATE_TICK: Duration = Duration::from_secs(5);
+const PLAY_STATE_POLL: Duration = Duration::from_secs(30);
+const PLAY_STATE_SUSPECT: Duration = Duration::from_secs(10);
+const TICK_GAP: Duration = Duration::from_secs(5);
 
 /// Whether anything is actually on screen to be wrong.
 ///
 /// Both pollers exist to correct a display, so neither has any work to do while
 /// both surfaces are hidden — which, for a menu-bar app, is nearly all the
-/// time. Skipping the tick costs nothing in accuracy because showing either
-/// surface resyncs it first; see `resync`.
+/// time. Skipping the tick costs nothing in accuracy because the first surface
+/// to come back on screen resyncs; see `Core::set_on_screen`.
 ///
 /// Read from `Core`'s own record rather than asking each window: `is_visible`
 /// is an AppKit round trip, and the pollers ask on every tick.
@@ -55,24 +62,13 @@ fn showing_anything(app: &AppHandle) -> bool {
 }
 
 /// Record that the surface `label` was just shown or hidden. Every `show` and
-/// `hide` of the widget or the dropdown goes through here as well.
+/// `hide` of the widget or the dropdown goes through here as well. The first
+/// surface to come on screen also pulls the player's ground truth, since the
+/// pollers stand down while nothing is showing.
 pub fn on_screen(app: &AppHandle, label: &str, shown: bool) {
     if let Some(core) = app.try_state::<Arc<Core>>() {
         core.set_on_screen(label, shown);
     }
-}
-
-/// Pull the player's ground truth now. Called whenever a surface comes back on
-/// screen, since the pollers stand down while nothing is showing.
-pub fn resync(app: &AppHandle) {
-    let Some(core) = app.try_state::<Arc<Core>>() else {
-        return;
-    };
-    let core = core.inner().clone();
-    if core.status() != "connected" || core.is_local() {
-        return;
-    }
-    tauri::async_runtime::spawn(async move { core.refresh_all().await });
 }
 
 /// Quit for real. Windows hide rather than close, so something has to say when
@@ -133,12 +129,31 @@ fn spawn_pollers(core: Arc<Core>) {
     });
 
     tauri::async_runtime::spawn(async move {
-        let mut ticker = tokio::time::interval(PLAY_STATE_POLL);
+        let mut ticker = tokio::time::interval(PLAY_STATE_TICK);
+        let mut asked: Option<std::time::Instant> = None;
         loop {
             ticker.tick().await;
-            if core.status() != "connected" || core.is_local() || !showing_anything(&core.app) {
+            let snapshot = core.snapshot();
+            if snapshot.status != "connected"
+                || core.is_local()
+                || snapshot.song.is_none()
+                || !showing_anything(&core.app)
+            {
                 continue;
             }
+            let since = asked.map(|at| at.elapsed());
+            let ticking = core.position_age().is_some_and(|age| age < TICK_GAP);
+            let suspect = snapshot.is_playing != ticking;
+            let due = match since {
+                None => true,
+                Some(since) => {
+                    since >= PLAY_STATE_POLL || (suspect && since >= PLAY_STATE_SUSPECT)
+                }
+            };
+            if !due {
+                continue;
+            }
+            asked = Some(std::time::Instant::now());
             if let Ok(Some(song)) = core.api.song().await {
                 if let Some(paused) = song.get("isPaused").and_then(Value::as_bool) {
                     core.update_remote(|player| player.is_playing = !paused);
@@ -261,7 +276,6 @@ fn main() {
             if let Some(window) = app.get_webview_window(WIDGET) {
                 let _ = window.show();
                 on_screen(app, WIDGET, true);
-                resync(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(

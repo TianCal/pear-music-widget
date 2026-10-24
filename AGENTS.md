@@ -94,6 +94,13 @@ count for `NONE → ALL → ONE → NONE`; `commands::command` calculates the pr
 `/repeat-mode` may be `null` before the player bar is observed, so preserve the
 difference between unknown and `NONE`. Refresh it on connection and after a
 repeat command because `REPEAT_CHANGED` fires only when the value changes.
+`PLAYER_INFO` carries `repeat` too, but the server starts it at `NONE` before
+the player reports, so only `ALL`/`ONE` are taken from it.
+
+The server answers `/search` and `/queue` by asking the renderer and taking the
+first reply, so overlapping calls can swap answers. `Api` serialises each
+behind its own async mutex; every caller (user search, artwork's YouTube Music
+lookup) goes through it.
 
 ## State and connection
 
@@ -102,9 +109,10 @@ The WebSocket close path is the reliable offline signal: a cached token lets
 the first attempt or a manual retry; background reconnects should not flicker.
 
 `Core::set_on_screen` records which surfaces are showing; every `show`/`hide`
-of the widget or dropdown must call `crate::on_screen`. While nothing shows,
-`state` is not emitted and queue/lyrics refreshes only mark themselves stale;
-coming on screen emits the latest snapshot and runs the stale refreshes. The
+of the widget or dropdown must call `crate::on_screen`. `state` goes only to
+surfaces on screen (`emit_to`); while nothing shows, queue/lyrics refreshes
+only mark themselves stale. Coming on screen emits the latest snapshot to that
+surface and runs the stale refreshes. The
 widget learns its own visibility from the `on-screen` event, since its
 `document.hidden` is always true. A superseded lyrics lookup is dropped at its
 next await (it caches nothing). Settings writes from the main thread or an
@@ -113,7 +121,18 @@ async worker use `Store::update_soon`.
 Retrying tears down the socket and clears the queue, so `launch_music_app`
 requests a retry only when disconnected. `Realtime::request_retry` must wake
 backoff and close an established socket. Pollers stand down while both surfaces
-are hidden, and showing either surface calls `resync` first.
+are hidden, and the first surface to come on screen runs `refresh_all(false)`.
+`refresh_all` runs one at a time and skips itself within 2.5 s of the last
+(a new connection forces it, still reading REST for the placeholder
+shuffle/volume/repeat). Overlapping `refresh_queue` calls merge into one fetch
+plus at most one rerun (`Gate`). Any surface coming on screen refetches the
+queue if the last fetch is older than 5 s (`QUEUE_SHOW_TTL`), since the queue
+has no push channel. `handle_message` never awaits: `apply_song`
+publishes the track at once and fetches cover and like state in a task guarded
+by `cover_token`. Like state is read on each track change (and again
+1.5 s later, as the page's like button can lag) and when the first surface
+comes on screen; its poll is a slow fallback. The play-state poll asks `/song` every 30 s, or every
+10 s while position ticks disagree with the play/pause glyph.
 
 ## macOS windows
 
@@ -249,6 +268,12 @@ JSON and keeps `musicResponsiveListItemRenderer` nodes with a `videoId`.
 Playing a search result inserts after the current video, then polls until the
 queue reflects the insertion before advancing. The insert returns `204` before
 the queue changes, so calling `next()` immediately can play the wrong track.
+Polls back off (150 ms doubling, five tries). After a jump that changes the
+track, VIDEO_CHANGED → `apply_song` refreshes the queue; `refresh_queue_after_jump`
+only watches `/song` as a fallback. A jump to another copy of the playing video
+has no VIDEO_CHANGED, so that case polls `/queue` until the slot is selected and
+publishes that reply. A search superseded by a newer query in the same window
+stops before parsing; thumbnails load four at a time.
 
 `play_queued` searches forward and is unsuitable for queue UIs that show earlier
 tracks. Those UIs send the rendered slot plus video ID to `play_queue_index`;
