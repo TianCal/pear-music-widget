@@ -268,6 +268,26 @@ fn opacity_submenu(
     Submenu::with_items(app, "Opacity", true, &all)
 }
 
+/// The card layouts, in menu order. Must cover `window::SKINS`.
+const SKIN_LABELS: [(&str, &str); 3] = [("stack", "Stack"), ("vinyl", "Vinyl"), ("liner", "Liner Notes")];
+
+/// Pick-one: `id_prefix` is `skin` for the widget, `panelSkin` for the dropdown.
+fn skin_submenu(
+    app: &AppHandle,
+    id_prefix: &str,
+    label: &str,
+    current: &str,
+) -> tauri::Result<Submenu<tauri::Wry>> {
+    let items = check_items(
+        app,
+        true,
+        SKIN_LABELS
+            .iter()
+            .map(|(key, text)| (format!("{id_prefix}:{key}"), text.to_string(), *key == current)),
+    )?;
+    Submenu::with_items(app, label, true, &refs(&items))
+}
+
 fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 100.0).round() as u32;
     let items = check_items(
@@ -460,8 +480,10 @@ fn always_on_top_item(app: &AppHandle, checked: bool) -> tauri::Result<CheckMenu
 /// Independent checkboxes rather than a skin-style pick-one, so unlike every
 /// other submenu here more than one is ticked at a time.
 ///
-/// **Kept per skin**, and `skin` is the one this menu edits. There is only
-/// Stack now, so the widget and the dropdown share one set.
+/// **Kept per skin**, and `skin` is the one this menu edits: how much chrome
+/// fits above the titles is a property of the card. Each menu passes the skin
+/// of the surface it belongs to. Lyrics is left out for a skin that draws the
+/// lyrics itself, since it has no lyrics panel to open.
 fn corner_submenu(
     app: &AppHandle,
     skin: &str,
@@ -472,7 +494,10 @@ fn corner_submenu(
     let shown = check_items(
         app,
         true,
-        crate::store::CornerButtons::BUTTONS.iter().map(|(key, text)| {
+        crate::store::CornerButtons::BUTTONS
+            .iter()
+            .filter(|(key, _)| window::panel_fits_skin(key, skin))
+            .map(|(key, text)| {
             let on = corners.flag(key).is_some_and(|on| *on);
             (format!("corner:{skin}:{key}"), text.to_string(), on)
         }),
@@ -772,6 +797,8 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &always_on_top_item(app, always_on_top)?,
+            &skin_submenu(app, "skin", "Skin", &widget_skin)?,
+            &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
             &opacity_submenu(app, opacity, store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -841,6 +868,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &source_submenu(app)?,
             &PredefinedMenuItem::separator(app)?,
+            &skin_submenu(app, "skin", "Skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &opacity_submenu(app, store.get(|s| s.opacity), store.get(|s| s.liquid_glass))?,
             &lyrics_submenu(
@@ -878,6 +906,7 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &source_submenu(app)?,
             &PredefinedMenuItem::separator(app)?,
+            &skin_submenu(app, "panelSkin", "Dropdown skin", &skin)?,
             &tint_submenu(app, store.get(|s| s.tint))?,
             &lyrics_submenu(
                 app,
@@ -900,6 +929,47 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 // ------------------------------------------------------------------ actions
+
+pub fn set_skin(app: &AppHandle, skin: &str) {
+    // Stored before the hop, so the refreshes below read the new skin wherever
+    // this is called from.
+    app.state::<Arc<Store>>().update(|s| s.skin = skin.to_string());
+    // An open lyrics panel is closed by `apply_skin`; the skin wants the lyrics
+    // from now on, and leaving the panel's claim would outlive it.
+    if window::skin_shows_lyrics(skin) {
+        app.state::<Arc<Core>>().set_lyrics_wanted(WIDGET, false);
+    }
+    // Hopped as one closure so the aspect lock is released, the window resized
+    // and the lock re-applied in that order, behind any setter already queued.
+    let (handle, layout) = (app.clone(), skin.to_string());
+    let _ = app.run_on_main_thread(move || {
+        if let Some(widget) = handle.get_webview_window(WIDGET) {
+            window::apply_skin(&handle, &widget, &layout);
+        }
+    });
+    after_skin_change(app, |state| state.skin = skin.to_string());
+}
+
+pub fn set_panel_skin(app: &AppHandle, skin: &str) {
+    app.state::<Arc<Store>>().update(|s| s.panel_skin = skin.to_string());
+    let (handle, layout) = (app.clone(), skin.to_string());
+    let _ = app.run_on_main_thread(move || crate::panel::apply_panel_skin(&handle, &layout));
+    after_skin_change(app, |state| state.panel_skin = skin.to_string());
+}
+
+/// A skin decides whether the queue and the lyrics are wanted at all, so both
+/// are asked for again under the new one.
+fn after_skin_change(app: &AppHandle, edit: impl FnOnce(&mut crate::state::PlayerState)) {
+    let core = app.state::<Arc<Core>>().inner().clone();
+    core.update(edit);
+
+    let spawned = Arc::clone(&core);
+    tauri::async_runtime::spawn(async move {
+        spawned.refresh_queue().await;
+        spawned.refresh_lyrics().await;
+    });
+    refresh(app);
+}
 
 /// Bring the floating widget back — without the menu item's other half.
 ///
@@ -1134,6 +1204,14 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
 fn handle_setting(app: &AppHandle, store: &Arc<Store>, widget: Option<&tauri::WebviewWindow>, other: &str) {
     if let Some(from) = other.strip_prefix("artistName:") {
         prompt_artist_name(app, from.to_string());
+    } else if let Some(skin) = other.strip_prefix("skin:") {
+        if SKINS.contains(&skin) {
+            set_skin(app, skin);
+        }
+    } else if let Some(skin) = other.strip_prefix("panelSkin:") {
+        if SKINS.contains(&skin) {
+            set_panel_skin(app, skin);
+        }
     } else if let Some(rest) = other.strip_prefix("corner:") {
         // `corner:<skin>:<button>`. The skin is in the id because the
         // set is per skin and each menu edits the skin of the surface it

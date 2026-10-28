@@ -94,6 +94,26 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(panel)
 }
 
+/// Switching the dropdown's skin changes its natural size.
+pub fn apply_panel_skin(app: &AppHandle, skin: &str) {
+    let store = app.state::<Arc<Store>>().inner().clone();
+    store.update(|s| s.panel_skin = skin.to_string());
+
+    if let Some(panel) = app.get_webview_window(DROPDOWN) {
+        // As `window::apply_skin`: the lyrics panel goes, the memory of it stays.
+        if expanded_by(app).is_some_and(|which| !window::panel_fits_skin(&which, skin)) {
+            *state(app).expanded_by.lock().expect("panel lock") = None;
+            set_wanted(app, None);
+            let _ = app.emit_to(DROPDOWN, "panel-collapsed", ());
+        }
+        // The natural size changed, so the collapsed rect is what the zoom
+        // follows — never the geometry the window still reports.
+        let rect = resize(app, &panel);
+        let size = size_of(app);
+        window::apply_zoom_to(app, &panel, Rect { width: size.0, height: size.1, ..rect });
+    }
+}
+
 /// Grow downwards for whichever panel is open, clamped to the screen.
 /// Returns the rect it asked for — the caller cannot read it back yet.
 fn resize(app: &AppHandle, panel: &WebviewWindow) -> Rect {
@@ -184,6 +204,7 @@ fn restore(app: &AppHandle) {
             .state::<Arc<Store>>()
             .get(|s| s.dropdown_panel.clone())
             .filter(|which| window::panel_is_restorable(which))
+            .filter(|which| window::panel_fits_skin(which, &window::panel_skin_of(&app.state::<Arc<Store>>())))
             .filter(|_| connected)?;
         // Sized here, before the window is on screen, so it drops at its full
         // height; the renderer's own `set_panel` then finds nothing to do.

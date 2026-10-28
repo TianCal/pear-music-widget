@@ -18,7 +18,7 @@ new ResizeObserver((entries) => {
 new ResizeObserver(() => {
   lyricMeasured = false;
   lyricSettled = false;
-  if (openPanel === 'lyrics') {
+  if (lyricsShowing()) {
     lyricActive = -1;
     bumpProgress();
   }
@@ -71,6 +71,7 @@ el.setupOpen.addEventListener('click', () => {
 window.widget.onOnScreen(({ label, shown }) => {
   if (IS_PANEL || label !== 'widget') return;
   widgetOnScreen = shown;
+  renderTurning();
   if (shown) {
     if (state.cover) applyPalette(state.cover);
     bumpProgress();

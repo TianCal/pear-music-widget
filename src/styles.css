@@ -1853,3 +1853,543 @@ body.skin-stack .upnext:not([hidden]) {
 .artist-play-all.busy {
   opacity: 0.6;
 }
+
+/* ---------------------------------------------------------- vinyl skin */
+
+/* Vinyl — the cover as the label of a record that turns while it plays, the
+   line being sung filling with the accent, and what is coming as a row of
+   album covers. One centred column: `.player` and `.meta` step aside
+   (`display: contents`) so the card's own flex column can order the art, the
+   titles, the lyrics, the transport and the covers directly. The queue and
+   search panels still open below and keep their `flex-basis`. */
+
+body.skin-vinyl .player,
+body.skin-vinyl .meta {
+  display: contents;
+}
+
+body.skin-vinyl .player[hidden] {
+  display: none;
+}
+
+/* `display: contents` drops the player's box, so each piece is positioned
+   itself to paint above `.ambient` and `.scrim`. */
+body.skin-vinyl .titles,
+body.skin-vinyl .controls {
+  position: relative;
+}
+
+body.skin-vinyl .art {
+  order: 1;
+  flex: 0 0 auto;
+  width: 144px;
+  height: 144px;
+  margin: 18px auto 0;
+  border-radius: 50%;
+  background:
+    conic-gradient(from 30deg, rgba(255, 255, 255, 0.07), transparent 12%, transparent 38%,
+      rgba(255, 255, 255, 0.06) 50%, transparent 62%, transparent 88%, rgba(255, 255, 255, 0.07)),
+    repeating-radial-gradient(circle, #121214 0 1.6px, #19191c 1.6px 3.2px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45), inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+
+/* The label: the cover, turning. Only the label turns — the grooves and the
+   sheen are rotationally symmetric, so turning them would cost a layer and
+   show nothing. Paused, not removed, so it stops where it was. */
+body.skin-vinyl .art img {
+  position: absolute;
+  inset: 21%;
+  width: 58%;
+  height: 58%;
+  border-radius: 50%;
+  will-change: transform;
+  animation: vinyl-turn 9s linear infinite;
+  animation-play-state: paused;
+}
+
+/* `turning`, not `is-playing`: renderTurning also stops it while the surface
+   is off screen, where it would only make the window server redraw. */
+body.skin-vinyl.turning .art img {
+  animation-play-state: running;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.skin-vinyl .art img {
+    animation: none;
+  }
+}
+
+/* The spindle hole. */
+body.skin-vinyl .art::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: #0d0d0f;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+}
+
+/* `transform`, not the `rotate` property, so it runs on the compositor the
+   way the lyric roll does. */
+@keyframes vinyl-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+body.skin-vinyl .titles {
+  order: 2;
+  align-items: center;
+  margin-top: 12px;
+  text-align: center;
+}
+
+/* No title gutter for the corner bar: it stands down the right-hand side here,
+   beside the record, not over the words. Both selectors, because the idle
+   bar's hover rule is the more specific one. */
+body.skin-vinyl .titles,
+body.skin-vinyl .card:hover .corner-bar.idle ~ .player .titles {
+  padding: 0 18px;
+}
+
+body.skin-vinyl .marquee {
+  max-width: 100%;
+}
+
+body.skin-vinyl .title {
+  font-size: 15.5px;
+}
+
+body.skin-vinyl .corner-bar {
+  flex-direction: column;
+  top: 12px;
+  right: 9px;
+}
+
+body.skin-vinyl .playlists {
+  top: 12px;
+  right: 34px;
+}
+
+/* One line at a time: the window is a line and a half tall, the line being
+   sung sits dead centre, and its neighbours only show as they fade through. */
+/* Tall enough for a line that wraps once. */
+body.skin-vinyl .lyrics {
+  order: 3;
+  flex: 0 0 58px;
+  margin: 4px 0;
+}
+
+body.skin-vinyl .player[hidden] ~ .lyrics {
+  display: none;
+}
+
+body.skin-vinyl .lyrics[hidden] {
+  display: flex;
+}
+
+body.skin-vinyl .lyrics-scroll {
+  --lyric-raise: 0;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 15%, #000 85%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 15%, #000 85%, transparent 100%);
+}
+
+body.skin-vinyl .lyrics-lines {
+  padding: 0 22px;
+}
+
+body.skin-vinyl .lyric {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 0;
+  opacity: 0.55;
+}
+
+body.skin-vinyl .lyric.active {
+  opacity: 1;
+  scale: 1.04;
+}
+
+/* The fill. `--sung` is written by `singAlong` as the line goes. The text is
+   painted by its own background, clipped to the glyphs. */
+body.skin-vinyl .lyric.active .lyric-text {
+  background: linear-gradient(90deg, var(--accent) var(--sung, 0%), var(--fg-dim) var(--sung, 0%));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+body.skin-vinyl .lyrics-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 22px;
+}
+
+body.skin-vinyl .lyrics-note[hidden] {
+  display: none;
+}
+
+body.skin-vinyl .controls {
+  order: 4;
+  flex: 0 0 auto;
+  justify-content: center;
+  column-gap: 22px;
+  row-gap: 8px;
+  padding: 0 22px;
+}
+
+body.skin-vinyl #btn-like,
+body.skin-vinyl .volume,
+body.skin-liner #btn-like,
+body.skin-liner .volume {
+  display: none;
+}
+
+/* Neither new skin has a speaker, so a volume change shows on the bar. */
+body.skin-vinyl .seek-vol,
+body.skin-liner .seek-vol {
+  display: flex;
+}
+
+body.skin-vinyl .seek.showing-volume .seek-vol,
+body.skin-liner .seek.showing-volume .seek-vol {
+  opacity: 1;
+}
+
+body.skin-vinyl .seek.showing-volume .rail,
+body.skin-vinyl .seek.showing-volume .knob,
+body.skin-liner .seek.showing-volume .rail,
+body.skin-liner .seek.showing-volume .knob {
+  opacity: 0.18;
+}
+
+body.skin-vinyl .btn.play {
+  width: 40px;
+  height: 40px;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+body.skin-vinyl .upnext {
+  order: 5;
+  flex: 0 0 auto;
+  padding: 14px 14px 16px;
+}
+
+/* One row of covers, five to a view: 5 x 48 + 4 x 8 = 272, the strip's width. */
+body.skin-vinyl .upnext-grid {
+  grid-template-rows: 48px;
+  grid-auto-columns: calc((100% - 32px) / 5);
+}
+
+body.skin-vinyl .upnext-item {
+  position: relative;
+  padding: 0;
+  border-radius: 7px;
+  background: transparent;
+}
+
+body.skin-vinyl .upnext-item img {
+  width: 100%;
+  height: 100%;
+  border-radius: 7px;
+}
+
+body.skin-vinyl .upnext-text {
+  display: none;
+}
+
+/* The ring sits inside the cover: the strip's scroller would clip one drawn
+   outside it. */
+body.skin-vinyl .upnext-item.now {
+  box-shadow: none;
+}
+
+body.skin-vinyl .upnext-item.now::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+body.skin-vinyl .upnext:not([hidden]) {
+  display: flex;
+}
+
+/* Panels open under everything else, as on Stack. */
+body.skin-vinyl .queue,
+body.skin-vinyl .search,
+body.skin-vinyl .setup {
+  order: 6;
+}
+
+/* ---------------------------------------------------------- liner skin */
+
+/* Liner Notes — an album booklet. Paper instead of glass, serif type, the
+   queue as a numbered track list down the left and the lyrics rolling beside
+   it. A grid of the card's own children, the player's two wrappers stepping
+   aside as on Vinyl. The panel row is empty until the queue or search opens;
+   each then gives itself the height `panel_height` adds to the window. The
+   paper follows the system appearance, so the overlays drawn over it do too. */
+
+body.skin-liner {
+  --paper: #f3ecdf;
+  --fg: #2a241b;
+  --fg-dim: rgba(42, 36, 27, 0.62);
+  --fg-faint: rgba(42, 36, 27, 0.36);
+  --hairline: rgba(42, 36, 27, 0.14);
+  --rail: rgba(42, 36, 27, 0.16);
+  --hover: rgba(42, 36, 27, 0.07);
+  --serif: ui-serif, 'Songti SC', 'STSong', Georgia, serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  body.skin-liner {
+    --paper: #1f1b16;
+    --fg: #efe6d6;
+    --fg-dim: rgba(239, 230, 214, 0.62);
+    --fg-faint: rgba(239, 230, 214, 0.34);
+    --hairline: rgba(239, 230, 214, 0.13);
+    --rail: rgba(239, 230, 214, 0.18);
+    --hover: rgba(239, 230, 214, 0.08);
+  }
+}
+
+body.skin-liner .card,
+body.skin-liner.liquid-glass .card {
+  display: grid;
+  grid-template-columns: 46px 78px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'art   titles titles'
+    'list  list   lyrics'
+    'ctl   ctl    ctl'
+    'panel panel  panel';
+  background: var(--paper);
+}
+
+body.skin-liner .ambient,
+body.skin-liner .scrim {
+  display: none;
+}
+
+body.skin-liner .player,
+body.skin-liner .meta {
+  display: contents;
+}
+
+body.skin-liner .player[hidden] {
+  display: none;
+}
+
+body.skin-liner .titles,
+body.skin-liner .controls {
+  position: relative;
+}
+
+body.skin-liner .art {
+  grid-area: art;
+  width: 46px;
+  height: 46px;
+  margin: 16px 0 0 16px;
+  border-radius: 3px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18), inset 0 0 0 0.5px var(--hairline);
+}
+
+body.skin-liner .titles {
+  grid-area: titles;
+  justify-content: center;
+  margin: 16px 0 0 28px;
+  font-family: var(--serif);
+}
+
+body.skin-liner .marquee.scroll {
+  padding-left: 12px;
+  margin-left: -12px;
+}
+
+body.skin-liner .title {
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+body.skin-liner .subtitle {
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+/* The track list. Words only — the numbers are the queue's own order. */
+body.skin-liner .upnext {
+  grid-area: list;
+  margin: 14px 0 0 16px;
+  padding: 0 10px 0 0;
+  border-right: 0.5px solid var(--hairline);
+  counter-reset: track;
+}
+
+body.skin-liner .upnext:not([hidden]) {
+  display: flex;
+}
+
+/* Padded by the fade's depth, so the first and last tracks can scroll clear
+   of it. */
+body.skin-liner .upnext-grid {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10%, #000 90%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 10%, #000 90%, transparent 100%);
+}
+
+body.skin-liner .upnext-item {
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  background: transparent;
+  counter-increment: track;
+}
+
+body.skin-liner .upnext-item::before {
+  content: counter(track, decimal-leading-zero);
+  flex: 0 0 auto;
+  width: 16px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-faint);
+}
+
+body.skin-liner .upnext-item:hover {
+  background: var(--hover);
+}
+
+body.skin-liner .upnext-item img,
+body.skin-liner .upnext-artist {
+  display: none;
+}
+
+body.skin-liner .upnext-name {
+  font-family: var(--serif);
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--fg-dim);
+}
+
+body.skin-liner .upnext-item.now {
+  box-shadow: none;
+}
+
+body.skin-liner .upnext-item.now .upnext-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+body.skin-liner .upnext-item.now::before {
+  color: var(--accent);
+}
+
+/* The lyrics: left-aligned, like a booklet's printed words. */
+body.skin-liner .lyrics {
+  grid-area: lyrics;
+  margin: 14px 14px 0 0;
+}
+
+body.skin-liner .lyrics[hidden] {
+  display: flex;
+}
+
+body.skin-liner .player[hidden] ~ .lyrics {
+  display: none;
+}
+
+body.skin-liner .lyrics-scroll {
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14%, #000 86%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 14%, #000 86%, transparent 100%);
+}
+
+body.skin-liner .lyrics-lines {
+  padding: 0 0 0 14px;
+}
+
+body.skin-liner .lyric {
+  align-items: flex-start;
+  text-align: left;
+  padding: 4px 0;
+  font-family: var(--serif);
+  font-size: 13.5px;
+  font-weight: 400;
+  transform-origin: left center;
+}
+
+body.skin-liner .lyric.active {
+  color: var(--fg);
+  scale: 1.06;
+}
+
+/* The click band sits over the start of the line, where a left-aligned line
+   has its words. */
+body.skin-liner button.lyric::after {
+  inset: 0 40% 0 0;
+}
+
+body.skin-liner .lyrics-note {
+  padding: 10px 0 0 14px;
+  font-family: var(--serif);
+  font-style: italic;
+  text-align: left;
+}
+
+/* Transport and seek on one line across the foot of the page. */
+body.skin-liner .controls {
+  grid-area: ctl;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  column-gap: 4px;
+  margin: 8px 18px 12px 12px;
+}
+
+body.skin-liner .btn.play {
+  width: 30px;
+  height: 30px;
+  margin: 0;
+}
+
+body.skin-liner .seek {
+  order: 99;
+  flex: 1 1 auto;
+  margin-left: 10px;
+}
+
+body.skin-liner .rail {
+  height: 2px;
+}
+
+/* Must match `panel_height` in src-tauri/src/window.rs, as the flex-basis
+   does on the other skins. */
+body.skin-liner .queue {
+  grid-area: panel;
+  height: 260px;
+  border-top: 0.5px solid var(--hairline);
+}
+
+body.skin-liner .search {
+  grid-area: panel;
+  height: 216px;
+  border-top: 0.5px solid var(--hairline);
+}
+
+body.skin-liner .setup {
+  grid-row: 1 / 4;
+  grid-column: 1 / -1;
+}

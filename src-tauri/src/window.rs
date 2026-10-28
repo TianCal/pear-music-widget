@@ -30,18 +30,35 @@ pub const DROPDOWN: &str = "panel";
 
 /// Natural size per skin. A flat table on purpose — there are no variants and no
 /// automatic switching, so dragging an edge only ever scales the skin showing.
-pub const BASE: [(&str, f64, f64); 1] = [("stack", 330.0, 284.0)];
+pub const BASE: [(&str, f64, f64); 3] = [
+    ("stack", 330.0, 284.0),
+    ("vinyl", 300.0, 420.0),
+    ("liner", 380.0, 300.0),
+];
 
-pub const SKINS: [&str; 1] = ["stack"];
+pub const SKINS: [&str; 3] = ["stack", "vinyl", "liner"];
 
-/// Whether a skin draws the queue as part of its own layout — Stack does, under
-/// the transport. Declared here beside `BASE` so a new skin states its appetite
-/// in one place; `refresh_queue` used to ask `skin == "stack"` in two spots.
+/// Whether a skin draws the queue as part of its own layout — Stack under the
+/// transport, Vinyl as a row of covers, Liner as a numbered track list.
+/// Declared here beside `BASE` so a new skin states its appetite in one place.
 ///
 /// This is about the *skin*. The queue panel is orthogonal: it can be open over
 /// any skin, and it makes the queue wanted on its own.
 pub fn skin_shows_queue(skin: &str) -> bool {
-    matches!(skin, "stack")
+    matches!(skin, "stack" | "vinyl" | "liner")
+}
+
+/// Whether a skin draws the lyrics as part of its own layout. Those skins have
+/// no lyrics panel: the corner button is gone and a remembered "lyrics" panel
+/// is not reopened over them (`panel_fits_skin`).
+pub fn skin_shows_lyrics(skin: &str) -> bool {
+    matches!(skin, "vinyl" | "liner")
+}
+
+/// Whether `which` may open over `skin`. Every panel may, except the lyrics
+/// panel over a skin that already shows the lyrics.
+pub fn panel_fits_skin(which: &str, skin: &str) -> bool {
+    !(which == "lyrics" && skin_shows_lyrics(skin))
 }
 
 const MIN_WIDTH: f64 = 240.0;
@@ -79,6 +96,13 @@ pub struct Rect {
     pub height: f64,
 }
 
+/// Which corner of the window stays put when its size changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Anchor {
+    pub right: bool,
+    pub bottom: bool,
+}
+
 /// Per-window runtime state. Electron hung these off the BrowserWindow; here
 /// they are keyed by window label.
 #[derive(Default)]
@@ -88,6 +112,14 @@ pub struct WindowExtras {
     /// The size to come back to. Remembered rather than recomputed so an odd
     /// size the user chose survives the round trip.
     pub collapsed: Option<Rect>,
+    /// The corner to hold when the size changes, decided from a position the
+    /// *user* put the window in and then held onto. Re-deriving it after every
+    /// resize is what walked the widget up the screen: the skins differ by 174
+    /// points of height, so growing one pushes the window into the other half of
+    /// the display and flips which corner looks nearest. `None` until the window
+    /// has been seen somewhere the user left it, which is also why it need not
+    /// be persisted — the saved position answers the question on first use.
+    pub anchor: Option<Anchor>,
     /// The last geometry we asked for ourselves, so a move or resize event can
     /// be told apart from one the user caused.
     pub last_set: Option<Rect>,
@@ -309,6 +341,45 @@ fn same_rect(a: Rect, b: Rect) -> bool {
         && (a.height - b.height).abs() <= 1.0
 }
 
+/// The corner of `rect` nearest a corner of `area`.
+fn anchor_in(area: Rect, rect: Rect) -> Anchor {
+    Anchor {
+        right: (area.x + area.width - (rect.x + rect.width)).abs() < (rect.x - area.x).abs(),
+        bottom: (area.y + area.height - (rect.y + rect.height)).abs() < (rect.y - area.y).abs(),
+    }
+}
+
+/// The corner of `rect` nearest a corner of the display it sits on.
+fn anchor_for(app: &AppHandle, rect: Rect) -> Anchor {
+    anchor_in(work_area_matching(app, rect), rect)
+}
+
+/// Where a window of size `next` lands when `current` is resized about `anchor`.
+///
+/// A skin that is 174 points taller can still push a window anchored near the
+/// bottom of a short display up under the menu bar, so the result is clamped to
+/// the work area. Clamping breaks the round trip, but only in the corner case
+/// where the alternative is off-screen.
+fn place(area: Rect, current: Rect, anchor: Anchor, next: (f64, f64)) -> Position {
+    let x = if anchor.right {
+        current.x + current.width - next.0
+    } else {
+        current.x
+    }
+    .round();
+    let y = if anchor.bottom {
+        current.y + current.height - next.1
+    } else {
+        current.y
+    }
+    .round();
+
+    Position {
+        x: x.clamp(area.x, (area.x + area.width - next.0).max(area.x)),
+        y: y.clamp(area.y, (area.y + area.height - next.1).max(area.y)),
+    }
+}
+
 // --------------------------------------------------------------------- zoom
 
 /// Scale the page so the layout always fills the window. The renderer is
@@ -449,7 +520,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // the page boots well after `show`, so restoring it from there would put a
     // visible grow into every launch. The renderer's own `set_panel` then finds
     // the window already expanded and does nothing.
-    if let Some(panel) = store.get(|s| s.panel.clone()) {
+    let remembered = store.get(|s| s.panel.clone());
+    if let Some(panel) = remembered.filter(|which| panel_fits_skin(which, &skin)) {
         set_expanded(app, &window, Some(&panel));
     }
 
@@ -544,6 +616,16 @@ pub fn schedule_persist(app: &AppHandle) {
         let collapsed =
             state.with_extras(WIDGET, |extras| extras.expanded_by.as_ref().and(extras.collapsed));
         let rect = collapsed.unwrap_or_else(|| bounds_of(&window));
+
+        // Only geometry the user produced re-decides the anchor. Our own
+        // resizes land here too — Tauri emits the same events for them — and
+        // reading the nearest corner back off one of those is the drift.
+        // Measured collapsed, or an open panel's height would drag the window's
+        // bottom edge nearer the screen's and flip the answer on its own.
+        if !is_ours(&state, WIDGET, rect) {
+            let anchor = anchor_for(&app, rect);
+            state.with_extras(WIDGET, |extras| extras.anchor = Some(anchor));
+        }
 
         // One write, not one per field, and off this async worker.
         let skin = skin_of(&store);
@@ -647,6 +729,90 @@ fn apply_collapsed_size(app: &AppHandle, window: &WebviewWindow, rect: Rect) {
     );
 }
 
+/// Resize to `next`, pinning the corner the window is anchored to so a widget
+/// parked bottom-right stays there. Measures against the collapsed bounds when a
+/// panel is open, so the panel's extra height does not skew the result.
+///
+/// The anchor is whichever corner was nearest a screen corner *when the user
+/// last placed the window*, not when this runs. Deciding it here made the swap
+/// asymmetric: a short skin near the bottom pins its bottom and grows upward,
+/// from where the top is now nearer, so switching back pins the top instead —
+/// the height difference lost every round trip, which is what walked the widget
+/// off the top of the screen.
+fn resize_keeping_corner(app: &AppHandle, window: &WebviewWindow, next: (f64, f64)) -> Position {
+    let state = state(app).inner().clone();
+    let current = state
+        .with_extras(window.label(), |extras| extras.collapsed)
+        .unwrap_or_else(|| bounds_of(window));
+
+    let area = work_area_matching(app, current);
+    let fallback = anchor_in(area, current);
+    let anchor = state.with_extras(window.label(), |extras| *extras.anchor.get_or_insert(fallback));
+    let at = place(area, current, anchor, next);
+
+    apply_collapsed_size(
+        app,
+        window,
+        Rect {
+            x: at.x,
+            y: at.y,
+            width: next.0,
+            height: next.1,
+        },
+    );
+    at
+}
+
+// --------------------------------------------------------------- skin swap
+
+/// Switch layout wholesale. Each skin has its own aspect ratio, so the lock has
+/// to be re-set or the next drag would snap the window back to the old shape.
+///
+/// The shape is the one the window is actually in, panel included. Re-imposing
+/// the *collapsed* limits and aspect on a window standing open at a panel's
+/// height is what made this look unfixed: macOS clamped the too-tall window on
+/// the next drag, and the resize it did behind our backs was read as the user
+/// moving the widget, which handed the anchor a position nobody had chosen.
+pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
+    if !SKINS.contains(&skin) {
+        return;
+    }
+    let store = app.state::<Arc<Store>>().inner().clone();
+    store.update(|s| s.skin = skin.to_string());
+
+    // A lyrics panel cannot stay open over a skin that shows the lyrics. Closed
+    // here rather than by the page, which may be hidden and not hear about the
+    // skin until it shows; and without touching the remembered panel, so going
+    // back to the old skin reopens it.
+    let open = state(app).with_extras(window.label(), |extras| extras.expanded_by.clone());
+    if open.as_deref().is_some_and(|which| !panel_fits_skin(which, skin)) {
+        set_expanded(app, window, None);
+        let _ = app.emit_to(window.label(), "panel-collapsed", ());
+    }
+    let open = state(app).with_extras(window.label(), |extras| extras.expanded_by.clone());
+    let shape = shape_of(skin, open.as_deref());
+
+    macos::set_aspect_ratio(window, None);
+    apply_size_limits(window, shape);
+
+    // Come back to whatever size the user last left this skin at.
+    let size = size_for_skin(&store, skin);
+    let position = resize_keeping_corner(app, window, size);
+    store.update(|s| s.bounds = Some(position));
+
+    macos::set_aspect_ratio(window, Some(shape));
+    apply_zoom_to(
+        app,
+        window,
+        Rect {
+            x: position.x,
+            y: position.y,
+            width: size.0,
+            height: size.1,
+        },
+    );
+}
+
 /// Back to the skin's natural size, in the default position, forgetting the size
 /// the user had chosen for it.
 pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
@@ -658,6 +824,16 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
     store.update_soon(|s| {
         s.sizes.remove(&skin);
         s.bounds = Some(position);
+    });
+
+    // Reset parks the widget top right, so that is where it is anchored from
+    // now on. Nothing else moves the window without the user's hand on it, so
+    // this is the one place the anchor is set rather than observed.
+    state(app).with_extras(window.label(), |extras| {
+        extras.anchor = Some(Anchor {
+            right: true,
+            bottom: false,
+        })
     });
 
     let rect = Rect {
@@ -673,6 +849,76 @@ pub fn reset_window(app: &AppHandle, window: &WebviewWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 1440×900 display with the menu bar taken off the top.
+    const AREA: Rect = Rect {
+        x: 0.0,
+        y: 25.0,
+        width: 1440.0,
+        height: 875.0,
+    };
+
+    fn rect(x: f64, y: f64, skin: &str) -> Rect {
+        let (width, height) = base_for(skin);
+        Rect { x, y, width, height }
+    }
+
+    /// The bug: the corner was re-read from geometry the resize had just moved,
+    /// so a short skin → tall skin → short skin never came back. Held anchor,
+    /// it does.
+    #[test]
+    fn switching_skin_and_back_returns_to_where_it_started() {
+        let start = rect(500.0, 450.0, "liner");
+        let anchor = anchor_in(AREA, start);
+        assert!(anchor.bottom, "a window at y=450 sits nearer the bottom");
+
+        let vinyl = place(AREA, start, anchor, base_for("vinyl"));
+        assert_ne!(vinyl.y, start.y, "the taller skin has to grow somewhere");
+
+        let back = place(AREA, rect(vinyl.x, vinyl.y, "vinyl"), anchor, base_for("liner"));
+        assert_eq!((back.x, back.y), (start.x, start.y));
+    }
+
+    #[test]
+    fn a_widget_parked_in_a_corner_stays_in_it() {
+        let (width, height) = base_for("stack");
+        let parked = Rect {
+            x: AREA.x + AREA.width - width - 16.0,
+            y: AREA.y + AREA.height - height - 16.0,
+            width,
+            height,
+        };
+        let anchor = anchor_in(AREA, parked);
+        assert_eq!(anchor, Anchor { right: true, bottom: true });
+
+        let vinyl = place(AREA, parked, anchor, base_for("vinyl"));
+        let (vinyl_width, vinyl_height) = base_for("vinyl");
+        assert_eq!(vinyl.x + vinyl_width, parked.x + parked.width);
+        assert_eq!(vinyl.y + vinyl_height, parked.y + parked.height);
+    }
+
+    #[test]
+    fn a_taller_skin_never_lands_under_the_menu_bar() {
+        // Anchored to the bottom of a display too short to grow into.
+        let short = Rect { x: 0.0, y: 25.0, width: 1440.0, height: 340.0 };
+        let low = rect(40.0, 60.0, "stack");
+        let anchor = anchor_in(short, low);
+        assert!(anchor.bottom);
+
+        let vinyl = place(short, low, anchor, base_for("vinyl"));
+        assert!(vinyl.y >= short.y, "grew to y={} above {}", vinyl.y, short.y);
+    }
+
+    #[test]
+    fn the_lyrics_panel_never_opens_over_a_skin_that_shows_lyrics() {
+        assert!(panel_fits_skin("lyrics", "stack"));
+        assert!(!panel_fits_skin("lyrics", "vinyl"));
+        assert!(!panel_fits_skin("lyrics", "liner"));
+        assert!(panel_fits_skin("queue", "liner"));
+        for skin in SKINS {
+            assert!(skin_shows_queue(skin), "{skin} draws no queue");
+        }
+    }
 
     /// The claim that lets an expanded window keep an aspect lock at all: the
     /// height `apply_collapsed_size` computes for a given width is the height

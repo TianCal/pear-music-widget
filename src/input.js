@@ -157,7 +157,7 @@ el.card.addEventListener(
   'wheel',
   (event) => {
     if (searching) return; // the wheel belongs to the result list
-    if (openPanel === 'lyrics' && event.target.closest('#lyrics')) {
+    if (lyricsShowing() && event.target.closest('#lyrics')) {
       scrollLyrics(event.deltaY);
       return;
     }

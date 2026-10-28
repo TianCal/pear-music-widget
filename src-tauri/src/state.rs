@@ -825,7 +825,10 @@ impl Core {
             cover: self.cover.lock().expect("cover lock").clone(),
             queue: self.queue.lock().expect("queue lock").clone(),
             lyrics: self.lyrics.lock().expect("lyrics lock").clone(),
-            panel: self.store.get(|s| s.panel.clone()),
+            panel: self
+                .store
+                .get(|s| s.panel.clone())
+                .filter(|which| crate::window::panel_fits_skin(which, &crate::window::skin_of(&self.store))),
         }
     }
 
@@ -1345,7 +1348,7 @@ impl Core {
     /// Lyrics come from several providers (see `lyrics.rs`) and are only
     /// fetched while a lyrics panel is actually open.
     pub async fn refresh_lyrics(self: &Arc<Self>) {
-        let open = self.lyrics_demand.wanted_by();
+        let open = self.lyrics_wanted_by();
         // A lyrics panel left open on a hidden widget: nobody is reading, so
         // no lookup — the panel catches up when the widget shows again.
         if !open.is_empty() && !self.any_on_screen(&open) {
@@ -1405,6 +1408,20 @@ impl Core {
         if missing {
             self.refresh_lyrics().await;
         }
+    }
+
+    /// Surfaces that want the lyrics: an open lyrics panel, or a skin that
+    /// draws them in its own layout. The skin half is read from the store, as
+    /// for the queue (`queue_wanted`).
+    fn lyrics_wanted_by(&self) -> HashSet<String> {
+        let mut open = self.lyrics_demand.wanted_by();
+        if crate::window::skin_shows_lyrics(&crate::window::skin_of(&self.store)) {
+            open.insert(crate::window::WIDGET.to_string());
+        }
+        if crate::window::skin_shows_lyrics(&crate::window::panel_skin_of(&self.store)) {
+            open.insert(crate::window::DROPDOWN.to_string());
+        }
+        open
     }
 
     pub fn set_lyrics_wanted(&self, label: &str, wanted: bool) {

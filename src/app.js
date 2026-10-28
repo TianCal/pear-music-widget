@@ -8,7 +8,11 @@ const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 if (IS_PANEL) document.body.classList.add('panel');
 
 /** Must match `SKINS` in src-tauri/src/window.rs. */
-const SKINS = ['stack'];
+const SKINS = ['stack', 'vinyl', 'liner'];
+
+/** Skins whose own layout carries the lyrics, so they have no lyrics panel.
+ *  Must match `skin_shows_lyrics` in window.rs. (Every skin draws the queue.) */
+const LYRIC_SKINS = ['vinyl', 'liner'];
 
 /* The three panels that share the one slot, in corner-bar order. A table rather
    than three enumerations: opening, closing and the dropdown's blur teardown
@@ -38,6 +42,8 @@ const CORNERS = [
 /** Each surface picks its own skin: the dropdown's is configured separately. */
 const skinOf = (snapshot) => (IS_PANEL ? snapshot.panelSkin : snapshot.skin) || 'stack';
 
+const skinShowsLyrics = (snapshot) => LYRIC_SKINS.includes(skinOf(snapshot));
+
 /** The corner buttons for *this* surface's skin. One snapshot carries every
  *  skin's set, because the widget and the dropdown can be on different ones. A
  *  skin with no entry has never been changed, so everything is on. */
@@ -50,7 +56,10 @@ const isLocal = (snapshot) => snapshot.source === 'local' || snapshot.song?.medi
 const shownCorners = (snapshot) => {
   const corners = cornersOf(snapshot);
   return CORNERS.filter(
-    (button) => corners[button.key] !== false && (!button.local || isLocal(snapshot)),
+    (button) =>
+      corners[button.key] !== false &&
+      (!button.local || isLocal(snapshot)) &&
+      !(button.key === 'lyrics' && skinShowsLyrics(snapshot)),
   );
 };
 
@@ -224,6 +233,7 @@ const applyPalette = async (coverDataUrl) => {
 // sample, so take the colours again once it is back on screen. Cheap, and it is
 // the only thing that can correct a cover resolved while the dropdown was shut.
 document.addEventListener('visibilitychange', () => {
+  renderTurning();
   if (document.visibilityState !== 'visible') return;
   if (state.cover) applyPalette(state.cover);
   // The progress loop stops while the surface is off screen, so the playhead is
@@ -554,6 +564,7 @@ const renderControls = () => {
     el.play.title = state.isPlaying ? 'Pause' : 'Play';
     // The queue's equaliser holds still while paused.
     document.body.classList.toggle('is-playing', !!state.isPlaying);
+    renderTurning();
   }
 
   el.shuffle.classList.toggle('on', !!state.shuffle);
@@ -642,6 +653,14 @@ let ticking = false;
  *  its `document.hidden` cannot say. Unused by the dropdown. */
 let widgetOnScreen = true;
 
+/** Vinyl's record turns only while it plays on a surface that is on screen:
+ *  a running animation has the window server redraw the window every frame,
+ *  so a hidden one must not keep asking. */
+const renderTurning = () => {
+  const onScreen = IS_PANEL ? !document.hidden : widgetOnScreen;
+  document.body.classList.toggle('turning', !!state.isPlaying && onScreen);
+};
+
 const shouldTick = () =>
   (IS_PANEL ? !document.hidden : widgetOnScreen) && (clock.playing || seeking);
 
@@ -719,6 +738,17 @@ const applyState = (next) => {
     // stuck skin with no error anywhere.
     document.body.classList.remove(...SKINS.map((name) => `skin-${name}`));
     document.body.classList.add(`skin-${skin}`);
+    // The lyrics are part of this skin's layout now; the panel would be a
+    // second copy of them, with its button already gone. Rust has already
+    // collapsed the window (and says so with `panel-collapsed`); this is only
+    // the page's half, and it deliberately skips `setPanel(null)`, which would
+    // forget the panel the user left open on the skin they came from.
+    if (openPanel === 'lyrics' && skinShowsLyrics(state)) {
+      openPanel = null;
+      paintPanel(null);
+    }
+    // The strip changed shape and maybe axis, so it is drawn and centred anew.
+    upnextRendered = null;
     // Column widths and font sizes both changed, so the drift maths is stale.
     requestAnimationFrame(() => {
       setupMarquee(el.title);

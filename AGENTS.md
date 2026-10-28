@@ -178,9 +178,21 @@ comes on screen; its poll is a slow fallback. The play-state poll asks `/song` e
 
 ## Skins, sizing, and panels
 
-`window.rs::BASE` defines each skin's natural size. Stack is the only skin;
-Classic was removed; stored `"classic"` values fall back to Stack
-through `valid_skin`. The skin plumbing stays so a new skin is a table row. The renderer does not reflow;
+`window.rs::BASE` defines each skin's natural size. The skins are Stack,
+Vinyl and Liner Notes (`liner`), picked from Skin / Dropdown skin
+(`skin:<name>`, `panelSkin:<name>`); a switch keeps the corner the user
+anchored the widget to. Classic was removed; stored `"classic"` values fall
+back to Stack through `valid_skin`. `skin_shows_queue` and
+`skin_shows_lyrics` say what a skin draws itself, and Rust reads them for
+demand, so a skin that shows lyrics fetches them with no panel open. Those
+skins have no lyrics panel: the corner button and its menu item are gone, and
+`panel_fits_skin` keeps a remembered lyrics panel from reopening over them.
+Vinyl and Liner lay the card's own children out directly (`.player` and
+`.meta` are `display: contents`); Liner's grid gives the queue and search
+panels explicit heights that must match `panel_height`. Vinyl's karaoke fill
+is `--sung`, written by `singAlong`; its record turns only under `turning`
+(playing and on screen, `renderTurning`), because a running animation makes
+the window server redraw the window every frame. The renderer does not reflow;
 it zooms by the tighter `width/base_width` ratio. Stored sizes contain only
 width, and height is derived from the skin ratio. The AppKit corner radius stays
 in points, so CSS divides its radius by the zoom; the `zoom` event carries both

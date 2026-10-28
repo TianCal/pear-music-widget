@@ -39,8 +39,16 @@ const LYRIC_GLIDE_PACE = 5;
 
 /** The line being sung sits this far above the true middle. Dead centre reads
  *  as slightly low, because what you want to see next is underneath it — the
- *  lines already sung need less room than the ones coming. */
+ *  lines already sung need less room than the ones coming. A skin can change
+ *  it with `--lyric-raise`: Vinyl's one-line window wants the line dead centre. */
 const LYRIC_RAISE = 14;
+
+/** Whether the roll is on screen: the panel, or a skin that draws it itself. */
+const lyricsShowing = () => openPanel === 'lyrics' || skinShowsLyrics(state);
+
+/** Vinyl fills the line being sung with the accent as it goes. */
+const lyricKaraoke = () => skinOf(state) === 'vinyl';
+let lyricSung = -1; // last `--sung` written, in whole percent
 
 /** Where every line would have to sit to be centred. Costs one layout, taken
  *  when the panel is open and the lines have just changed shape. */
@@ -50,11 +58,12 @@ const measureLyrics = () => {
   // Nothing laid out yet — the panel is mid-open. Stay unmeasured and try again
   // on the next frame rather than caching a viewport of zero.
   if (!height) return false;
-  const middle = height / 2;
+  const raise = parseFloat(getComputedStyle(el.lyricsScroll).getPropertyValue('--lyric-raise'));
+  const middle = height / 2 - (Number.isFinite(raise) ? raise : LYRIC_RAISE);
 
   lyricCentres = [];
   for (let i = 0; i < rows.length; i += 1) {
-    lyricCentres.push(rows[i].offsetTop + rows[i].offsetHeight / 2 - middle + LYRIC_RAISE);
+    lyricCentres.push(rows[i].offsetTop + rows[i].offsetHeight / 2 - middle);
   }
 
   // The roll travels between "first line centred" and "last line centred", and
@@ -180,12 +189,13 @@ const lyricIndexAt = (position) => {
 
 /** Called from the rAF tick with the interpolated playhead. */
 const rollLyrics = (position) => {
-  if (openPanel !== 'lyrics' || !lyricSynced || !lyricLines.length) return;
+  if (!lyricsShowing() || !lyricSynced || !lyricLines.length) return;
   // Deferred to here rather than done at render: the panel may well have been
   // closed then, and a hidden panel has no height to measure against.
   if (!lyricMeasured && !measureLyrics()) return;
 
   const index = lyricIndexAt(position + lyricShift());
+  if (lyricKaraoke()) singAlong(index, position + lyricShift());
   if (index === lyricActive) return;
   const previous = lyricActive;
   lyricActive = index;
@@ -210,7 +220,24 @@ const rollLyrics = (position) => {
   lyricSettled = true;
 };
 
+/** How much of line `index` has been sung, as `--sung` on its row. The line's
+ *  span runs to the next cue, capped so a line before a long instrumental
+ *  break does not crawl through the whole of it. Written only when the whole
+ *  step changes. */
+const singAlong = (index, at) => {
+  const line = lyricLines[index];
+  if (!line) return;
+  const end = Math.min(lyricLines[index + 1]?.time ?? line.time + 6, line.time + 8);
+  // In 2% steps: finer than that is not visible, and each write repaints the line.
+  const sung = Math.round(clamp((at - line.time) / Math.max(0.5, end - line.time), 0, 1) * 50) * 2;
+  if (sung === lyricSung && index === lyricActive) return;
+  lyricSung = sung;
+  el.lyricsLines.children[index]?.style.setProperty('--sung', `${sung}%`);
+};
+
 const toggleLyrics = () => {
+  // The skin draws the lyrics already; there is no panel to open.
+  if (skinShowsLyrics(state)) return;
   if (openPanel === 'lyrics') {
     setPanel(null);
     return;

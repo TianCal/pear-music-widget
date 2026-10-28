@@ -134,6 +134,10 @@ const trackRow = (kind, item, playing) => {
   // Both: the slot index is what a jump takes, the id is what verifies it.
   row.dataset.slot = String(item.index);
   row.dataset.videoId = item.videoId;
+  // Vinyl draws only the cover, so the words are a hover away.
+  if (kind === 'upnext' && skinOf(state) === 'vinyl') {
+    row.title = item.artist ? `${item.title} — ${item.artist}` : item.title;
+  }
 
   const img = document.createElement('img');
   img.alt = '';
@@ -162,7 +166,7 @@ const renderUpNext = () => {
   // Hidden whenever the setup screen is up: a queue from a previous session is
   // stale the moment YouTube Music goes away.
   const playerShowing = state.status === 'connected' && !!state.song;
-  el.upnext.hidden = !playerShowing || skinOf(state) !== 'stack';
+  el.upnext.hidden = !playerShowing;
   if (el.upnext.hidden) return;
 
   const { items, current } = state.queue;
@@ -199,26 +203,36 @@ const centreUpNext = () => {
   // is a percentage of the content box less the gap, and guessing at that
   // drifts further with every column.
   const now = el.upnextGrid.children[state.queue.current ?? 0];
-  if (now) {
+  if (now && upnextVertical()) {
+    const centred = now.offsetTop + now.offsetHeight / 2 - el.upnextGrid.clientHeight / 2;
+    el.upnextGrid.scrollTop = Math.max(0, centred);
+  } else if (now) {
     const centred = now.offsetLeft + now.offsetWidth / 2 - el.upnextGrid.clientWidth / 2;
     el.upnextGrid.scrollLeft = Math.max(0, centred);
   }
   upnextArtInView();
 };
 
+/** Liner lists the queue down a column; the other skins scroll it sideways. */
+const upnextVertical = () => skinOf(state) === 'liner';
+
 /** Artwork for the cards on screen, plus a screenful either side. */
 const upnextArtInView = () => {
+  // Liner's track list is words only.
+  if (upnextVertical()) return;
   // Indexed live rather than copied: this runs on every scroll event, and only
   // a screenful of the list is wanted.
   const cards = el.upnextGrid.children;
   if (!cards.length) return;
-  // Two rows flowing by column, three columns to a view: a screenful is six
-  // cards. The column step is measured between the first two columns rather
-  // than copied from the stylesheet's width and gap.
-  const step = cards.length > 2 ? cards[2].offsetLeft - cards[0].offsetLeft : cards[0].offsetWidth;
+  // Rows flowing by column: two on Stack, one on Vinyl, told apart by whether
+  // the second card shares the first one's column. The column step is
+  // measured rather than copied from the stylesheet's width and gap.
+  const rows = cards.length > 1 && cards[1].offsetLeft === cards[0].offsetLeft ? 2 : 1;
+  const step = cards.length > rows ? cards[rows].offsetLeft - cards[0].offsetLeft : cards[0].offsetWidth;
   if (!step) return;
-  const first = Math.floor(el.upnextGrid.scrollLeft / step) * 2;
-  wantArt(unpaintedIds(cards, first - 6, first + 12), 128);
+  const view = Math.ceil(el.upnextGrid.clientWidth / step) * rows;
+  const first = Math.floor(el.upnextGrid.scrollLeft / step) * rows;
+  wantArt(unpaintedIds(cards, first - view, first + view * 2), 128);
 };
 
 el.upnextGrid.addEventListener('scroll', upnextArtInView, { passive: true });
@@ -233,7 +247,8 @@ el.upnext.addEventListener(
   (event) => {
     event.preventDefault();
     event.stopPropagation();
-    el.upnextGrid.scrollLeft += event.deltaX || event.deltaY;
+    if (upnextVertical()) el.upnextGrid.scrollTop += event.deltaY;
+    else el.upnextGrid.scrollLeft += event.deltaX || event.deltaY;
   },
   { passive: false },
 );
