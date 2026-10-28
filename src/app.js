@@ -759,7 +759,15 @@ const applyState = (next) => {
   // A seek we just issued takes a moment to be reflected; ignore stale positions
   // in that window so the bar does not snap backwards.
   const stale = performance.now() < ignorePositionUntil;
-  if (songChanged || ((positionChanged || playingChanged) && !stale && !seeking)) {
+  // Positions arrive in whole seconds, rounded down, so a playhead running up
+  // to a second ahead of one is on time, not wrong. Snapping back to each push
+  // dragged the clock back by up to a second every second, which Vinyl's
+  // sung-line fill showed as a stutter or a fill that ran ahead and retreated.
+  // The same holds across a pause and a resume: the push is our own moment,
+  // rounded down. Only a push the playhead cannot be reconciled with moves it.
+  const behind = playhead() - (next.position || 0);
+  const onTime = behind >= 0 && behind < 1.25;
+  if (songChanged || ((positionChanged || playingChanged) && !stale && !seeking && !onTime)) {
     clock.position = next.position || 0;
     clock.at = performance.now();
   }
