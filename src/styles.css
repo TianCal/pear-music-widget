@@ -1949,9 +1949,11 @@ body.skin-vinyl .titles {
 }
 
 /* No title gutter for the corner bar: it stands down the right-hand side here,
-   beside the record, not over the words. Both selectors, because the idle
-   bar's hover rule is the more specific one. */
+   beside the record, not over the words. All three selectors, because the
+   idle bar's rules are more specific: without them a faded bar left 2px on
+   the right against 18px on the left, and the title sat off centre. */
 body.skin-vinyl .titles,
+body.skin-vinyl .corner-bar.idle ~ .player .titles,
 body.skin-vinyl .card:hover .corner-bar.idle ~ .player .titles {
   padding: 0 18px;
 }
