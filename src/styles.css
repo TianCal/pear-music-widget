@@ -1992,10 +1992,12 @@ body.skin-vinyl .lyrics[hidden] {
   display: flex;
 }
 
+/* Only the sung line shows, so there is nothing at the edges to fade: a mask
+   would only eat into a line that wraps. */
 body.skin-vinyl .lyrics-scroll {
   --lyric-raise: 0;
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 15%, #000 85%, transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, #000 15%, #000 85%, transparent 100%);
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 body.skin-vinyl .lyrics-lines {
@@ -2014,24 +2016,51 @@ body.skin-vinyl .lyric.active {
   scale: 1.04;
 }
 
-/* The fill. `--sung` is written by `singAlong` as the line goes. The text is
-   painted by its own background, clipped to the glyphs. */
+/* The neighbours are hidden outright rather than faded: their tops and
+   bottoms showed through the window as slivers of the lines either side.
+   `visibility`, not `opacity`, because `.lyric` transitions opacity and this
+   document may never run a transition (see `.corner-bar.idle`). An unsynced
+   block has no active line, so it keeps every line. */
+body.skin-vinyl .lyrics:not(.plain) .lyric:not(.active) {
+  visibility: hidden;
+}
+
+/* The fill: the text painted by its own background, clipped to the glyphs,
+   with `--sung` animated across the line. Registered so it can interpolate.
+   `singAlong` sets the duration and a negative delay for how far in the line
+   already is; a soft edge rather than a hard stop, so it reads as ink
+   spreading rather than a cursor. It runs only while the record turns. */
+@property --sung {
+  syntax: '<percentage>';
+  inherits: true;
+  initial-value: 0%;
+}
+
 body.skin-vinyl .lyric.active .lyric-text {
-  background: linear-gradient(90deg, var(--accent) var(--sung, 0%), var(--fg-dim) var(--sung, 0%));
+  background: linear-gradient(90deg, var(--accent) calc(var(--sung) - 6%), var(--fg-dim) calc(var(--sung) + 6%));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  animation: vinyl-sing var(--sing-ms, 3000ms) linear var(--sing-delay, 0ms) both;
+  animation-play-state: paused;
 }
 
+body.skin-vinyl.turning .lyric.active .lyric-text {
+  animation-play-state: running;
+}
+
+@keyframes vinyl-sing {
+  from {
+    --sung: -6%;
+  }
+  to {
+    --sung: 106%;
+  }
+}
+
+/* No "looking" or "not found" here: with nothing to sing, the line is
+   simply empty. */
 body.skin-vinyl .lyrics-note {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 0 22px;
-}
-
-body.skin-vinyl .lyrics-note[hidden] {
   display: none;
 }
 
@@ -2318,8 +2347,11 @@ body.skin-liner .lyrics-scroll {
   mask-image: linear-gradient(180deg, transparent 0, #000 14%, #000 86%, transparent 100%);
 }
 
+/* The right padding is room for the active line's `scale`: it grows from its
+   left edge, so a full-width line would otherwise run 6% past the clip and
+   lose the end of its last character. Lines wrap that much earlier instead. */
 body.skin-liner .lyrics-lines {
-  padding: 0 0 0 14px;
+  padding: 0 7% 0 14px;
 }
 
 body.skin-liner .lyric {

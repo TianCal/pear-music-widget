@@ -190,7 +190,8 @@ skins have no lyrics panel: the corner button and its menu item are gone, and
 Vinyl and Liner lay the card's own children out directly (`.player` and
 `.meta` are `display: contents`); Liner's grid gives the queue and search
 panels explicit heights that must match `panel_height`. Vinyl's karaoke fill
-is `--sung`, written by `singAlong`; its record turns only under `turning`
+is a CSS animation of the registered `--sung`, started and resynced by
+`singAlong`; its record turns only under `turning`
 (playing and on screen, `renderTurning`), because a running animation makes
 the window server redraw the window every frame. The renderer does not reflow;
 it zooms by the tighter `width/base_width` ratio. Stored sizes contain only

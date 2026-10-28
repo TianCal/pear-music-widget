@@ -48,7 +48,10 @@ const lyricsShowing = () => openPanel === 'lyrics' || skinShowsLyrics(state);
 
 /** Vinyl fills the line being sung with the accent as it goes. */
 const lyricKaraoke = () => skinOf(state) === 'vinyl';
-let lyricSung = -1; // last `--sung` written, in whole percent
+/** The row the fill is running on, and when — on `performance.now()`, in
+ *  seconds — its line began by that animation's clock. */
+let singRow = -1;
+let singFrom = 0;
 
 /** Where every line would have to sit to be centred. Costs one layout, taken
  *  when the panel is open and the lines have just changed shape. */
@@ -123,6 +126,7 @@ const renderLyrics = () => {
   lyricLines = data?.lines || [];
   lyricSynced = !!data?.synced;
   lyricActive = -1;
+  singRow = -1;
   lyricManualUntil = 0;
   clearTimeout(lyricManualTimer);
 
@@ -220,19 +224,34 @@ const rollLyrics = (position) => {
   lyricSettled = true;
 };
 
-/** How much of line `index` has been sung, as `--sung` on its row. The line's
- *  span runs to the next cue, capped so a line before a long instrumental
- *  break does not crawl through the whole of it. Written only when the whole
- *  step changes. */
+/** Start the fill on line `index`. The fill itself is a CSS animation of
+ *  `--sung` over the line's span — every frame, where the 100 ms tick stepped
+ *  visibly — so this only hands it a duration and how far in to start, when
+ *  the line changes or the playhead has drifted from the animation (a seek,
+ *  a pause). The span runs to the next cue, capped so a line before a long
+ *  instrumental break does not crawl through the whole of it. */
 const singAlong = (index, at) => {
   const line = lyricLines[index];
-  if (!line) return;
+  const row = el.lyricsLines.children[index];
+  if (!line || !row) return;
+  const now = performance.now() / 1000;
+  const elapsed = at - line.time;
+  // Paused, the animation is paused too (`turning`), so only a new line moves it.
+  if (index === singRow && (!clock.playing || Math.abs(now - singFrom - elapsed) < 0.25)) return;
+
   const end = Math.min(lyricLines[index + 1]?.time ?? line.time + 6, line.time + 8);
-  // In 2% steps: finer than that is not visible, and each write repaints the line.
-  const sung = Math.round(clamp((at - line.time) / Math.max(0.5, end - line.time), 0, 1) * 50) * 2;
-  if (sung === lyricSung && index === lyricActive) return;
-  lyricSung = sung;
-  el.lyricsLines.children[index]?.style.setProperty('--sung', `${sung}%`);
+  singRow = index;
+  singFrom = now - elapsed;
+  row.style.setProperty('--sing-ms', `${Math.round(Math.max(0.5, end - line.time) * 1000)}ms`);
+  row.style.setProperty('--sing-delay', `${Math.round(-elapsed * 1000)}ms`);
+  // Already the active line, so its animation is running from the old start:
+  // drop it for a frame to restart it from the new one.
+  if (row.classList.contains('active')) {
+    const text = row.firstElementChild;
+    text.style.animation = 'none';
+    void text.offsetWidth;
+    text.style.animation = '';
+  }
 };
 
 const toggleLyrics = () => {
