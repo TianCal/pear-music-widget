@@ -397,10 +397,19 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   Spaces. On top of that, the watcher asks Quartz once a second whether
   another app's ordinary window reaches the menu-bar display's top edge,
   where in a normal Space only the menu bar can be
-  (`macos::fullscreen_on_main_display`: a fullscreen app, Split View, whose
-  windows do not span the display, a game). `visibleFrame` cannot tell: it
-  keeps the menu bar's height in fullscreen. While one does, the strip hides (`set_covered`, off screen
-  for `on_screen`, setting unchanged) and the pointer watch stands down.
+  (`macos::top_of_main_display`: a fullscreen app, Split View, whose windows
+  do not span the display, a game). `visibleFrame` cannot tell: it keeps the
+  menu bar's height in fullscreen. The same pass sees whether the menu bar's
+  own window (level 24) is down across the top: in fullscreen it slides in
+  when the pointer reaches the top, and the strip comes with it, checked
+  every 100 ms while in fullscreen with the pointer near the top or the menu
+  bar down. The strip stays while its sheet is in use, though moving into it
+  puts the menu bar away. It comes as soon as the menu bar starts down and
+  goes as soon as it starts up (the menu bar's `y` rising or falling between
+  looks). Otherwise, in fullscreen, the strip is away (`set_covered`): the
+  window stays, takes no clicks and is off screen for `on_screen`, and the
+  page slides the bar up out of sight (`strip-away`). Hiding and showing the
+  window drew a stale frame on the way back, a visible twitch.
 - **The window never resizes.** A webview shows its old picture for a frame
   after a resize, pinned to the corner, which reads as a jump or a flash. The
   window is one fixed transparent box (`WINDOW`) centred on the top edge at

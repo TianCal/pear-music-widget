@@ -331,6 +331,9 @@ function pointAt(x, y) {
 
 listen('strip-pointer', ({ payload }) => pointAt(payload.x, payload.y));
 
+// Over a fullscreen app the bar slides away with the menu bar, and back.
+listen('strip-away', ({ payload }) => root.classList.toggle('away', !!payload));
+
 // --------------------------------------------------------------- controls
 
 const command = (name, payload = null) => invoke('command', { name, payload });

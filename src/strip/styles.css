@@ -83,10 +83,14 @@ html, body {
   gap: 6px;
   padding: 0 10px;
   white-space: nowrap;
-  transition: opacity 0.15s ease-out;
+  transition: opacity 0.15s ease-out, translate 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 /* Open, the bar's words give way to the sheet's. */
 #strip.open .bar { opacity: 0; }
+/* Over a fullscreen app whose menu bar is away, the bar goes up out of
+   sight with it, and comes back down with it. `translate`, not `transform`,
+   so it composes with the centring and stays on the compositor. */
+#strip.away .bar { translate: 0 -110%; opacity: 0; }
 
 .wing { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .gap { display: flex; align-items: center; justify-content: center; }

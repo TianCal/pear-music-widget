@@ -502,17 +502,29 @@ pub fn set_frame(window: &WebviewWindow, x: f64, y: f64, width: f64, height: f64
     });
 }
 
-/// Whether a fullscreen Space is showing on the menu-bar display: another
-/// app's ordinary window reaches the display's top edge, where in a normal
-/// Space only the menu bar can be. That holds for one app alone and for Split
-/// View, where each app takes part of the width (Chrome measured at 1200 of
-/// 1920 points), and for a borderless full-screen game or presentation. The
-/// menu bar is hidden then, and anything drawn where it was would sit on that
-/// app's content. (`visibleFrame` is no help: it kept the menu bar's height.)
-///
-/// Quartz's window list is safe off the main thread; the array it returns is
-/// toll-free bridged to `NSArray`, so it is read with plain messages.
-pub fn fullscreen_on_main_display() -> bool {
+/// What sits at the top of the menu-bar display.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TopOfDisplay {
+    /// A fullscreen Space is showing: another app's ordinary window reaches
+    /// the display's top edge, where in a normal Space only the menu bar can
+    /// be. That holds for one app alone, for Split View, where each app takes
+    /// part of the width (Chrome measured at 1200 of 1920 points), and for a
+    /// borderless full-screen game. (`visibleFrame` is no help: it kept the
+    /// menu bar's height in fullscreen.)
+    pub fullscreen: bool,
+    /// Where the menu bar's own window (the main menu level, 24) is, as the
+    /// top of a window lined up with this display: 0 when it is down, below
+    /// zero while it slides, `None` when it is off screen. In fullscreen it is
+    /// away until the pointer reaches the top, then slides in (measured: y
+    /// -136, -13, 0) and back out.
+    pub menu_bar: Option<f64>,
+}
+
+/// Read through Quartz's window list, which is safe off the main thread; the
+/// array it returns is toll-free bridged to `NSArray`, so it is read with
+/// plain messages.
+pub fn top_of_main_display() -> TopOfDisplay {
+    const MAIN_MENU_LEVEL: f64 = 24.0;
     const ON_SCREEN_ONLY: u32 = 1 << 0;
     const EXCLUDE_DESKTOP: u32 = 1 << 4;
     let ours = std::process::id() as i64;
@@ -520,7 +532,7 @@ pub fn fullscreen_on_main_display() -> bool {
         let screen = CGDisplayBounds(CGMainDisplayID());
         let list = CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0);
         if list.is_null() {
-            return false;
+            return TopOfDisplay::default();
         }
         let key = |name: &CStr| -> *mut AnyObject { msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()] };
         let (layer_key, owner_key, alpha_key, bounds_key) = (
@@ -536,12 +548,13 @@ pub fn fullscreen_on_main_display() -> bool {
         };
 
         let count: usize = msg_send![list, count];
-        let mut covered = false;
+        let mut top = TopOfDisplay::default();
         for i in 0..count {
             let window: *mut AnyObject = msg_send![list, objectAtIndex: i];
-            // Ordinary app windows only; the menu bar, the Dock and overlays
+            let layer = number(window, layer_key);
+            // Ordinary app windows and the menu bar; the Dock and overlays
             // live on other layers.
-            if number(window, layer_key) != Some(0.0)
+            if (layer != Some(0.0) && layer != Some(MAIN_MENU_LEVEL))
                 || number(window, owner_key).map(|pid| pid as i64) == Some(ours)
                 || number(window, alpha_key).unwrap_or(1.0) <= 0.0
             {
@@ -559,16 +572,23 @@ pub fn fullscreen_on_main_display() -> bool {
             ) else {
                 continue;
             };
+            let at_top = (y - screen.origin.y).abs() < 1.0;
+            if layer == Some(MAIN_MENU_LEVEL) {
+                // Lined up with this display, not moving sideways with a
+                // Space switch; how far down it has come is the answer.
+                if (x - screen.origin.x).abs() < 1.0 && (w - screen.size.width).abs() < 1.0 && y <= screen.origin.y + 1.0 {
+                    top.menu_bar = Some(y - screen.origin.y);
+                }
+                continue;
+            }
             // At the top edge, over this display, and more than a sliver
             // (fullscreen apps split their chrome into thin strips too).
-            let at_top = (y - screen.origin.y).abs() < 1.0;
             let over = x < screen.origin.x + screen.size.width && x + w > screen.origin.x;
             if at_top && over && w >= 200.0 && h >= 100.0 {
-                covered = true;
-                break;
+                top.fullscreen = true;
             }
         }
         CFRelease(list as *const std::ffi::c_void);
-        covered
+        top
     })
 }

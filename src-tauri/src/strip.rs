@@ -42,8 +42,13 @@ const HOVER_FAR: Duration = Duration::from_millis(150);
 /// resolution, which move the menu bar or its notch.
 const DISPLAY_CHECK: Duration = Duration::from_secs(2);
 
-/// How often to look for a fullscreen app over the menu-bar display.
+/// How often to look for a fullscreen app over the menu-bar display, and how
+/// often while in one with the pointer near the top or the menu bar down, so
+/// the strip comes and goes with the menu bar's own slide.
 const FULLSCREEN_CHECK: Duration = Duration::from_secs(1);
+const MENU_BAR_CHECK: Duration = Duration::from_millis(100);
+/// How far down the pointer counts as "near the top" for that.
+const NEAR_TOP: f64 = 60.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,7 +95,7 @@ pub struct StripState {
     /// Set while the strip's right-click menu is up: the pointer is in the
     /// menu, off the sheet, and that must not fold the sheet under it.
     menu_open: AtomicBool,
-    /// Set while another app covers the menu-bar display (fullscreen): the
+    /// Set while a fullscreen app is up and its menu bar is not down: the
     /// strip is hidden, with the setting still on.
     covered: AtomicBool,
     watcher: Mutex<Option<Thread>>,
@@ -165,8 +170,8 @@ pub fn set_shown(app: &AppHandle, shown: bool) {
 
 fn show(app: &AppHandle) -> tauri::Result<()> {
     let strip = state(app);
-    // Built visible; if a fullscreen app is up, the watcher hides it again
-    // within `FULLSCREEN_CHECK`.
+    // Built visible; if a fullscreen app is up with its menu bar away, the
+    // watcher hides it again within `FULLSCREEN_CHECK`.
     strip.covered.store(false, Ordering::SeqCst);
     if app.get_webview_window(LABEL).is_none() {
         let frame = frame(app);
@@ -224,6 +229,8 @@ fn watch_pointer(app: AppHandle) -> Thread {
     std::thread::spawn(move || {
         let mut checked = Instant::now();
         let mut fullscreen_checked: Option<Instant> = None;
+        let mut fullscreen = false;
+        let mut menu_bar_was: Option<f64> = None;
         let mut pointed: Option<(f64, f64)> = None;
         loop {
             if !app.state::<Arc<Store>>().get(|s| s.menu_bar_strip) {
@@ -235,9 +242,31 @@ fn watch_pointer(app: AppHandle) -> Thread {
                 std::thread::sleep(HOVER_FAR);
                 continue;
             }
-            if fullscreen_checked.is_none_or(|at| at.elapsed() >= FULLSCREEN_CHECK) {
+            let frame = *strip.frame.lock().expect("strip lock");
+            let pointer = macos::pointer_location();
+            let near_top = pointer.is_some_and(|(_, y)| y - frame.y < NEAR_TOP);
+            // In fullscreen the menu bar comes down when the pointer reaches
+            // the top, and the strip comes with it; look often then, and while
+            // it is down, so the strip leaves with it too.
+            let quick = fullscreen && (near_top || !strip.covered.load(Ordering::SeqCst));
+            let every = if quick { MENU_BAR_CHECK } else { FULLSCREEN_CHECK };
+            if fullscreen_checked.is_none_or(|at| at.elapsed() >= every) {
                 fullscreen_checked = Some(Instant::now());
-                let covered = macos::fullscreen_on_main_display();
+                let top = macos::top_of_main_display();
+                fullscreen = top.fullscreen;
+                // Moving down into the open sheet makes macOS put its menu bar
+                // away; the strip stays while its sheet is in use.
+                let in_use = strip.open.load(Ordering::SeqCst) && strip.hovered.load(Ordering::SeqCst);
+                // Down, or on its way down: come with it. On its way up: go
+                // with it, rather than after it has gone.
+                let menu_bar = match (top.menu_bar, menu_bar_was) {
+                    (None, _) => false,
+                    (Some(y), _) if y >= -0.5 => true,
+                    (Some(y), Some(was)) => y > was,
+                    (Some(_), None) => true,
+                };
+                menu_bar_was = top.menu_bar;
+                let covered = top.fullscreen && !menu_bar && !in_use;
                 if strip.covered.swap(covered, Ordering::SeqCst) != covered {
                     let handle = app.clone();
                     let _ = app.run_on_main_thread(move || set_covered(&handle, covered));
@@ -245,12 +274,11 @@ fn watch_pointer(app: AppHandle) -> Thread {
             }
             if strip.covered.load(Ordering::SeqCst) {
                 pointed = None;
-                std::thread::sleep(HOVER_FAR);
+                std::thread::sleep(if near_top { HOVER_NEAR } else { HOVER_FAR });
                 continue;
             }
-            let frame = *strip.frame.lock().expect("strip lock");
             let hot = *strip.hot.lock().expect("strip lock");
-            let at = macos::pointer_location().map(|(x, y)| (x - frame.x, y - frame.y));
+            let at = pointer.map(|(x, y)| (x - frame.x, y - frame.y));
             let inside = at.is_some_and(|at| hot.contains(at));
             if strip.hovered.swap(inside, Ordering::SeqCst) != inside {
                 if let Some(window) = app.get_webview_window(LABEL) {
@@ -282,8 +310,11 @@ fn watch_pointer(app: AppHandle) -> Thread {
     .clone()
 }
 
-/// Main thread. Step aside for a fullscreen app, and come back after it. The
-/// setting stays on; this is only whether the window is out.
+/// Main thread. Step aside for a fullscreen app, and come back with its menu
+/// bar or after it. The setting stays on, and so does the window: the page
+/// slides the bar up out of sight and back down (`strip-away`), the way the
+/// menu bar itself moves. Hiding and showing the window instead drew a stale
+/// frame on the way back, a visible twitch.
 fn set_covered(app: &AppHandle, covered: bool) {
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
@@ -297,10 +328,9 @@ fn set_covered(app: &AppHandle, covered: bool) {
     if covered {
         strip.hovered.store(false, Ordering::SeqCst);
         let _ = app.emit_to(LABEL, "strip-hover", false);
-        let _ = window.hide();
-    } else {
-        let _ = window.show();
+        macos::set_ignores_mouse(&window, true);
     }
+    let _ = app.emit_to(LABEL, "strip-away", covered);
     crate::on_screen(app, LABEL, !covered);
 }
 
