@@ -229,10 +229,12 @@ pub fn clear() {
 
 /// Remove one track's record if it is a remembered miss.
 pub fn forget_miss(video_id: &str) {
+    // Decide under the write lock: checked outside it, a hit stored between
+    // the look and the removal would be the record deleted.
+    let _write = WRITES.lock().expect("lyrics cache writes");
     if !matches!(load(video_id), Some(None)) {
         return;
     }
-    let _write = WRITES.lock().expect("lyrics cache writes");
     let Some(path) = path_for(video_id) else { return };
     // Subtract rather than re-measure: the sorter forgets a miss per card, and
     // a stat of every cache file each time is not worth it for one record.
