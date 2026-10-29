@@ -439,6 +439,9 @@ pub fn menu_bar_shape() -> (f64, f64) {
 extern "C" {
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> NSPoint;
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut AnyObject;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> NSRect;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -497,4 +500,65 @@ pub fn set_frame(window: &WebviewWindow, x: f64, y: f64, width: f64, height: f64
         );
         let _: () = msg_send![handle, setFrame: frame, display: true];
     });
+}
+
+/// Whether another app's window covers the whole of the menu-bar display: a
+/// fullscreen app, or a borderless full-screen window such as a game or a
+/// presentation. The menu bar is hidden then, and anything drawn where it
+/// was would sit on that app's content.
+///
+/// Quartz's window list is safe off the main thread; the array it returns is
+/// toll-free bridged to `NSArray`, so it is read with plain messages.
+pub fn fullscreen_on_main_display() -> bool {
+    const ON_SCREEN_ONLY: u32 = 1 << 0;
+    const EXCLUDE_DESKTOP: u32 = 1 << 4;
+    let ours = std::process::id() as i64;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let screen = CGDisplayBounds(CGMainDisplayID());
+        let list = CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0);
+        if list.is_null() {
+            return false;
+        }
+        let key = |name: &CStr| -> *mut AnyObject { msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()] };
+        let (layer_key, owner_key, alpha_key, bounds_key) = (
+            key(c"kCGWindowLayer"),
+            key(c"kCGWindowOwnerPID"),
+            key(c"kCGWindowAlpha"),
+            key(c"kCGWindowBounds"),
+        );
+        let (x_key, y_key, w_key, h_key) = (key(c"X"), key(c"Y"), key(c"Width"), key(c"Height"));
+        let number = |dict: *mut AnyObject, k: *mut AnyObject| -> Option<f64> {
+            let value: *mut AnyObject = msg_send![dict, objectForKey: k];
+            (!value.is_null()).then(|| msg_send![value, doubleValue])
+        };
+
+        let count: usize = msg_send![list, count];
+        let mut covered = false;
+        for i in 0..count {
+            let window: *mut AnyObject = msg_send![list, objectAtIndex: i];
+            // Ordinary app windows only; the menu bar, the Dock and overlays
+            // live on other layers.
+            if number(window, layer_key) != Some(0.0)
+                || number(window, owner_key).map(|pid| pid as i64) == Some(ours)
+                || number(window, alpha_key).unwrap_or(1.0) <= 0.0
+            {
+                continue;
+            }
+            let bounds: *mut AnyObject = msg_send![window, objectForKey: bounds_key];
+            if bounds.is_null() {
+                continue;
+            }
+            let near = |k, want: f64| number(bounds, k).is_some_and(|v| (v - want).abs() < 1.0);
+            if near(x_key, screen.origin.x)
+                && near(y_key, screen.origin.y)
+                && near(w_key, screen.size.width)
+                && near(h_key, screen.size.height)
+            {
+                covered = true;
+                break;
+            }
+        }
+        CFRelease(list as *const std::ffi::c_void);
+        covered
+    })
 }

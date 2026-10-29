@@ -394,7 +394,11 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   surface like the others: `crate::on_screen` on every show and hide, and it
   reads `state`, `cover` and `queue`. While it is up something is on screen,
   so the pollers keep running. It joins every desktop but not fullscreen
-  apps, whose menu bar is hidden.
+  Spaces. On top of that, the watcher asks Quartz once a second whether
+  another app's ordinary window covers the whole menu-bar display
+  (`macos::fullscreen_on_main_display`: a fullscreen app, a game, a
+  presentation); while one does, the strip hides (`set_covered`, off screen
+  for `on_screen`, setting unchanged) and the pointer watch stands down.
 - **The window never resizes.** A webview shows its old picture for a frame
   after a resize, pinned to the corner, which reads as a jump or a flash. The
   window is one fixed transparent box (`WINDOW`) centred on the top edge at

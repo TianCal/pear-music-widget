@@ -42,6 +42,9 @@ const HOVER_FAR: Duration = Duration::from_millis(150);
 /// resolution, which move the menu bar or its notch.
 const DISPLAY_CHECK: Duration = Duration::from_secs(2);
 
+/// How often to look for a fullscreen app over the menu-bar display.
+const FULLSCREEN_CHECK: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
@@ -87,6 +90,9 @@ pub struct StripState {
     /// Set while the strip's right-click menu is up: the pointer is in the
     /// menu, off the sheet, and that must not fold the sheet under it.
     menu_open: AtomicBool,
+    /// Set while another app covers the menu-bar display (fullscreen): the
+    /// strip is hidden, with the setting still on.
+    covered: AtomicBool,
     watcher: Mutex<Option<Thread>>,
 }
 
@@ -132,6 +138,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         hovered: AtomicBool::new(false),
         open: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
+        covered: AtomicBool::new(false),
         watcher: Mutex::new(None),
     }));
     let watcher = watch_pointer(app.clone());
@@ -158,6 +165,9 @@ pub fn set_shown(app: &AppHandle, shown: bool) {
 
 fn show(app: &AppHandle) -> tauri::Result<()> {
     let strip = state(app);
+    // Built visible; if a fullscreen app is up, the watcher hides it again
+    // within `FULLSCREEN_CHECK`.
+    strip.covered.store(false, Ordering::SeqCst);
     if app.get_webview_window(LABEL).is_none() {
         let frame = frame(app);
         *strip.frame.lock().expect("strip lock") = frame;
@@ -197,6 +207,7 @@ fn hide(app: &AppHandle) {
         let _ = window.destroy();
     }
     let strip = state(app);
+    strip.covered.store(false, Ordering::SeqCst);
     strip.hovered.store(false, Ordering::SeqCst);
     strip.open.store(false, Ordering::SeqCst);
     *strip.hot.lock().expect("strip lock") = Hot::default();
@@ -212,6 +223,7 @@ fn hide(app: &AppHandle) {
 fn watch_pointer(app: AppHandle) -> Thread {
     std::thread::spawn(move || {
         let mut checked = Instant::now();
+        let mut fullscreen_checked: Option<Instant> = None;
         let mut pointed: Option<(f64, f64)> = None;
         loop {
             if !app.state::<Arc<Store>>().get(|s| s.menu_bar_strip) {
@@ -220,6 +232,19 @@ fn watch_pointer(app: AppHandle) -> Thread {
             }
             let strip = state(&app);
             if strip.menu_open.load(Ordering::SeqCst) {
+                std::thread::sleep(HOVER_FAR);
+                continue;
+            }
+            if fullscreen_checked.is_none_or(|at| at.elapsed() >= FULLSCREEN_CHECK) {
+                fullscreen_checked = Some(Instant::now());
+                let covered = macos::fullscreen_on_main_display();
+                if strip.covered.swap(covered, Ordering::SeqCst) != covered {
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || set_covered(&handle, covered));
+                }
+            }
+            if strip.covered.load(Ordering::SeqCst) {
+                pointed = None;
                 std::thread::sleep(HOVER_FAR);
                 continue;
             }
@@ -255,6 +280,28 @@ fn watch_pointer(app: AppHandle) -> Thread {
     })
     .thread()
     .clone()
+}
+
+/// Main thread. Step aside for a fullscreen app, and come back after it. The
+/// setting stays on; this is only whether the window is out.
+fn set_covered(app: &AppHandle, covered: bool) {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    let strip = state(app);
+    // The setting may have changed, or the state flipped back, since the
+    // watcher asked; act on what holds now.
+    if strip.covered.load(Ordering::SeqCst) != covered {
+        return;
+    }
+    if covered {
+        strip.hovered.store(false, Ordering::SeqCst);
+        let _ = app.emit_to(LABEL, "strip-hover", false);
+        let _ = window.hide();
+    } else {
+        let _ = window.show();
+    }
+    crate::on_screen(app, LABEL, !covered);
 }
 
 /// Main thread. Re-centre and re-shape after a display change.
