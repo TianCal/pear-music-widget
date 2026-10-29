@@ -465,7 +465,7 @@ let viewSeq = 0;
 function showView(name, title = '') {
   viewSeq += 1;
   clearInterval(listArtTimer);
-  if (name === 'playlists') listArtTimer = setInterval(loadPlaylistArt, LIST_ART_CHECK_MS);
+  if (name === 'playlists') listArtTimer = setInterval(playlists.loadArt, LIST_ART_CHECK_MS);
   if (name === 'queue') listArtTimer = setInterval(loadQueueArt, LIST_ART_CHECK_MS);
   if (view === name && name === 'main') return;
   view = name;
