@@ -870,8 +870,10 @@ impl Local {
             }
         }
         let (key, bytes) = crate::artwork::find(core, &Self::wanted(core, track), priority).await?;
+        let cached = key.clone();
         let url = tauri::async_runtime::spawn_blocking(move || {
-            crate::artwork::resize(&bytes, size).map(|sized| crate::artwork::data_url(&sized))
+            crate::artwork::resize_cached(&cached, &bytes, size)
+                .map(|sized| crate::artwork::data_url(&sized))
         })
         .await
         .ok()
@@ -1426,7 +1428,8 @@ impl Local {
                         return Some(hit);
                     }
                     let (key, bytes) = crate::artwork::cached(&wanted)?;
-                    let url = crate::artwork::data_url(&crate::artwork::resize(&bytes, size)?);
+                    let sized = crate::artwork::resize_cached(&key, &bytes, size)?;
+                    let url = crate::artwork::data_url(&sized);
                     self.remember_art(format!("{key}@{size}"), url.clone());
                     Some(url)
                 });

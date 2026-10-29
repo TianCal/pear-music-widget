@@ -609,6 +609,17 @@ pub fn normalise(bytes: &[u8]) -> Option<Vec<u8>> {
     resize(bytes, STORE_PX)
 }
 
+/// `resize` for bytes that came out of the disk cache under `key`. A record
+/// that no longer decodes is dropped, so the next lookup fetches the cover
+/// again instead of returning the same unusable hit, and no cover, forever.
+pub fn resize_cached(key: &str, bytes: &[u8], size: u32) -> Option<Vec<u8>> {
+    let sized = resize(bytes, size);
+    if sized.is_none() {
+        let _ = std::fs::remove_file(dir().join(format!("{key}.jpg")));
+    }
+    sized
+}
+
 pub fn resize(bytes: &[u8], size: u32) -> Option<Vec<u8>> {
     let image = image::load_from_memory(bytes).ok()?;
     let image = if image.width() > size || image.height() > size {
