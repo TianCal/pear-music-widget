@@ -658,10 +658,13 @@ let widgetOnScreen = true;
 
 /** Vinyl's record turns only while it plays on a surface that is on screen:
  *  a running animation has the window server redraw the window every frame,
- *  so a hidden one must not keep asking. */
+ *  so a hidden one must not keep asking. Off screen, transitions are off too
+ *  (`offscreen`): WebKit never advances one started in a hidden page, and a
+ *  transition stuck running kept the app redrawing for as long as it was. */
 const renderTurning = () => {
   const onScreen = IS_PANEL ? !document.hidden : widgetOnScreen;
   document.body.classList.toggle('turning', !!state.isPlaying && onScreen);
+  document.documentElement.classList.toggle('offscreen', !onScreen);
 };
 
 const shouldTick = () =>

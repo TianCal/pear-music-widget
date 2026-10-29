@@ -66,7 +66,10 @@ src-tauri/src/ws.rs → state/ → Tauri IPC → src/app.js
    contain cover, queue, or lyrics data. Those use separate change-only events;
    `widget_state` combines them only for a cold window load. The renderer
    skips any channel of that reply which has already heard a live event, since
-   the event is newer.
+   the event is newer. Pages listen through `getCurrentWindow().listen`, never
+   the global `event.listen`: a global listener hears every `emit_to` whatever
+   its target, so hidden surfaces got the `state` meant for the one on screen
+   and redrew their playhead every second.
 3. **Queue artwork is request/reply data, not an event.** Each surface calls
    `queue_art` only for visible rows. The only queue-art event is the
    payload-free `queue-art-ready` nudge, which makes surfaces ask again. Keep `ImageCache::get` promotion and the
@@ -464,8 +467,12 @@ markup.
   (`visibility: hidden` when folded) and opens by transform and opacity, which
   the compositor runs without WebKit laying out each frame. Animating height,
   width or grid rows dropped frames. Progress is a `scaleX`, written only when
-  the hairline moves a whole pixel, and the sheet's bar and clock only while
-  it is open; a transition on it would run every frame while playing. The
+  the hairline moves a whole pixel and, in steady play, at most every 2 s
+  (`HAIRLINE_MS`; a seek, new track or pause writes at once): each write
+  keeps WebKit's display link running for about 200 ms, so a pixel a second
+  kept the app drawing frames half the time. The sheet's bar and clock are
+  written only while it is open; a transition on it would run every frame
+  while playing. The
   hairline's width comes from a `ResizeObserver`, never `offsetWidth` in
   `tick`, and the 250 ms tick stands down while the bar is `away`.
 - **Hover comes from Rust.** The app is never active, so WebKit sends the
@@ -831,7 +838,11 @@ Use `img.decode()` before canvas drawing. Hidden WKWebViews may fire `onload`
 before a bitmap is available. Also avoid relying on CSS transitions for required
 state changes: the non-activating widget reports `document.hidden` and WebKit may
 never advance them. Registered colour custom properties are the exception used
-for palette interpolation. `PMW_THEME=dark|light` pins appearance for testing.
+for palette interpolation. A transition started in a hidden page stays
+running forever and keeps the app drawing, so `renderTurning` sets
+`offscreen` on the root while a surface is off screen, which turns every
+transition off (and cancels any already stuck). `PMW_THEME=dark|light` pins
+appearance for testing.
 
 ## Settings
 

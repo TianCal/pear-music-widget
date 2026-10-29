@@ -10,7 +10,9 @@
 
 (() => {
 const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+// This window's events only: the global `event.listen` also hears every
+// `emit_to` meant for the card (see `bridge.js`).
+const listen = (event, handler) => window.__TAURI__.window.getCurrentWindow().listen(event, handler);
 
 const root = document.getElementById('strip');
 const bar = document.getElementById('bar');
@@ -172,18 +174,32 @@ new ResizeObserver((entries) => {
   tick();
 }).observe(hairline.parentElement);
 
+/** Steady play moves the hairline at most this often. Every write is a frame
+ *  the app draws, and WebKit keeps its display link running for about 200 ms
+ *  after each: a pixel a second kept it running half the time. */
+const HAIRLINE_MS = 2000;
+let hairlineAt = 0;
+let hairlinePos = 0; // the position, in seconds, last written
+
 /**
  * Progress, written only when it would show: the hairline when it moves a
- * whole pixel, the sheet's bar and clock only while the sheet is open. Each
- * write is a style change the window server has to composite.
+ * whole pixel (a jump, a pause or a new width at once; steady play every
+ * `HAIRLINE_MS`), the sheet's bar and clock only while the sheet is open.
+ * Each write is a style change the window server has to composite.
  */
 function tick() {
   const duration = state?.song?.songDuration || 0;
   const p = position();
   const frac = duration ? Math.min(1, p / duration) : 0;
   const px = Math.round(frac * lineWidth);
-  if (px !== hairlinePx) {
+  const now = performance.now();
+  // A seek or a new track lands off where steady play would have got to.
+  const jumped = Math.abs(p - hairlinePos - (now - hairlineAt) / 1000) > 1.5;
+  const due = jumped || hairlinePx < 0 || !state?.isPlaying || now - hairlineAt >= HAIRLINE_MS;
+  if (px !== hairlinePx && due) {
     hairlinePx = px;
+    hairlineAt = now;
+    hairlinePos = p;
     hairline.style.setProperty('--p', frac.toFixed(4));
   }
   if (!open) return;

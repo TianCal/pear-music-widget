@@ -17,8 +17,13 @@
 
 (() => {
 const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
+
+/** Events for this window only. The global `event.listen` hears every
+ *  `emit_to`, whatever its target, so the hidden widget and dropdown heard the
+ *  once-a-second `state` meant for whichever surface was on screen, and each
+ *  other's `zoom` and `panel-collapsed`. Broadcasts (`emit`) still arrive. */
+const listen = (event, handler) => getCurrentWindow().listen(event, handler);
 
 const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 

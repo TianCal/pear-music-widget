@@ -92,6 +92,17 @@ html {
     --accent-soft 0.7s ease;
 }
 
+/* Off screen (`renderTurning`), nothing transitions. WebKit does not advance
+   a transition in a hidden page, so one started there stayed running, and a
+   running transition keeps the app drawing frames. Turning them off also
+   cancels any already stuck. */
+.offscreen,
+.offscreen *,
+.offscreen *::before,
+.offscreen *::after {
+  transition: none !important;
+}
+
 * {
   margin: 0;
   padding: 0;
