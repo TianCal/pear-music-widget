@@ -63,7 +63,15 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 3. **Queue artwork is request/reply data, not an event.** Each surface calls
    `queue_art` only for visible rows. The only queue-art event is the
    payload-free `queue-art-ready` nudge, which makes surfaces ask again. Keep `ImageCache::get` promotion and the
-   byte cap so scrolling does not evict the artwork it is returning to.
+   byte cap so scrolling does not evict the artwork it is returning to. The
+   cache is a lazy LRU: a use stamps the entry and pushes the stamp onto
+   `order`, and eviction skips stale stamps (`compact` trims them), so a hit
+   is O(1). Each surface keeps a pending set of the ids it has asked for
+   (`artInFlight` in `queue.js`, `neighbourArtPending` and `queueArtPending`
+   in the strip) and does not ask for them again until the reply lands;
+   `queue-art-ready` clears those sets. `queue_art` resolves YouTube Music
+   covers `QUEUE_ART_CONCURRENCY` (8) at a time and reads their sources in
+   one pass over the queue (`Core::queue_art_srcs`).
 4. **Run AppKit and menu work on the main thread.** Take one
    `AppHandle::run_on_main_thread` hop at the command boundary so ordered
    sequences cannot interleave. `tray::refresh` takes its own hop because
@@ -142,7 +150,13 @@ surface and runs the stale refreshes. The
 widget learns its own visibility from the `on-screen` event, since its
 `document.hidden` is always true. A superseded lyrics lookup is dropped at its
 next await (it caches nothing). Settings writes from the main thread or an
-async worker use `Store::update_soon`.
+async worker use `Store::update_soon`: the edit applies at once, and one
+background writer per burst (a `dirty` flag; the writer goes round again
+while it is set) writes the latest settings, so several quick edits are one
+write. `before_exit` calls `Store::flush` so a queued write survives
+quitting. `Core::update` clones the state once (it is held as
+`Arc<PlayerState>`); read a field with `Core::with_player` and take
+`snapshot` only when the whole state is needed.
 
 Retrying tears down the socket and clears the queue, so `launch_music_app`
 requests a retry only when disconnected. `Realtime::request_retry` must wake
@@ -176,7 +190,11 @@ comes on screen; its poll is a slow fallback. The play-state poll asks `/song` e
   drags from its artwork.
 - Resize getters are synchronous and can report old geometry immediately after
   a setter. Pass the requested rectangle to `apply_zoom_to`; only a real
-  `Resized` event should measure the window.
+  `Resized` event should measure the window. `on_geometry_changed` takes
+  `resized`: only a `Resized` event re-zooms, from the rect the handler
+  measured; a `Moved` event only records geometry and schedules persistence,
+  which is one debounce task per burst (`persist_pending` + `persist_seq`),
+  never one per event.
 
 ## Skins, sizing, and panels
 
@@ -279,7 +297,10 @@ The cache holds 60 entries in memory and JSON files under
 `~/Library/Caches/pear-music-widget/lyrics`. Disk hits return to memory. Evict
 oldest-written files to 90% of `lyricsCacheMb`; `0` disables new caching without
 deleting existing files. Hits do not expire, while misses expire after one week.
-Corrupt records behave as cache misses. `how` is the `lyrics::How` enum; an
+Corrupt records behave as cache misses. `fetch_lyrics` reads and writes the
+disk cache on blocking threads; the write is awaited, so a `forget_miss` made
+right after still finds the record. `fetch_lyrics_traced` also says where the
+answer came from (`Origin`: memory, disk or network). `how` is the `lyrics::How` enum; an
 unknown stored value reads back as `cached`.
 Lyrics → Cache → Clear negative cache removes remembered misses from disk and
 memory, preserving synced and unsynced hits. Retry a current `none` result after
@@ -356,7 +377,9 @@ plus its covers, so it must never be fetched on the click:
   hover: 10 min for an API server without `/browse` (`api::NO_BROWSE`), 60 s
   for other failed requests, and 30 min for a name with no artist.
 - Name lookups use `Api::search_background`, which takes the search slot only
-  while no `search_if` is waiting, so they never delay the user's search.
+  while no `search_if` is waiting (it waits on `searches_idle`, a `Notify`
+  fired when the last waiting search takes the slot, not a poll), so they
+  never delay the user's search.
 - A page's covers are fetched all at once, each given 2 s, so one slow
   thumbnail cannot hold the page.
 - The renderer keeps replies for 10 min and shows "Loading" only after
@@ -425,14 +448,19 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   the compositor runs without WebKit laying out each frame. Animating height,
   width or grid rows dropped frames. Progress is a `scaleX`, written only when
   the hairline moves a whole pixel, and the sheet's bar and clock only while
-  it is open; a transition on it would run every frame while playing.
+  it is open; a transition on it would run every frame while playing. The
+  hairline's width comes from a `ResizeObserver`, never `offsetWidth` in
+  `tick`, and the 250 ms tick stands down while the bar is `away`.
 - **Hover comes from Rust.** The app is never active, so WebKit sends the
   page no hover. The page reports the drawn part of the window (`strip_hot`:
   the bar, or the sheet plus slack while open). While the strip is on, a
   thread reads the pointer through Quartz (`macos::pointer_location`, no
   main-thread hop) every 40 ms near the top of the screen and every 150 ms
   elsewhere, and emits `strip-hover` when it crosses the drawn part. Off, the
-  thread parks.
+  thread parks. It reads whether the strip is on from `StripState.on`
+  (written with the setting by `set_shown`), not from the settings lock, and
+  `macos::top_of_main_display` takes its dictionary keys from `window_keys`,
+  built once.
 - **Views.** A list view replaces the main view inside the sheet, at a fixed
   height so the fixed window always holds it. `viewSeq` drops replies for a
   view that was left; the sheet returns to the main view 300 ms after it
@@ -570,7 +598,15 @@ no longer a directory it stops at the first failure. Position is pushed on
 `scan` lists the folder (cheap) and reads tags only for files whose size or
 mtime differs from the index at
 `~/Library/Caches/pear-music-widget/library/<hash of root>.json`. Reading
-every tag on a cold USB drive takes several seconds. Track ids are
+every tag on a cold USB drive takes several seconds. The index records what
+a track's own art is (`Art`: none, embedded, or the sidecar's path); it
+stores only none/embedded, and the sidecar is found per folder at each scan.
+An index written with the old `has_art` flag still parses (the flag meant
+embedded). Sidecar decodes are memoised by sidecar path (`side:<path>@px`),
+embedded ones by audio path, and at most `FILE_ART_DECODES` (2) file-art
+decodes run at once, each re-checking the memo when its turn comes. Local
+search matches `Session.haystacks`, the lowercased title, raw artist and
+album made once per folder; only a renamed artist is folded per query. Track ids are
 `local-<hash of path>` so lyrics cache entries and timing overrides survive
 relaunches, and YouTube timed lyrics are skipped for them. Skip `._*`
 AppleDouble files. Untagged files take the first folder under the root as artist
@@ -605,7 +641,10 @@ still running warm the cache for the renderer's next request. The disk cache is
 hour if a provider failed). `Priority::Now` carries an `Alive` check, tested
 before the slot, the permit and every request, so lookups for tracks you
 skipped past stop instead of queueing ahead of the current one. `queue_art`
-emits `queue-art-ready` when lookups that missed its reply have landed.
+emits `queue-art-ready` when lookups that missed its reply have landed. The
+lookup's cache reads and every `.jpg`/`.miss` write go through
+`spawn_blocking`; `artwork::cached` stays synchronous for search rows and
+the sorter, which call it from blocking contexts.
 Sized `data:` URLs share one byte-capped `ImageCache`, keyed by artwork key, so
 an album is resized once. Search rows use the cache only, never the network.
 
@@ -617,7 +656,11 @@ writes a dated tombstone so the merge cannot bring it back. Every save tries
 the drive first and retires the fallback once the drive accepts a write. A
 drive file that exists but will not parse is never overwritten. Writes are
 temp file + `sync_all` + rename, and happen outside the session lock
-(`Likes::set` returns a `Save`). The player and Sort Songs each write from
+(`Likes::set` returns a `Save`). `Likes::load` never runs under the session
+lock: `reload_likes` and the sorter's writes (`Sorter::reloaded`) snapshot
+the tracks, read off the lock and swap the result in only if the same folder
+is still open, because the tray menu (`scope`) and `sorter_view` take that
+lock on the main thread. The player and Sort Songs each write from
 their own copy, so `Save::write` re-reads both files and merges them into the
 snapshot before writing; a key only the file holds is kept when it is newer
 than the orphan cutoff (the other writer's), not when it is an orphan the
@@ -680,15 +723,22 @@ from its chorus. ← likes, → dislikes, ↓ skips.
 - **Main thread.** Commands that touch the drive (`sorter_rate`,
   `sorter_undo`) are async and do their work on a blocking thread.
 - **One rating write at a time.** `Sorter.ratings` is held from re-reading
-  the likes file to writing it back, in rate, undo, reset and trash.
+  the likes file to writing it back, in rate, undo, reset and trash. The
+  re-read inside it is off the session lock (`Sorter::reloaded`).
 - **Trash.** Trashed songs are taken out of the player too
   (`Local::forget_tracks`), when it has that folder open.
 - **Lyrics one at a time.** Lookups go through `lyrics::fetch_lyrics`, one at
   a time (`Sorter::lookup`). Run side by side, providers time out and the
-  failures are cached as misses for a week. A miss is retried once after 3 s.
+  failures are cached as misses for a week. A miss is retried once after 3 s only when the lookup just made
+  it (`lyrics::Origin::Network`); one read back from memory or disk had its
+  retry when it was made.
 - **Finding the chorus.** `sorter/chorus.rs` scores repeated blocks of synced
   lines, then refines to the line that sings the title. Without synced lyrics
   it starts at 35%.
+- **Progress is one transform.** `--p` on the track: the bar scales and the
+  head translates by it (`--track-w` kept by a `ResizeObserver`); nothing on
+  the timeline animates `width` or `left`, and the play icon's markup is
+  rewritten only when the glyph changes.
 - **Ratings.** Ratings are written through `likes.rs` and re-read before each
   write. After every write (rate, undo, reset, trash), `Local::reload_likes`
   re-reads the file if that folder is the one the player has open. Otherwise
@@ -724,6 +774,11 @@ right-anchored to avoid clipping against the card edge.
 Register menu handling once with `Builder::on_menu_event`; adding a tray-local
 handler executes toggles twice. Rebuild the status menu on state changes and on
 `TrayIconEvent::Enter`, because macOS displays the last attached menu.
+`handle_menu` rebuilds it once after every item, so synchronous branches
+(`handle_source` and `after_skin_change` included) must not call `refresh`
+themselves; only callbacks that run after `handle_menu` has returned do. The
+two template icons are decoded once (`icon`), and `show_icon` calls
+`set_icon` only when the glyph changes.
 
 Left click toggles the dropdown, right click opens settings, a detected
 double click shows and focuses the widget, and Option-click or middle click
@@ -763,6 +818,10 @@ settings under its write lock, skips unchanged text, and writes via temp file,
 truncated file would load as defaults and lose the token, sizes and saved
 folders. A file that does not parse is renamed to `settings.json.broken-<secs>`
 before defaults are used, so a hand edit with a typo can be repaired.
+Main-thread callers (the skin and dropdown-skin switches, the strip toggle,
+`apply_skin`'s bounds) use `update_soon`. The skin itself is written once,
+by `tray::set_skin`/`set_panel_skin` before the main-thread hop;
+`window::apply_skin` and `panel::apply_panel_skin` must not write it again.
 
 `corners` is keyed by skin. `corners_from_file` must continue accepting the old
 flat shape; a parse failure sets the whole file aside and starts from defaults. The state snapshot includes the whole map because the two
