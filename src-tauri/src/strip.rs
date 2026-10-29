@@ -98,6 +98,9 @@ pub struct StripState {
     /// Set while a fullscreen app is up and its menu bar is not down: the
     /// strip is hidden, with the setting still on.
     covered: AtomicBool,
+    /// `menuBarStrip`, for the watcher: it looks every 40 ms, and reading the
+    /// setting itself took the settings lock each time.
+    on: AtomicBool,
     watcher: Mutex<Option<Thread>>,
 }
 
@@ -144,11 +147,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         open: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
         covered: AtomicBool::new(false),
+        on: AtomicBool::new(app.state::<Arc<Store>>().get(|s| s.menu_bar_strip)),
         watcher: Mutex::new(None),
     }));
     let watcher = watch_pointer(app.clone());
     *state(app).watcher.lock().expect("strip lock") = Some(watcher);
-    if app.state::<Arc<Store>>().get(|s| s.menu_bar_strip) {
+    if state(app).on.load(Ordering::SeqCst) {
         show(app)?;
     }
     Ok(())
@@ -156,7 +160,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
 /// From the tray menu, on the main thread.
 pub fn set_shown(app: &AppHandle, shown: bool) {
-    app.state::<Arc<Store>>().update(|s| s.menu_bar_strip = shown);
+    app.state::<Arc<Store>>().update_soon(|s| s.menu_bar_strip = shown);
+    state(app).on.store(shown, Ordering::SeqCst);
     if shown {
         // The menu bar may have moved to another display since launch.
         *state(app).shape.lock().expect("strip lock") = measure();
@@ -233,11 +238,11 @@ fn watch_pointer(app: AppHandle) -> Thread {
         let mut menu_bar_was: Option<f64> = None;
         let mut pointed: Option<(f64, f64)> = None;
         loop {
-            if !app.state::<Arc<Store>>().get(|s| s.menu_bar_strip) {
+            let strip = state(&app);
+            if !strip.on.load(Ordering::SeqCst) {
                 std::thread::park();
                 continue;
             }
-            let strip = state(&app);
             if strip.menu_open.load(Ordering::SeqCst) {
                 std::thread::sleep(HOVER_FAR);
                 continue;
