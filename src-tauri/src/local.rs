@@ -191,6 +191,9 @@ struct Session {
     /// is gone" and stop instead of walking the whole order.
     root: PathBuf,
     tracks: Vec<Track>,
+    /// Each track's title, raw artist and album lowercased, for `search`:
+    /// made once rather than for every track on every keystroke.
+    haystacks: Vec<String>,
     /// Likes and dislikes, stored on the drive — see `likes.rs`.
     likes: Likes,
     /// Play order as indexes into `tracks`; shuffled in place.
@@ -262,6 +265,7 @@ impl Session {
     fn remove(&mut self, index: usize) -> bool {
         let was_current = self.order.get(self.cursor) == Some(&index);
         self.tracks.remove(index);
+        self.haystacks.remove(index);
         let slot = self.order.iter().position(|&i| i == index);
         self.order.retain(|&i| i != index);
         for i in self.order.iter_mut() {
@@ -507,6 +511,7 @@ impl Local {
         let mut session = Session {
             root: folder,
             order: (0..tracks.len()).collect(),
+            haystacks: tracks.iter().map(haystack).collect(),
             tracks,
             likes,
             cursor,
@@ -1459,14 +1464,18 @@ impl Local {
             .with(|s| {
                 s.tracks
                     .iter()
-                    .filter(|t| {
+                    .zip(&s.haystacks)
+                    .filter(|(t, haystack)| {
+                        if haystack.contains(&needle) {
+                            return true;
+                        }
+                        // The renamed artist is the one field not in the
+                        // haystack, since renames change without a rescan.
                         let shown = crate::store::map_artist(names, &t.artist);
-                        [&t.title, &t.artist, &shown, &t.album]
-                            .iter()
-                            .any(|field| field.to_lowercase().contains(&needle))
+                        shown != t.artist && shown.to_lowercase().contains(&needle)
                     })
                     .take(SEARCH_MAX)
-                    .cloned()
+                    .map(|(t, _)| t.clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -1508,6 +1517,12 @@ impl Local {
 
 fn names(core: &Core) -> BTreeMap<String, String> {
     core.store.get(|s| s.artist_names.clone())
+}
+
+/// What `search` matches a track on, lowercased once. The fields are joined
+/// by a character no query contains, so a match never spans two of them.
+fn haystack(track: &Track) -> String {
+    format!("{}\u{0}{}\u{0}{}", track.title, track.artist, track.album).to_lowercase()
 }
 
 // ------------------------------------------------------------------- helpers
@@ -1834,6 +1849,7 @@ mod tests {
         let session = Session {
             root: root.clone(),
             order: (0..tracks.len()).collect(),
+            haystacks: tracks.iter().map(haystack).collect(),
             tracks,
             likes,
             cursor: 0,

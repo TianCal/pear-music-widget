@@ -99,10 +99,11 @@ fn core_name(text: &str) -> String {
 /// notes are dropped, 1 one a prefix of the other, 0 no match. Exact beats
 /// stripped so 范特西 wins over 范特西 (Live) - Single.
 pub fn name_score(ours: &str, theirs: &str) -> u8 {
-    if fold(ours).is_empty() {
+    let folded = fold(ours);
+    if folded.is_empty() {
         return 0;
     }
-    if fold(ours) == fold(theirs) {
+    if folded == fold(theirs) {
         return 3;
     }
     let (a, b) = (core_name(ours), core_name(theirs));

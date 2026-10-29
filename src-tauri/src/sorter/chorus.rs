@@ -57,23 +57,40 @@ static BRACKETED_TAIL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\(（\[【].*$").expect("bracket regex"));
 
 /// Repeats are rarely identical in LRC files: 了/的 swaps, a dropped word.
-fn similar(a: &str, b: &str) -> bool {
-    if a == b {
+/// Compared on the lines' prepared `chars`, so the n² comparisons below
+/// allocate nothing.
+fn similar(a: &Line, b: &Line) -> bool {
+    if a.key == b.key {
         return true;
     }
-    let (la, lb) = (a.chars().count(), b.chars().count());
+    let (la, lb) = (a.len, b.len);
     if la.abs_diff(lb) > 1 || la.min(lb) < 4 {
         return false;
     }
-    let sa: std::collections::HashSet<char> = a.chars().collect();
-    let sb: std::collections::HashSet<char> = b.chars().collect();
-    sa.intersection(&sb).count() as f64 / sa.len().max(sb.len()) as f64 >= 0.85
+    // Both sorted and deduplicated: the shared characters by one merge pass.
+    let (mut i, mut j, mut shared) = (0, 0, 0);
+    while i < a.chars.len() && j < b.chars.len() {
+        match a.chars[i].cmp(&b.chars[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared as f64 / a.chars.len().max(b.chars.len()) as f64 >= 0.85
 }
 
 struct Line {
     time: f64,
     text: String,
     key: String,
+    /// `key`'s length in characters.
+    len: usize,
+    /// `key`'s distinct characters, sorted, for `similar`.
+    chars: Vec<char>,
 }
 
 fn lines_of(lyrics: &Lyrics) -> Vec<Line> {
@@ -87,10 +104,16 @@ fn lines_of(lyrics: &Lyrics) -> Vec<Line> {
                 return None;
             }
             let key = norm(text);
-            (key.chars().count() >= 2).then(|| Line {
+            let len = key.chars().count();
+            let mut chars: Vec<char> = key.chars().collect();
+            chars.sort_unstable();
+            chars.dedup();
+            (len >= 2).then(|| Line {
                 time,
                 text: text.to_string(),
                 key,
+                len,
+                chars,
             })
         })
         .collect()
@@ -132,7 +155,7 @@ pub fn find(lyrics: Option<&Lyrics>, title: &str, duration: f64) -> Chorus {
     for i in 0..n {
         for j in i + 1..n {
             let mut len = 0;
-            while j + len < n && i + len < j && similar(&lines[i + len].key, &lines[j + len].key) {
+            while j + len < n && i + len < j && similar(&lines[i + len], &lines[j + len]) {
                 len += 1;
             }
             if len < 2 {
@@ -141,7 +164,7 @@ pub fn find(lyrics: Option<&Lyrics>, title: &str, duration: f64) -> Chorus {
             let block = &lines[i..i + len];
             let mut starts: Vec<usize> = Vec::new();
             for s in 0..=n - len {
-                let here = (0..len).all(|m| similar(&lines[s + m].key, &block[m].key));
+                let here = (0..len).all(|m| similar(&lines[s + m], &block[m]));
                 if here && starts.last().is_none_or(|&last| s >= last + len) {
                     starts.push(s);
                 }

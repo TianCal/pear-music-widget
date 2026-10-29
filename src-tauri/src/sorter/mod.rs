@@ -52,6 +52,9 @@ fn runtime() -> Option<Arc<Sorter>> {
 struct Session {
     root: PathBuf,
     tracks: Vec<Track>,
+    /// `title_key` of each track, made once: `view` runs on every card and
+    /// counts the namesakes still queued.
+    title_keys: Vec<String>,
     likes: Likes,
     /// Indexes into `tracks` still to sort; `queue[0]` is on the card.
     queue: Vec<usize>,
@@ -164,10 +167,10 @@ impl Sorter {
                     .get(&track.id)
                     .cloned(),
                 same_name: {
-                    let key = title_key(&track.title);
+                    let key = &s.title_keys[i];
                     s.queue[1..]
                         .iter()
-                        .filter(|&&j| !key.is_empty() && title_key(&s.tracks[j].title) == key)
+                        .filter(|&&j| !key.is_empty() && s.title_keys[j] == *key)
                         .count()
                 },
             }
@@ -239,17 +242,22 @@ fn title_key(title: &str) -> String {
     crate::artwork::fold(bare)
 }
 
+fn title_keys(tracks: &[Track]) -> Vec<String> {
+    tracks.iter().map(|track| title_key(&track.title)).collect()
+}
+
 /// The unrated tracks in folder order, except that each song's namesakes
 /// follow it directly, so versions of one song are judged side by side.
-fn queue_of(tracks: &[Track], likes: &Likes) -> Vec<usize> {
+/// `keys` are the tracks' `title_key`s.
+fn queue_of(tracks: &[Track], keys: &[String], likes: &Likes) -> Vec<usize> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut by_key: HashMap<String, usize> = HashMap::new();
+    let mut by_key: HashMap<&str, usize> = HashMap::new();
     for (i, track) in tracks.iter().enumerate() {
         if likes.get(&track.id).is_some() {
             continue;
         }
-        let key = title_key(&track.title);
-        match by_key.get(&key).filter(|_| !key.is_empty()) {
+        let key = keys[i].as_str();
+        match by_key.get(key).filter(|_| !key.is_empty()) {
             Some(&g) => groups[g].push(i),
             None => {
                 by_key.insert(key, groups.len());
@@ -568,7 +576,8 @@ fn open_folder(app: &AppHandle, sorter: &Arc<Sorter>, root: PathBuf) -> Result<(
     emit(app, "sorter-view", sorter.view());
     let tracks = crate::local::scan(&root);
     let likes = Likes::load(&root, &tracks);
-    let queue = queue_of(&tracks, &likes);
+    let title_keys = title_keys(&tracks);
+    let queue = queue_of(&tracks, &title_keys, &likes);
     sorter.player.stop();
     *sorter.scanning.lock().expect("scanning lock") = None;
     let names = app.state::<Arc<Store>>().get(|s| s.artist_names.clone());
@@ -576,6 +585,7 @@ fn open_folder(app: &AppHandle, sorter: &Arc<Sorter>, root: PathBuf) -> Result<(
     *sorter.session.lock().expect("session lock") = Some(Session {
         root: root.clone(),
         tracks,
+        title_keys,
         likes,
         queue,
         history: Vec::new(),
@@ -781,7 +791,7 @@ fn reset_ratings(app: &AppHandle) {
             last = s.likes.set(&s.tracks[i], None).or(last);
         }
         s.history.clear();
-        s.queue = queue_of(&s.tracks, &s.likes);
+        s.queue = queue_of(&s.tracks, &s.title_keys, &s.likes);
         last.map(|save| (save, s.root.clone()))
     };
     if let Some((save, root)) = saved {
@@ -932,6 +942,8 @@ fn trash_disliked(app: &AppHandle, sorter: &Sorter, ids: &[String]) -> (usize, V
                 .iter()
                 .filter_map(|&(i, r)| map[i].map(|j| (j, r)))
                 .collect();
+            let mut kept = map.iter().map(Option::is_some);
+            s.title_keys.retain(|_| kept.next().unwrap_or(false));
             s.tracks.retain(|t| !moved.contains(&t.id));
             last.map(|save| (save, s.root.clone()))
         })
@@ -982,6 +994,6 @@ mod tests {
             track(4, "江南"),
         ];
         let likes = Likes::load(Path::new("/nowhere"), &tracks);
-        assert_eq!(queue_of(&tracks, &likes), vec![0, 3, 1, 4, 2]);
+        assert_eq!(queue_of(&tracks, &title_keys(&tracks), &likes), vec![0, 3, 1, 4, 2]);
     }
 }
