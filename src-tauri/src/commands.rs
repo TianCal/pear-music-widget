@@ -96,7 +96,7 @@ fn refresh_queue_after_jump(
                 return;
             }
             if moves {
-                let playing = || core.snapshot().song.map(|song| song.video_id);
+                let playing = || playing_id(&core);
                 // Either the socket delivered, or `/song` shows the switch.
                 let landed = playing() != from
                     || match core.api.song().await {
@@ -137,7 +137,7 @@ fn refresh_queue_after_jump(
 
 /// The playing video id, for `refresh_queue_after_jump` to watch it change.
 fn playing_id(core: &Core) -> Option<String> {
-    core.snapshot().song.map(|song| song.video_id)
+    core.with_player(|player| player.song.as_ref().map(|song| song.video_id.clone()))
 }
 
 /// The state, the artwork, the queue and the lyrics in one reply. They travel
@@ -181,7 +181,7 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
             // second — without this the very next tick pushes the stale value
             // straight back and the icon snaps to the wrong glyph. The server
             // corrects us either way.
-            let playing = core.snapshot().is_playing;
+            let playing = core.with_player(|player| player.is_playing);
             core.update(|state| state.is_playing = !playing);
             core.api.toggle_play().await
         }
@@ -206,7 +206,7 @@ pub async fn command(app: AppHandle, name: String, payload: Option<Value>) -> Va
         // on rather than cycling through it, which would make the button take
         // two presses to do anything visible.
         "repeat" => {
-            let known = core.snapshot().repeat;
+            let known = core.with_player(|player| player.repeat);
             let (target, presses) = match known {
                 Some(Repeat::All) => (Repeat::One, 1),
                 Some(Repeat::One) => (Repeat::All, 2),
@@ -285,7 +285,9 @@ fn local_command(core: &Arc<Core>, name: &str, payload: Value) -> Value {
 /// the dialog named — never whatever is playing by then.
 fn confirm_trash(core: &Arc<Core>) {
     let Some(track) = core.local().current() else { return };
-    let artist = core.snapshot().song.map(|song| song.artist).unwrap_or_default();
+    let artist = core.with_player(|player| {
+        player.song.as_ref().map(|song| song.artist.clone()).unwrap_or_default()
+    });
     let title = format!("Move “{}” to the Trash?", track.title);
     let detail = format!(
         "{}{}\n\n{}\n\nYou can put it back from the Trash on that drive.",
@@ -564,7 +566,7 @@ pub async fn play_playlist(app: AppHandle, kind: String, id: String) -> Value {
             // A folder opens paused where it was left; picking it means play.
             let handle = Arc::clone(&core);
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                if handle.is_local() && !handle.snapshot().is_playing {
+                if handle.is_local() && !handle.with_player(|player| player.is_playing) {
                     handle.local().toggle_play(&handle);
                 }
             })

@@ -611,7 +611,10 @@ pub struct Core {
     pub app: AppHandle,
     pub store: Arc<Store>,
     pub api: Arc<Api>,
-    player: Mutex<PlayerState>,
+    /// Behind an `Arc` so a change costs one clone: `update` patches a copy,
+    /// swaps it in and emits the same allocation outside the lock. Read a
+    /// field with `with_player`; `snapshot` copies the lot.
+    player: Mutex<Arc<PlayerState>>,
     /// The three heavy channels. Separate locks as well as separate events:
     /// resolving artwork must not block a position tick behind it.
     cover: Mutex<Option<Arc<str>>>,
@@ -683,7 +686,7 @@ impl Core {
             app,
             store,
             api,
-            player: Mutex::new(PlayerState::new(
+            player: Mutex::new(Arc::new(PlayerState::new(
                 skin,
                 panel_skin,
                 liquid_glass,
@@ -691,7 +694,7 @@ impl Core {
                 lyrics_offset,
                 corners,
                 corners_autohide,
-            )),
+            ))),
             cover: Mutex::new(None),
             queue: Mutex::new(QueueView::empty()),
             lyrics: Mutex::new(LyricsView::idle()),
@@ -815,7 +818,14 @@ impl Core {
     }
 
     pub fn snapshot(&self) -> PlayerState {
-        self.player.lock().expect("player lock").clone()
+        PlayerState::clone(&self.player.lock().expect("player lock"))
+    }
+
+    /// Read from the state without copying it. `snapshot` clones a `Song` of
+    /// a dozen strings and the corner map; a poller or a menu item wanting
+    /// the status or the video id should not.
+    pub fn with_player<T>(&self, read: impl FnOnce(&PlayerState) -> T) -> T {
+        read(&self.player.lock().expect("player lock"))
     }
 
     /// Everything a window needs to draw itself from cold.
@@ -940,16 +950,22 @@ impl Core {
         // Keep the settings → player lock order, and resolve the shift in the
         // same snapshot as the song so neither surface sees the previous song's
         // override. No override map rides the position ticks.
+        //
+        // One clone per call, position ticks included: the patch goes onto a
+        // copy, which is compared with what is held and then swapped in, and
+        // the surfaces are sent that same allocation.
         let next = self.store.get(|settings| {
             let mut player = self.player.lock().expect("player lock");
-            let before = player.clone();
-            patch(&mut player);
-            player.lyrics_offset =
-                settings.lyrics_offset_for(player.song.as_ref().map(|song| song.video_id.as_str()));
-            if *player == before {
+            let mut next = PlayerState::clone(&player);
+            patch(&mut next);
+            next.lyrics_offset =
+                settings.lyrics_offset_for(next.song.as_ref().map(|song| song.video_id.as_str()));
+            if next == **player {
                 return None;
             }
-            Some(player.clone())
+            let next = Arc::new(next);
+            *player = Arc::clone(&next);
+            Some(next)
         });
         let Some(next) = next else { return };
         // Nobody to draw it; `set_on_screen` sends the latest when one shows.
@@ -1714,7 +1730,7 @@ impl Core {
             }
             "SHUFFLE_CHANGED" => {
                 let shuffle = flag("shuffle");
-                let changed = self.snapshot().shuffle != shuffle;
+                let changed = self.with_player(|player| player.shuffle) != shuffle;
                 self.update_remote(|state| state.shuffle = shuffle);
                 // Shuffling reorders the queue but keeps the track, and
                 // `apply_song` only refreshes the queue when the track moves —

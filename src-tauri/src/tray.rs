@@ -315,11 +315,11 @@ fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<
 
 /// Capture the video ID in each action: an open menu may outlive its song.
 fn song_time_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
-    let song = app.state::<Arc<Core>>().snapshot().song;
-    let id = song
-        .as_ref()
-        .map(|song| song.video_id.as_str())
-        .unwrap_or("");
+    let id = app
+        .state::<Arc<Core>>()
+        .with_player(|player| player.song.as_ref().map(|song| song.video_id.clone()))
+        .unwrap_or_default();
+    let id = id.as_str();
     let enabled = !id.is_empty();
     let offset = app
         .state::<Arc<Store>>()
@@ -652,9 +652,7 @@ fn source_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
 fn artist_names_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
     let core = app.state::<Arc<Core>>();
     let raw = core
-        .snapshot()
-        .song
-        .map(|song| song.raw_artist)
+        .with_player(|player| player.song.as_ref().map(|song| song.raw_artist.clone()))
         .filter(|raw| !raw.trim().is_empty());
     let rename_label = raw
         .as_ref()
@@ -743,13 +741,14 @@ fn open_scoped(app: &AppHandle, folder: std::path::PathBuf, liked_only: Option<b
 pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let core = app.state::<Arc<Core>>();
     let store = app.state::<Arc<Store>>();
-    let snapshot = core.snapshot();
-
-    let now_playing = snapshot
-        .song
-        .as_ref()
-        .map(|song| format!("{} — {}", song.title, song.artist))
-        .unwrap_or_else(|| "Nothing playing".into());
+    let (now_playing, status) = core.with_player(|player| {
+        let now_playing = player
+            .song
+            .as_ref()
+            .map(|song| format!("{} — {}", song.title, song.artist))
+            .unwrap_or_else(|| "Nothing playing".into());
+        (now_playing, player.status)
+    });
     let now_playing = ellipsize(&now_playing, NOW_PLAYING_COLUMNS);
 
     let widget = app.get_webview_window(WIDGET);
@@ -780,7 +779,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(
                 app,
                 "status",
-                status_label(snapshot.status),
+                status_label(status),
                 false,
                 None::<&str>,
             )?,
@@ -841,18 +840,23 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
+/// Whether Like and Dislike are offered, and which is on.
+fn rating_of(app: &AppHandle) -> (bool, Option<Like>) {
+    app.state::<Arc<Core>>().with_player(|player| {
+        (player.status == Status::Connected && player.song.is_some(), player.like)
+    })
+}
+
 /// Right-click menu for the floating widget itself: the things you would want
 /// while looking at it, minus the app-level plumbing that belongs in the tray.
 ///
 /// Every item here acts on the window you right-clicked; the dropdown has its
 /// own menu.
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let snapshot = app.state::<Arc<Core>>().snapshot();
+    let (can_rate, rating) = rating_of(app);
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
     let skin = window::skin_of(&store);
-    let can_rate = snapshot.status == Status::Connected && snapshot.song.is_some();
-    let rating = snapshot.like;
 
     Menu::with_items(
         app,
@@ -906,10 +910,8 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// (one setting for every surface, as in the dropdown's menu), and the
 /// surfaces. The widget's own look (skin, corners) is the widget's menu's.
 pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let snapshot = app.state::<Arc<Core>>().snapshot();
+    let (can_rate, rating) = rating_of(app);
     let tint = app.state::<Arc<Store>>().get(|s| s.tint);
-    let can_rate = snapshot.status == Status::Connected && snapshot.song.is_some();
-    let rating = snapshot.like;
     let widget = app.get_webview_window(WIDGET);
     let widget_visible = widget.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
 
@@ -1163,7 +1165,9 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         }
         "reconnect" => crate::ws::retry(app),
         "artistRename" => {
-            let raw = app.state::<Arc<Core>>().snapshot().song.map(|song| song.raw_artist);
+            let raw = app
+                .state::<Arc<Core>>()
+                .with_player(|player| player.song.as_ref().map(|song| song.raw_artist.clone()));
             if let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) {
                 prompt_artist_name(app, raw);
             }

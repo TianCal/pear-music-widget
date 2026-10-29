@@ -124,10 +124,11 @@ fn spawn_pollers(core: Arc<Core>) {
         let mut ticker = tokio::time::interval(LIKE_POLL);
         loop {
             ticker.tick().await;
-            let snapshot = like.snapshot();
-            if snapshot.status != crate::state::Status::Connected
+            let (status, has_song) =
+                like.with_player(|player| (player.status, player.song.is_some()));
+            if status != crate::state::Status::Connected
                 || like.is_local()
-                || snapshot.song.is_none()
+                || !has_song
                 || !showing_anything(&like.app)
             {
                 continue;
@@ -144,17 +145,18 @@ fn spawn_pollers(core: Arc<Core>) {
         let mut asked: Option<std::time::Instant> = None;
         loop {
             ticker.tick().await;
-            let snapshot = core.snapshot();
-            if snapshot.status != crate::state::Status::Connected
+            let (status, has_song, is_playing) = core
+                .with_player(|player| (player.status, player.song.is_some(), player.is_playing));
+            if status != crate::state::Status::Connected
                 || core.is_local()
-                || snapshot.song.is_none()
+                || !has_song
                 || !showing_anything(&core.app)
             {
                 continue;
             }
             let since = asked.map(|at| at.elapsed());
             let ticking = core.position_age().is_some_and(|age| age < TICK_GAP);
-            let suspect = snapshot.is_playing != ticking;
+            let suspect = is_playing != ticking;
             let due = match since {
                 None => true,
                 Some(since) => {
