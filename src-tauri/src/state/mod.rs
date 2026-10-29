@@ -20,7 +20,7 @@
 //! rows is asked for by id, for the rows a surface is actually showing, and
 //! comes back in a command reply — see `commands::queue_art`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,9 +31,14 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::api::{Api, ErrorCode, COVER_PX};
 use crate::jyutping::Jyutping;
-use crate::lyrics::{self, LyricLine, Lyrics};
-use crate::search::{self, ArtistLink, QueueView, QUEUE_MAX};
+use crate::search::{ArtistLink, QueueView};
 use crate::store::{SkinCorners, Store};
+
+mod lyrics;
+mod queue;
+
+pub use lyrics::LyricsView;
+use queue::QUEUE_SHOW_TTL;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,64 +313,6 @@ impl PlayerState {
     }
 }
 
-/// The lyrics panel's whole world, pushed on the `lyrics` event. The state
-/// string travels with the words so the note under the roll can never describe
-/// a different fetch than the one showing.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LyricsView {
-    /// idle | loading | ready | none
-    pub state: String,
-    pub lyrics: Option<Arc<Lyrics>>,
-}
-
-impl LyricsView {
-    fn idle() -> Self {
-        Self {
-            state: "idle".into(),
-            lyrics: None,
-        }
-    }
-
-    /// Derive every display-only lyric treatment from the fetched text. The
-    /// Jyutping lookup deliberately happens before Simplified Chinese is
-    /// assigned to `text`: 心裏 may be shown as 心里, but its reading must
-    /// remain `sam1 leoi5`, not the reading of the different character 里.
-    ///
-    /// Text that is already simplified, or not Chinese at all, comes back
-    /// unchanged, so this is safe to run over every line rather than trying to
-    /// guess whether a track needs it.
-    fn styled(&self, simplify: bool, jyutping: Option<&Jyutping>) -> Self {
-        let Some(lyrics) = &self.lyrics else {
-            return self.clone();
-        };
-        Self {
-            state: self.state.clone(),
-            lyrics: Some(Arc::new(Lyrics {
-                synced: lyrics.synced,
-                how: lyrics.how,
-                lines: lyrics
-                    .lines
-                    .iter()
-                    .map(|line| LyricLine {
-                        time: line.time,
-                        text: if simplify {
-                            fast2s::convert(&line.text)
-                        } else {
-                            line.text.clone()
-                        },
-                        jyutping: jyutping.and_then(|engine| engine.annotate(&line.text)),
-                    })
-                    .collect(),
-            })),
-        }
-    }
-
-    #[cfg(test)]
-    fn simplified(&self) -> Self {
-        self.styled(true, None)
-    }
-}
 
 /// What a freshly loaded window needs before its first event arrives: the
 /// state plus the three channels it would otherwise have to wait a track for.
@@ -468,18 +415,8 @@ fn solve_volume_curve(sent: f64, echoed: f64) -> Option<f64> {
 /// would otherwise ask the player the same five questions each time.
 const REFRESH_TTL: Duration = Duration::from_millis(2500);
 
-/// A queue fetched longer ago than this is refetched when any surface comes on
-/// screen. The queue has no push channel, so edits made inside YouTube Music
-/// would otherwise wait for the next track change while the widget stays up.
-const QUEUE_SHOW_TTL: Duration = Duration::from_secs(5);
-
 /// How long after a track change its like state is read a second time.
 const LIKE_RECHECK: Duration = Duration::from_millis(1500);
-
-/// Waits before each queue read after a shuffle change, in ms: the first
-/// catches YouTube Music's new order, the second an unshuffle's restored
-/// opening tracks, which need a whole-playlist fetch first.
-const REORDER_REFRESH_MS: [u64; 2] = [700, 900];
 
 /// One run at a time. A caller arriving while a run is in flight either gives
 /// up (the run in flight answers it) or, with `rerun`, asks the holder to go
@@ -918,7 +855,7 @@ impl Core {
         tauri::async_runtime::spawn(async move {
             core.refresh_queue().await;
             if let Some(id) = renamed {
-                lyrics::forget_miss(&id);
+                crate::lyrics::forget_miss(&id);
                 core.refresh_lyrics().await;
             }
         });
@@ -998,76 +935,6 @@ impl Core {
             *held = cover.clone();
         }
         let _ = self.app.emit("cover", &cover);
-    }
-
-    pub(crate) fn set_queue(&self, view: QueueView) {
-        {
-            let mut held = self.queue.lock().expect("queue lock");
-            if *held == view {
-                return;
-            }
-            *held = view.clone();
-        }
-        let _ = self.app.emit("queue", &view);
-    }
-
-    /// The artwork source URL each row was parsed with, for `queue_art` to
-    /// resolve. Looked up by video id rather than by index so a request that
-    /// crosses a queue change is applied to the right track or to none. One
-    /// walk of the queue for the whole request, not one per id.
-    pub fn queue_art_srcs(&self, video_ids: &[String]) -> Vec<(String, Arc<str>)> {
-        let queue = self.queue.lock().expect("queue lock");
-        let mut by_id: HashMap<&str, &Arc<str>> = HashMap::new();
-        for track in queue.items.iter() {
-            if let Some(art) = track.art.as_ref() {
-                by_id.entry(track.video_id.as_str()).or_insert(art);
-            }
-        }
-        video_ids
-            .iter()
-            .filter_map(|id| Some((id.clone(), Arc::clone(by_id.get(id.as_str())?))))
-            .collect()
-    }
-
-    fn set_lyrics(self: &Arc<Self>, view: LyricsView) {
-        *self.lyrics_source.lock().expect("lyrics lock") = view.clone();
-        self.restyle_lyrics();
-    }
-
-    /// Commit a fully styled view, still only on a real change.
-    fn publish_lyrics(&self, view: LyricsView) {
-        {
-            let mut held = self.lyrics.lock().expect("lyrics lock");
-            if *held == view {
-                return;
-            }
-            *held = view.clone();
-        }
-        let _ = self.app.emit("lyrics", &view);
-    }
-
-    /// Re-derive the shown words from the fetched ones. Jyutping is dictionary
-    /// work, so keep it off the AppKit/menu thread and reject the result if a
-    /// newer track or toggle superseded it while it was running.
-    pub fn restyle_lyrics(self: &Arc<Self>) {
-        let source = self.lyrics_source.lock().expect("lyrics lock").clone();
-        let (simplify, show_jyutping) = self
-            .store
-            .get(|settings| (settings.simplify_lyrics, settings.jyutping_lyrics));
-        let token = self.lyrics_style_token.fetch_add(1, Ordering::SeqCst) + 1;
-
-        if !show_jyutping || source.lyrics.is_none() {
-            self.publish_lyrics(source.styled(simplify, None));
-            return;
-        }
-
-        let core = Arc::clone(self);
-        tauri::async_runtime::spawn_blocking(move || {
-            let view = source.styled(simplify, Some(&core.jyutping));
-            if token == core.lyrics_style_token.load(Ordering::SeqCst) {
-                core.publish_lyrics(view);
-            }
-        });
     }
 
     // ---------------------------------------------------------------- tracks
@@ -1204,276 +1071,6 @@ impl Core {
             .map(|link| ArtistLink { name: map(&link.query), ..link })
             .collect();
         song
-    }
-
-    /// The queue changed: relabel the playing track from its slot.
-    fn relabel_song(&self) {
-        let Some(current) = self.player.lock().expect("player lock").song.clone() else {
-            return;
-        };
-        let dressed = self.dress(current.clone());
-        if dressed == current {
-            return;
-        }
-        // Only onto the song it was dressed from: an `apply_song` in between
-        // (a later album or duration) wins, and relabels itself.
-        self.update_remote(|state| {
-            if state.song.as_ref() == Some(&current) {
-                state.song = Some(dressed);
-            }
-        });
-    }
-
-    /// Whether any surface is looking at the queue — a skin whose layout draws
-    /// it, or a queue panel open on that surface. The same bargain as the
-    /// lyrics: a request on every track change is not work to do for nobody.
-    ///
-    /// The skin half is answered from the store, because a skin is a property of
-    /// the surface rather than something the renderer has to report.
-    ///
-    /// Either way only while a surface is on screen: a hidden Stack card draws
-    /// nothing, and `set_on_screen` refreshes it when it comes back.
-    fn queue_wanted(&self) -> bool {
-        if !self.showing() {
-            return false;
-        }
-        // A skin's own queue counts only while its surface is the one on
-        // screen: the menu-bar strip alone must not fetch the widget's queue.
-        let drawn = |label: &str, skin: String| {
-            crate::window::skin_shows_queue(&skin)
-                && self.on_screen.lock().expect("screen lock").contains(label)
-        };
-        if drawn(crate::window::WIDGET, crate::window::skin_of(&self.store))
-            || drawn(crate::window::DROPDOWN, crate::window::panel_skin_of(&self.store))
-        {
-            return true;
-        }
-        let open = self.queue_demand.wanted_by();
-        self.any_on_screen(&open)
-    }
-
-    pub fn set_queue_wanted(&self, label: &str, wanted: bool) {
-        self.queue_demand.set_wanted(label, wanted);
-    }
-
-    /// A surface just started or stopped showing queue rows. Starting fetches
-    /// the queue unless what is held is recent: while nobody wanted it, track
-    /// changes left it empty (`queue_visible`).
-    pub fn want_queue(self: &Arc<Self>, label: &str, wanted: bool) {
-        self.set_queue_wanted(label, wanted);
-        if !wanted {
-            return;
-        }
-        let held = !self.queue.lock().expect("queue lock").items.is_empty();
-        let fresh = self
-            .queue_fetched_at
-            .lock()
-            .expect("time lock")
-            .is_some_and(|at| at.elapsed() < QUEUE_SHOW_TTL);
-        if held && fresh && !self.is_local() {
-            return;
-        }
-        let core = Arc::clone(self);
-        tauri::async_runtime::spawn(async move { core.refresh_queue().await });
-    }
-
-    /// Refresh the queue once YouTube Music has finished reordering it. The
-    /// shuffle event fires when the button flips, but the new order arrives
-    /// from YouTube after that, and an unshuffle can land in two steps — the
-    /// API server puts back a long playlist's opening tracks once the queue
-    /// is rebuilt. Two timed reads cover both without polling a queue that can
-    /// be thousands of items. A newer toggle supersedes an older one, and
-    /// nothing is fetched while no surface shows the queue.
-    fn refresh_queue_after_reorder(self: &Arc<Self>) {
-        let token = self.reorder_token.fetch_add(1, Ordering::SeqCst) + 1;
-        if !self.queue_visible() {
-            return;
-        }
-        let core = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            for delay in REORDER_REFRESH_MS {
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-                if core.reorder_token.load(Ordering::SeqCst) != token || core.is_local() {
-                    return;
-                }
-                core.refresh_queue().await;
-            }
-        });
-    }
-
-    /// The whole queue, for the queue panel and Stack's "Next tracks" strip
-    /// alike — one fetch, one channel, two readers.
-    ///
-    /// No artwork is resolved here. That is the difference from the four-item
-    /// version this replaced: a full queue's worth of `data:` URLs would be
-    /// megabytes on an event, and the two surfaces want different sizes anyway.
-    ///
-    /// Each `/queue` is a full round trip into the YouTube Music renderer, so
-    /// overlapping refreshes merge: one in flight, at most one more queued
-    /// behind it (see `Gate`).
-    pub async fn refresh_queue(self: &Arc<Self>) {
-        if !self.queue_gate.enter(true) {
-            return;
-        }
-        loop {
-            self.refresh_queue_once().await;
-            if !self.queue_gate.leave() {
-                break;
-            }
-        }
-    }
-
-    /// Whether a queue view would be shown right now; marks it stale if not.
-    fn queue_visible(self: &Arc<Self>) -> bool {
-        if !self.showing() {
-            self.queue_demand.mark_stale();
-            return false;
-        }
-        if !self.queue_wanted() {
-            self.set_queue(QueueView::empty());
-            return false;
-        }
-        true
-    }
-
-    /// Publish a `/queue` reply someone else fetched (the jump path polls the
-    /// queue itself), superseding any refresh still in flight.
-    pub fn adopt_queue(self: &Arc<Self>, queue: &Value) {
-        if self.is_local() || !self.queue_visible() {
-            return;
-        }
-        self.queue_demand.bump();
-        *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
-        self.publish_queue(queue);
-    }
-
-    fn publish_queue(&self, queue: &Value) {
-        let mut view = search::parse_queue(Some(queue), QUEUE_MAX);
-        let names = self.store.get(|s| s.artist_names.clone());
-        if !names.is_empty() {
-            let items: Vec<_> = view
-                .items
-                .iter()
-                .cloned()
-                .map(|mut track| {
-                    track.artist = crate::store::map_artist(&names, &track.artist);
-                    track
-                })
-                .collect();
-            view.items = Arc::from(items);
-        }
-        self.set_queue(view);
-        self.relabel_song();
-    }
-
-    async fn refresh_queue_once(self: &Arc<Self>) {
-        // Hidden: keep what is drawn rather than flash it empty, and refetch
-        // when a surface shows.
-        if !self.queue_visible() {
-            return;
-        }
-        if self.is_local() {
-            self.publish_local_queue();
-            return;
-        }
-
-        let token = self.queue_demand.bump();
-        *self.queue_fetched_at.lock().expect("time lock") = Some(Instant::now());
-        let Ok(Some(queue)) = self.api.queue().await else {
-            return;
-        };
-        if self.is_local() {
-            return;
-        }
-        // One await inside the guarded region, so one check: if a newer refresh
-        // started while this response was in flight, its result is the truth.
-        if !self.queue_demand.current(token) {
-            return;
-        }
-        self.publish_queue(&queue);
-    }
-
-    /// Lyrics come from several providers (see `lyrics.rs`) and are only
-    /// fetched while a lyrics panel is actually open.
-    pub async fn refresh_lyrics(self: &Arc<Self>) {
-        let open = self.lyrics_wanted_by();
-        // A lyrics panel left open on a hidden widget: nobody is reading, so
-        // no lookup — the panel catches up when the widget shows again.
-        if !open.is_empty() && !self.any_on_screen(&open) {
-            self.lyrics_demand.mark_stale();
-            return;
-        }
-        let wanted = !open.is_empty();
-        let song = self.player.lock().expect("player lock").song.clone();
-        let names = self.store.get(|s| s.artist_names.clone());
-        let song = song.map(|song| song.for_lyrics(&names));
-
-        let token = self.lyrics_demand.bump();
-        self.lyrics_superseded.notify_waiters();
-        let Some(song) = song.filter(|_| wanted) else {
-            self.set_lyrics(LyricsView::idle());
-            return;
-        };
-
-        self.set_lyrics(LyricsView {
-            state: "loading".into(),
-            lyrics: None,
-        });
-
-        // Created before the lookup starts, so a newer request's
-        // `notify_waiters` reaches it even before its first poll.
-        let superseded = self.lyrics_superseded.notified();
-        let result = tokio::select! {
-            result = lyrics::fetch_lyrics(self.api.client(), &song) => result,
-            () = superseded => return,
-        };
-
-        // A newer request, or the track moved on while we were waiting.
-        if !self.lyrics_demand.current(token) {
-            return;
-        }
-        let still_playing = self
-            .player
-            .lock()
-            .expect("player lock")
-            .song
-            .as_ref()
-            .map(|s| s.video_id.clone())
-            == Some(song.video_id.clone());
-        if !still_playing {
-            return;
-        }
-
-        self.set_lyrics(LyricsView {
-            state: if result.is_some() { "ready" } else { "none" }.into(),
-            lyrics: result.map(Arc::new),
-        });
-    }
-
-    /// A cache-menu retry should not replace lyrics already on screen.
-    pub async fn retry_missing_lyrics(self: &Arc<Self>) {
-        let missing = self.lyrics_source.lock().expect("lyrics lock").state == "none";
-        if missing {
-            self.refresh_lyrics().await;
-        }
-    }
-
-    /// Surfaces that want the lyrics: an open lyrics panel, or a skin that
-    /// draws them in its own layout. The skin half is read from the store, as
-    /// for the queue (`queue_wanted`).
-    fn lyrics_wanted_by(&self) -> HashSet<String> {
-        let mut open = self.lyrics_demand.wanted_by();
-        if crate::window::skin_shows_lyrics(&crate::window::skin_of(&self.store)) {
-            open.insert(crate::window::WIDGET.to_string());
-        }
-        if crate::window::skin_shows_lyrics(&crate::window::panel_skin_of(&self.store)) {
-            open.insert(crate::window::DROPDOWN.to_string());
-        }
-        open
-    }
-
-    pub fn set_lyrics_wanted(&self, label: &str, wanted: bool) {
-        self.lyrics_demand.set_wanted(label, wanted);
     }
 
     /// Ground truth pull — the websocket's initial values for shuffle/volume are
@@ -1900,54 +1497,6 @@ mod tests {
     }
 
     #[test]
-    fn simplifies_the_words_and_leaves_the_rest_alone() {
-        let view = LyricsView {
-            state: "ready".into(),
-            lyrics: Some(Arc::new(Lyrics {
-                synced: true,
-                how: crate::lyrics::How::Exact,
-                lines: vec![
-                    LyricLine {
-                        time: Some(0.0),
-                        text: "後來我總算學會了如何去愛".into(),
-                        jyutping: None,
-                    },
-                    // The reason this is not a character table: 乾 is 干 in
-                    // 乾淨 and stays 乾 in 乾坤. Any per-character mapping gets
-                    // one of those two wrong, in the same line.
-                    LyricLine {
-                        time: Some(1.0),
-                        text: "乾淨的乾坤".into(),
-                        jyutping: None,
-                    },
-                    // Already simplified, and not Chinese at all: both have to
-                    // survive untouched, since every line is converted rather
-                    // than the track being sniffed first.
-                    LyricLine {
-                        time: Some(2.0),
-                        text: "Baby, already 简体 and ASCII".into(),
-                        jyutping: None,
-                    },
-                ],
-            })),
-        };
-
-        let converted = view.simplified();
-        let lyrics = converted.lyrics.as_ref().expect("lyrics");
-        assert_eq!(lyrics.lines[0].text, "后来我总算学会了如何去爱");
-        assert_eq!(lyrics.lines[1].text, "干净的乾坤");
-        assert_eq!(lyrics.lines[2].text, "Baby, already 简体 and ASCII");
-
-        // Timings and the fetch's own description belong to the fetch, not the
-        // text — losing a timestamp here would stop the roll following along.
-        assert_eq!(lyrics.lines[0].time, Some(0.0));
-        assert_eq!(lyrics.lines[2].time, Some(2.0));
-        assert!(lyrics.synced);
-        assert_eq!(lyrics.how, crate::lyrics::How::Exact);
-        assert_eq!(converted.state, "ready");
-    }
-
-    #[test]
     fn song_keeps_the_api_words_for_lyrics_and_an_artist_channel_for_songs_only() {
         let raw = serde_json::json!({
             "videoId": "p_oH-XgGqX0",
@@ -1979,39 +1528,5 @@ mod tests {
             "mediaType": "USER_GENERATED_CONTENT",
         });
         assert_eq!(Song::from_value(Some(&upload)).expect("a track").channel, None);
-    }
-
-    #[test]
-    fn a_track_with_no_lyrics_converts_to_itself() {
-        let idle = LyricsView::idle();
-        assert_eq!(idle.simplified(), idle);
-    }
-
-    #[test]
-    fn jyutping_is_derived_before_simplification() {
-        let view = LyricsView {
-            state: "ready".into(),
-            lyrics: Some(Arc::new(Lyrics {
-                synced: true,
-                how: crate::lyrics::How::Exact,
-                lines: vec![LyricLine {
-                    time: Some(1.0),
-                    text: "我心裏".into(),
-                    jyutping: None,
-                }],
-            })),
-        };
-        let engine = Jyutping::from_dir(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/jyutping"),
-        );
-
-        let converted = view.styled(true, Some(&engine));
-        let line = &converted.lyrics.as_ref().expect("lyrics").lines[0];
-        assert_eq!(line.text, "我心里");
-        assert_eq!(line.jyutping.as_deref(), Some("ngo sam leoi"));
-        assert_eq!(
-            view.lyrics.as_ref().expect("source").lines[0].text,
-            "我心裏"
-        );
     }
 }
