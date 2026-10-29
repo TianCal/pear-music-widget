@@ -243,11 +243,18 @@
     </div>
 
     <!-- bridge.js defines window.widget, which app.js is written against. -->
-    <!-- Classic scripts sharing one global scope, in this order: app.js declares
-         the shared state and card rendering, the next five add a feature each,
-         and boot.js wires up Rust's events once everything exists. -->
+    <!-- Classic scripts sharing one global scope, in this order: the shared/
+         helpers (also loaded by the strip and Sort Songs) attach to
+         window.shared and declare nothing else; app.js declares the shared
+         state and card rendering, the next five add a feature each, and
+         boot.js wires up Rust's events once everything exists. -->
     <script src="bridge.js"></script>
     <script src="palette.js"></script>
+    <script src="shared/format.js"></script>
+    <script src="shared/artcache.js"></script>
+    <script src="shared/tint.js"></script>
+    <script src="shared/volume.js"></script>
+    <script src="shared/lists.js"></script>
     <script src="app.js"></script>
     <script src="queue.js"></script>
     <script src="lyrics.js"></script>

@@ -20,34 +20,10 @@ let shape = { bar: 24, notch: 0, pinned: false };
 let state = null;
 let cover = '';
 let queue = { items: [], current: null };
-/** Queue artwork by video id, as `queue_art` replied. Bounded as the card's
- *  is (`cacheArt` in queue.js, kept in step by hand: the strip shares no
- *  script with the card), since this webview owns its own heap too: the
- *  same entry ceiling, and a character budget standing in for bytes, which
- *  it mirrors because data URLs are ASCII. Insertion order is the eviction
- *  order. */
-const thumbs = new Map();
-const THUMBS_CHARS = 4 * 1024 * 1024;
-const THUMBS_MAX = 256;
-let thumbChars = 0;
-
-const dropThumb = (id) => {
-  const held = thumbs.get(id);
-  if (held === undefined) return;
-  thumbs.delete(id);
-  thumbChars -= id.length + held.length;
-};
-
-const keepThumb = (id, src) => {
-  dropThumb(id);
-  thumbs.set(id, src);
-  thumbChars += id.length + src.length;
-  while (thumbs.size > THUMBS_MAX || thumbChars > THUMBS_CHARS) {
-    const oldest = thumbs.keys().next().value;
-    if (oldest === undefined) break;
-    dropThumb(oldest);
-  }
-};
+/** Queue artwork by video id, as `queue_art` replied: the card's bounded
+ *  cache (shared/artcache.js), since this webview owns its own heap too.
+ *  Read with `peek`, so insertion order stays the eviction order. */
+const thumbs = window.shared.artCache();
 
 let posBase = 0;
 let posAt = performance.now();
@@ -68,15 +44,9 @@ const setText = (name, text) =>
     if (el.textContent !== text) el.textContent = text;
   });
 
-// Same shape as the card's `formatTime`: an hour-long local file reads
+// The card's clock reading (shared/format.js): an hour-long local file reads
 // 1:01:40 there, so it must not read 61:40 here.
-const fmt = (seconds) => {
-  const s = Math.max(0, Math.floor(seconds || 0));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = String(s % 60).padStart(2, '0');
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-};
+const fmt = window.shared.formatTime;
 
 function position() {
   if (!state) return 0;
@@ -103,7 +73,7 @@ function applyState(next) {
   const tintChanged = next.tint !== state?.tint;
   // While a volume change settles, our own value beats the echoes still in
   // flight, which may land out of order (see the widget's `holdingVolume`).
-  if (performance.now() < holdVolumeUntil) next = { ...next, volume: state.volume, muted: state.muted };
+  if (volumeControl.holding()) next = { ...next, volume: state.volume, muted: state.muted };
   // Whole-second pushes trail the real playhead by up to a second. Keep the
   // running estimate when a push is merely behind it on the same track.
   const predicted = position();
@@ -124,24 +94,17 @@ async function applyCover(next) {
   applyPalette();
 }
 
-let paletteToken = 0;
-
 // The washes differ between light and dark glass; follow an appearance switch
 // as the card does. Cheap: the cover's sampling is cached in palette.js.
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyPalette());
 
 /** The cover's colours, by the card's own algorithm (`palette.js`) and its
- *  Cover tint setting: the accent, and the washes behind the open sheet. */
-async function applyPalette() {
-  const token = ++paletteToken;
-  const palette = await window.palette.extract(cover, state?.tint ?? 1);
-  if (token !== paletteToken) return; // a newer cover or tint won the race
-  const style = root.style;
-  style.setProperty('--accent', palette.accent);
-  style.setProperty('--wash-1', palette.wash1);
-  style.setProperty('--wash-2', palette.wash2);
-  style.setProperty('--wash-3', palette.wash3);
-  style.setProperty('--wash-base', palette.washBase);
+ *  Cover tint setting: the accent, and the washes behind the open sheet,
+ *  painted on the strip's own element by the card's painter. */
+const paintPalette = window.shared.palettePainter({ extract: window.palette.extract, style: root.style });
+
+function applyPalette() {
+  return paintPalette(cover, state?.tint ?? 1);
 }
 
 function render() {
@@ -247,7 +210,7 @@ function renderNeighbours() {
     const name = row.querySelector('.name');
     if (name.textContent !== track.title) name.textContent = track.title;
     const img = row.querySelector('.thumb');
-    const src = thumbs.get(track.videoId);
+    const src = thumbs.peek(track.videoId);
     if (src) {
       if (img.getAttribute('src') !== src) img.src = src;
     } else {
@@ -274,7 +237,7 @@ function askForThumbs() {
       let added = false;
       for (const [id, src] of Object.entries(reply?.art || {})) {
         if (src && !thumbs.has(id)) {
-          keepThumb(id, src);
+          thumbs.set(id, src);
           added = true;
         }
       }
@@ -288,7 +251,7 @@ function applyQueue(next) {
   queue = next || { items: [], current: null };
   // Keep only what the current queue can still show.
   const ids = new Set((queue.items || []).map((track) => track.videoId));
-  for (const id of thumbs.keys()) if (!ids.has(id)) dropThumb(id);
+  for (const id of thumbs.keys()) if (!ids.has(id)) thumbs.drop(id);
   renderNeighbours();
   renderQueueList(false);
 }
@@ -600,12 +563,17 @@ function listRow({ kind, id, title, sub, art, current, disabled }) {
 
 // ---- playlists: YouTube Music playlists and saved folders, as on the card.
 
-/** Covers already resolved, by source URL: reopening draws them at once. */
-const playlistArt = new Map();
-const playlistArtPending = new Set();
-/** URLs that came back empty, by when they may be asked again. */
-const playlistArtFailed = new Map();
+/** The card's list (shared/lists.js), drawn as the sheet's rows and groups.
+ *  Covers come from Rust, for the rows in view; an empty reply rests a
+ *  minute here, where the card asks again at its next look. */
 const PLAYLIST_ART_RETRY_MS = 60 * 1000;
+const playlists = window.shared.playlistList({
+  scroll: listScroll,
+  row: '.row',
+  ui: { head: group, note, row: listRow },
+  fetchArt: (urls) => invoke('playlist_art', { urls }),
+  retryMs: PLAYLIST_ART_RETRY_MS,
+});
 // Scroll events belong to the rendering steps a never-active window's page
 // may skip, so while a list is up the rows in view are also rechecked on a
 // timer, as the card's picker does. It asks for nothing already in flight.
@@ -618,86 +586,11 @@ async function openPlaylists() {
   listScroll.replaceChildren(note('Loading playlists…'));
   const data = await invoke('list_playlists').catch(() => null);
   if (seq !== viewSeq) return;
-  if (!data?.ok) {
-    listScroll.replaceChildren(note('Could not load playlists.'));
-    return;
-  }
-  const youtube = [group('YouTube Music')];
-  if (!data.youtube?.ok) {
-    youtube.push(note(data.youtube?.error || 'YouTube Music did not answer.'));
-  } else if (!data.youtube.playlists.length) {
-    youtube.push(note('No playlists in your library.'));
-  } else {
-    for (const item of data.youtube.playlists) {
-      const row = listRow({
-        kind: 'youtube',
-        id: item.id,
-        title: item.title,
-        sub: item.subtitle,
-        art: playlistArt.get(item.art),
-        current: item.id === data.currentPlaylist,
-      });
-      if (item.art && !playlistArt.has(item.art)) row.querySelector('img').dataset.art = item.art;
-      youtube.push(row);
-    }
-  }
-  const folders = [group('Folders')];
-  if (!data.folders.length) folders.push(note('Add a folder from Source > Choose Folder… in the menu.'));
-  for (const folder of data.folders) {
-    folders.push(
-      listRow({
-        kind: 'folder',
-        id: folder.path,
-        title: folder.name,
-        sub: folder.present ? folder.parent : 'Not connected',
-        current: folder.current,
-        disabled: !folder.present,
-      }),
-    );
-  }
-  // The source that is playing leads.
-  listScroll.replaceChildren(...(data.local ? [...folders, ...youtube] : [...youtube, ...folders]));
-  listScroll.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
-  loadPlaylistArt();
-}
-
-/** Covers come from Rust, and only for the rows in view. */
-function loadPlaylistArt() {
-  const top = listScroll.scrollTop - 60;
-  const bottom = listScroll.scrollTop + listScroll.clientHeight + 60;
-  const urls = [];
-  for (const img of listScroll.querySelectorAll('img[data-art]')) {
-    const row = img.closest('.row');
-    if (row.offsetTop + row.offsetHeight < top || row.offsetTop > bottom) continue;
-    const url = img.dataset.art;
-    if ((playlistArtFailed.get(url) ?? 0) > performance.now()) continue;
-    if (!playlistArtPending.has(url)) {
-      playlistArtPending.add(url);
-      urls.push(url);
-    }
-  }
-  if (!urls.length) return;
-  invoke('playlist_art', { urls })
-    .then((reply) => {
-      for (const url of urls) {
-        const data = reply?.art?.[url];
-        if (data) playlistArt.set(url, data);
-        else playlistArtFailed.set(url, performance.now() + PLAYLIST_ART_RETRY_MS);
-      }
-      for (const img of listScroll.querySelectorAll('img[data-art]')) {
-        const data = playlistArt.get(img.dataset.art);
-        if (data) {
-          img.src = data;
-          delete img.dataset.art;
-        }
-      }
-    })
-    .catch(() => {})
-    .finally(() => urls.forEach((url) => playlistArtPending.delete(url)));
+  playlists.render(data);
 }
 
 listScroll.addEventListener('scroll', () => {
-  if (view === 'playlists') loadPlaylistArt();
+  if (view === 'playlists') playlists.loadArt();
   if (view === 'queue') loadQueueArt();
 }, { passive: true });
 
@@ -743,7 +636,7 @@ function renderQueueList(first) {
       id: track.videoId,
       title: track.title,
       sub: track.artist,
-      art: thumbs.get(track.videoId),
+      art: thumbs.peek(track.videoId),
     });
     row.dataset.index = track.index;
     if (track.rating === 'DISLIKE') row.classList.add('disliked');
@@ -795,11 +688,11 @@ function loadQueueArt() {
     .then((reply) => {
       for (const id of ids) {
         const src = reply?.art?.[id];
-        if (src) keepThumb(id, src);
+        if (src) thumbs.set(id, src);
         else queueArtResting.set(id, performance.now() + QUEUE_ART_REST_MS);
       }
       for (const img of listScroll.querySelectorAll('img[data-video]')) {
-        const src = thumbs.get(img.dataset.video);
+        const src = thumbs.peek(img.dataset.video);
         if (src) {
           img.src = src;
           delete img.dataset.video;
@@ -812,62 +705,14 @@ function loadQueueArt() {
 
 // ---- artists: the Top songs of each artist on the track, as on the card.
 
-const ARTISTS_MAX = 4;
-const ARTIST_REUSE_MS = 10 * 60 * 1000;
-const ARTIST_PAGES_MAX = 24;
-/** A section still loading says so only if its reply is not in quickly. */
-const ARTIST_LOADING_NOTE_MS = 150;
-const artistPages = new Map();
-
-const songArtists = () => (state?.song?.artists || []).slice(0, ARTISTS_MAX);
-
-/** By artist id, or by name for an artist without one. Rust caches too
- *  (artist.rs); this side saves the IPC on a reopen. */
-function fetchArtist({ id, query }) {
-  const key = id || `~${query}`;
-  const held = artistPages.get(key);
-  if (held && performance.now() - held.at < ARTIST_REUSE_MS) return held;
-  const entry = { at: performance.now(), data: null };
-  entry.reply = invoke('artist_page', { id, query }).catch((err) => ({ ok: false, error: String(err) }));
-  entry.reply.then((data) => {
-    if (data?.ok) entry.data = data;
-    else if (artistPages.get(key) === entry) artistPages.delete(key);
-  });
-  artistPages.delete(key);
-  artistPages.set(key, entry);
-  if (artistPages.size > ARTIST_PAGES_MAX) artistPages.delete(artistPages.keys().next().value);
-  return entry;
-}
-
-/** The sheet opening is the pointer resting on the strip: the cue the card
- *  takes to warm its artists, so a click draws them in the same frame. */
-function warmArtists() {
-  if (state?.status === 'connected') songArtists().forEach(fetchArtist);
-}
-
-function artistSection(artist, data) {
-  const head = document.createElement('div');
-  head.className = 'section-head';
-  const name = document.createElement('span');
-  name.className = 'section-name';
-  name.textContent = artist.name;
-  head.append(name);
-  const section = document.createElement('div');
-  section.append(head);
-  if (!data) return section.append(note('Loading top songs…')), section;
-  if (!data.ok) return section.append(note(data.error || 'Could not load this artist.')), section;
-  const { songs, allSongs } = data.page;
-  if (allSongs) {
-    const all = document.createElement('button');
-    all.type = 'button';
-    all.className = 'play-all';
-    all.dataset.id = allSongs;
-    all.textContent = 'Play all';
-    head.append(all);
-  }
-  if (!songs.length) section.append(note('No top songs on YouTube Music.'));
-  for (const song of songs) {
-    section.append(
+/** The pages — kept replies, one section per artist filled in as each lands
+ *  — are the card's (shared/lists.js); this side names the sheet's markup. */
+const artistPages = window.shared.artistPages({
+  fetch: (id, query) => invoke('artist_page', { id, query }),
+  ui: {
+    section: { head: 'section-head', name: 'section-name', playAll: 'play-all' },
+    note,
+    row: (song) =>
       listRow({
         kind: 'song',
         id: song.videoId,
@@ -876,9 +721,15 @@ function artistSection(artist, data) {
         art: song.thumbnail,
         current: song.videoId === state?.song?.videoId,
       }),
-    );
-  }
-  return section;
+  },
+});
+
+const songArtists = () => (state?.song?.artists || []).slice(0, artistPages.limit);
+
+/** The sheet opening is the pointer resting on the strip: the cue the card
+ *  takes to warm its artists, so a click draws them in the same frame. */
+function warmArtists() {
+  if (state?.status === 'connected') songArtists().forEach(artistPages.page);
 }
 
 /** The track the artist view was opened for. */
@@ -890,31 +741,10 @@ function openArtists() {
   showView('artist', artists.map((artist) => artist.name).join(', '));
   artistsFor = state?.song?.videoId ?? null;
   const seq = viewSeq;
-  const entries = artists.map(fetchArtist);
-  let late = false;
-  const draw = () => {
-    if (seq !== viewSeq) return;
-    const shown = artists
-      .map((artist, i) => {
-        const data = entries[i].data || entries[i].settled || null;
-        return data || late ? artistSection(artist, data) : null;
-      })
-      .filter(Boolean);
-    listScroll.replaceChildren(...shown);
-  };
-  draw();
-  const notes = setTimeout(() => {
-    late = true;
-    draw();
-  }, ARTIST_LOADING_NOTE_MS);
-  // Each section fills in as its page lands, in credit order.
-  for (const entry of entries) {
-    entry.reply.then((data) => {
-      entry.settled = data;
-      draw();
-    });
-  }
-  Promise.all(entries.map((entry) => entry.reply)).then(() => clearTimeout(notes));
+  artistPages.show(artists, {
+    live: () => seq === viewSeq,
+    draw: (sections) => listScroll.replaceChildren(...sections),
+  });
 }
 
 /** One play at a time: a second click while one is starting would race it. */
@@ -966,27 +796,18 @@ async function playFromList(target) {
 // widget's rules. A sideways two-finger swipe skips, like swiping a
 // notification away.
 
-const VOLUME_THROTTLE_MS = 70;
-const VOLUME_SETTLE_MS = 900;
-const WHEEL_SENSITIVITY = 0.12;
-let holdVolumeUntil = 0;
-let volumeTimer = null;
-let wheelVolume = null;
-let wheelVolumeTimer = 0;
 let peekTimer = 0;
 
-const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-
-/** Throttle sends to one per 70 ms, and always send the final value. */
-function setVolume(value) {
-  state = { ...state, volume: clamp(value, 0, 100), muted: state.muted && value <= 0 };
-  holdVolumeUntil = performance.now() + VOLUME_SETTLE_MS;
-  if (volumeTimer) return;
-  volumeTimer = setTimeout(() => {
-    volumeTimer = null;
-    command('volume', { volume: Math.round(state.volume) });
-  }, VOLUME_THROTTLE_MS);
-}
+/** The throttle (one send per 70 ms, the final value always sent), the echo
+ *  hold and the wheel's carry are the card's (shared/volume.js); this side
+ *  only writes the level into its state. Raising it unmutes, as there. */
+const volumeControl = window.shared.volumeControl({
+  apply: (volume) => {
+    state = { ...state, volume, muted: state.muted && volume <= 0 };
+  },
+  volume: () => state.volume,
+  send: (volume) => command('volume', { volume }),
+});
 
 /** Turn the progress row into the volume for a moment. */
 const levelFill = document.getElementById('level-fill');
@@ -1032,16 +853,10 @@ root.addEventListener(
       return;
     }
     if (state.status === 'offline') return;
-    // Natural scrolling reports swiping up as a positive deltaY, so adding it
-    // makes "scroll up" raise the volume, as on the widget. A float carried
-    // between events keeps a trackpad's small deltas from rounding away.
-    const from = wheelVolume ?? (state.muted ? 0 : state.volume);
-    wheelVolume = clamp(from + event.deltaY * WHEEL_SENSITIVITY, 0, 100);
-    clearTimeout(wheelVolumeTimer);
-    wheelVolumeTimer = setTimeout(() => {
-      wheelVolume = null;
-    }, 400);
-    setVolume(wheelVolume);
+    // The step, its carry between a trackpad's small deltas and the throttle
+    // are the shared control's, as on the widget; a fresh gesture starts
+    // from the level as heard.
+    volumeControl.wheel(event.deltaY, state.muted ? 0 : state.volume);
     peekVolume();
   },
   { passive: false },

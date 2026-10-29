@@ -55,19 +55,21 @@ el.seek.addEventListener('pointercancel', endSeek);
 // ------------------------------------------------------------ volume drag
 
 let volumeDragging = false;
-let volumeSendTimer = null;
 let volumePeekTimer = null;
 
-// Every volume we POST comes back as a VOLUME_CHANGED echo. While the user is
-// dragging there are several in flight at once, and the last ones to land are
-// not necessarily the newest — that is what made the slider jump on release.
-// So: throttle what we send, always send the final value, and ignore echoes
-// until the server has had time to settle on it.
-let ignoreVolumeUntil = 0;
-const VOLUME_SETTLE_MS = 900;
-const VOLUME_THROTTLE_MS = 70;
+// The throttle, the final send and the echo hold are shared/volume.js, the
+// same rules the strip's wheel follows; this side only draws the value.
+const volumeControl = window.shared.volumeControl({
+  apply: (volume) => {
+    if (state.muted && volume > 0) state.muted = false;
+    state.volume = volume;
+    renderControls();
+  },
+  volume: () => state.volume,
+  send: (volume) => send('volume', { volume }),
+});
 
-const holdingVolume = () => volumeDragging || performance.now() < ignoreVolumeUntil;
+const holdingVolume = () => volumeDragging || volumeControl.holding();
 
 /** Briefly show a wheel or keyboard change, both ways the card has of showing
  *  one: the slider peeks out from under the speaker, and the progress bar turns
@@ -89,29 +91,7 @@ const peekVolume = () => {
   }, 1100);
 };
 
-const flushVolume = () => {
-  clearTimeout(volumeSendTimer);
-  volumeSendTimer = null;
-  send('volume', { volume: Math.round(state.volume) });
-};
-
-const setVolume = (value, { immediate = false } = {}) => {
-  const volume = clamp(value, 0, 100);
-  if (state.muted && volume > 0) state.muted = false;
-  state.volume = volume;
-  ignoreVolumeUntil = performance.now() + VOLUME_SETTLE_MS;
-  renderControls();
-
-  if (immediate) {
-    flushVolume();
-    return;
-  }
-  if (volumeSendTimer) return;
-  volumeSendTimer = setTimeout(() => {
-    volumeSendTimer = null;
-    send('volume', { volume: Math.round(state.volume) });
-  }, VOLUME_THROTTLE_MS);
-};
+const setVolume = (value, options) => volumeControl.set(value, options);
 
 // Events land on the padded hit area, but the ratio is measured against the
 // visible rail so the ends of the slider map to 0 and 100.
@@ -146,13 +126,6 @@ el.volHit.addEventListener('pointercancel', endVolume);
 
 // ------------------------------------------------- wheel / trackpad / keys
 
-// A trackpad emits many small deltas where a mouse wheel emits few large ones.
-// Carrying a float between events lets both feel proportional instead of the
-// trackpad being ignored to rounding.
-let wheelVolume = null;
-let wheelResetTimer = null;
-const WHEEL_SENSITIVITY = 0.12;
-
 el.card.addEventListener(
   'wheel',
   (event) => {
@@ -164,17 +137,9 @@ el.card.addEventListener(
     // These scroll on their own; the wheel belongs to them, not to volume.
     if (event.target.closest('#queue, #upnext, #playlists, #artist-pop')) return;
     if (state.status !== 'connected') return;
-    // With macOS natural scrolling, swiping up reports a positive deltaY, so
-    // adding it is what makes "scroll up" raise the volume.
-    const from = wheelVolume ?? (state.muted ? 0 : state.volume);
-    wheelVolume = clamp(from + event.deltaY * WHEEL_SENSITIVITY, 0, 100);
-
-    clearTimeout(wheelResetTimer);
-    wheelResetTimer = setTimeout(() => {
-      wheelVolume = null;
-    }, 400);
-
-    setVolume(wheelVolume);
+    // The step, its carry between trackpad events and the throttle are the
+    // shared control's; a fresh gesture starts from the level as heard.
+    volumeControl.wheel(event.deltaY, state.muted ? 0 : state.volume);
     peekVolume();
   },
   { passive: true },
@@ -250,7 +215,7 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
   const step = event.shiftKey ? VOLUME_STEP_FINE : VOLUME_STEP;
   const from = state.muted ? 0 : state.volume;
-  wheelVolume = null;
+  volumeControl.dropCarry();
   setVolume(from + (event.key === 'ArrowUp' ? step : -step), { immediate: true });
   peekVolume();
 });

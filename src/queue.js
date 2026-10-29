@@ -10,43 +10,13 @@
    surface is actually showing, because resolving every slot would be megabytes
    for tracks nobody has scrolled to. */
 
-/** Artwork already resolved, keyed by videoId. Survives a queue change: the
- *  same track scrolled back to is already paid for. The Rust cache has the same
- *  byte and entry ceilings; bounding this copy matters because every webview
- *  owns its own JavaScript heap. Data URLs are ASCII, so a character budget
- *  mirrors the source-byte budget even if the engine's storage differs. */
-const ART_CACHE_CHARS = 4 * 1024 * 1024;
-const ART_CACHE_MAX = 256;
-let artChars = 0;
+/* Artwork already resolved lives in `state.art`, the bounded cache of
+   shared/artcache.js: a row being drawn takes it with `get`, which promotes
+   the hit; the fill-in paths below `peek`, so painting every row on screen
+   does not make the cache's order mean nothing. */
 
-const artOf = (videoId) => {
-  const art = state.art.get(videoId) || null;
-  if (art) {
-    // Map iteration order is the eviction order. Reinsert a hit to promote it.
-    state.art.delete(videoId);
-    state.art.set(videoId, art);
-  }
-  return art;
-};
-
-const cacheArt = (videoId, art) => {
-  const replaced = state.art.get(videoId);
-  if (replaced) {
-    artChars -= videoId.length + replaced.length;
-    state.art.delete(videoId);
-  }
-
-  state.art.set(videoId, art);
-  artChars += videoId.length + art.length;
-
-  while (state.art.size > ART_CACHE_MAX || artChars > ART_CACHE_CHARS) {
-    const oldestId = state.art.keys().next().value;
-    if (oldestId === undefined) break;
-    const dropped = state.art.get(oldestId);
-    state.art.delete(oldestId);
-    artChars -= oldestId.length + (dropped?.length || 0);
-  }
-};
+/** The art for a row being drawn, or `null`. */
+const artOf = (videoId) => state.art.get(videoId) || null;
 
 let artPending = null;
 let artTimer = null;
@@ -91,7 +61,7 @@ const wantArt = (ids, size) => {
 
     const landed = new Set();
     for (const [id, art] of Object.entries(reply.art || {})) {
-      cacheArt(id, art);
+      state.art.set(id, art);
       landed.add(id);
     }
     // Written straight into whatever is on screen rather than re-rendering: a
@@ -102,14 +72,14 @@ const wantArt = (ids, size) => {
 };
 
 /** Fill in any still-empty `<img data-art>` among the `ids` that just arrived.
- *  Read straight from the map rather than through `artOf`: promoting every
- *  row in the DOM would make the cache's order mean nothing. An image that
- *  already has a picture keeps it — reading `src` back would only resolve a
- *  data URL to compare it with the one it already is. */
+ *  `peek`, not `artOf`: promoting every row in the DOM would make the cache's
+ *  order mean nothing. An image that already has a picture keeps it — reading
+ *  `src` back would only resolve a data URL to compare it with the one it
+ *  already is. */
 const paintArt = (ids) => {
   for (const img of document.querySelectorAll('img[data-art]')) {
     if (img.hasAttribute('src') || !ids.has(img.dataset.art)) continue;
-    const art = state.art.get(img.dataset.art);
+    const art = state.art.peek(img.dataset.art);
     if (art) img.src = art;
   }
 };

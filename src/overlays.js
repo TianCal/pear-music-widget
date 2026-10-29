@@ -29,9 +29,6 @@ const pickerHead = (text) => {
   return head;
 };
 
-/** Covers already resolved, by source URL: reopening draws them at once. */
-const pickerArt = new Map();
-
 /** A `.result` row: `lead` (a cover or a tile), then a title over a subtitle.
  *  The picker, the artist popup and search all draw these. */
 const resultRow = (lead, title, sub) => {
@@ -60,8 +57,7 @@ const pickerRow = ({ kind, id, title, sub, art, current, disabled }) => {
   } else {
     lead = document.createElement('img');
     lead.alt = '';
-    if (art && pickerArt.get(art)) lead.src = pickerArt.get(art);
-    else if (art) lead.dataset.art = art;
+    if (art) lead.src = art;
   }
   const row = resultRow(lead, title, sub);
   row.setAttribute('role', 'menuitem');
@@ -75,93 +71,14 @@ const pickerRow = ({ kind, id, title, sub, art, current, disabled }) => {
   return row;
 };
 
-const renderPicker = (data) => {
-  const youtube = [pickerHead('YouTube Music')];
-  if (!data.youtube?.ok) {
-    youtube.push(pickerNote(data.youtube?.error || 'YouTube Music did not answer.'));
-  } else if (!data.youtube.playlists.length) {
-    youtube.push(pickerNote('No playlists in your library.'));
-  } else {
-    for (const item of data.youtube.playlists) {
-      youtube.push(
-        pickerRow({
-          kind: 'youtube',
-          id: item.id,
-          title: item.title,
-          sub: item.subtitle,
-          art: item.art,
-          current: item.id === data.currentPlaylist,
-        }),
-      );
-    }
-  }
-
-  const folders = [pickerHead('Folders')];
-  if (!data.folders.length) {
-    folders.push(pickerNote('Add a folder from Source > Choose Folder… in the menu.'));
-  }
-  for (const folder of data.folders) {
-    folders.push(
-      pickerRow({
-        kind: 'folder',
-        id: folder.path,
-        title: folder.name,
-        sub: folder.present ? folder.parent : 'Not connected',
-        current: folder.current,
-        disabled: !folder.present,
-      }),
-    );
-  }
-
-  // The source that is playing leads.
-  el.playlistsScroll.replaceChildren(
-    ...(data.local ? [...folders, ...youtube] : [...youtube, ...folders]),
-  );
-  el.playlistsScroll.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
-  loadVisiblePickerArt();
-};
-
-/* Covers come from Rust (the CSP allows data: URLs only), and only for the rows
-   in view: a library of a hundred playlists should not wait on, or fill the
-   image cache with, covers nobody sees. Measured by hand rather than with an
-   IntersectionObserver or animation frames, which a hidden WebKit document —
-   the widget always reports hidden — may never deliver. */
-const PICKER_ART_MARGIN = 60;
-const pickerArtPending = new Set();
-
-const loadVisiblePickerArt = () => {
-  const scroll = el.playlistsScroll;
-  const top = scroll.scrollTop - PICKER_ART_MARGIN;
-  const bottom = scroll.scrollTop + scroll.clientHeight + PICKER_ART_MARGIN;
-  const urls = [];
-  for (const img of scroll.querySelectorAll('img[data-art]')) {
-    const row = img.closest('.result');
-    if (row.offsetTop + row.offsetHeight < top || row.offsetTop > bottom) continue;
-    const url = img.dataset.art;
-    if (!pickerArtPending.has(url)) {
-      pickerArtPending.add(url);
-      urls.push(url);
-    }
-  }
-  if (!urls.length) return;
-  window.widget
-    .playlistArt(urls)
-    .then((reply) => {
-      for (const [url, data] of Object.entries(reply?.art || {})) {
-        if (data) pickerArt.set(url, data);
-      }
-      for (const img of scroll.querySelectorAll('img[data-art]')) {
-        const data = pickerArt.get(img.dataset.art);
-        if (data) {
-          img.src = data;
-          delete img.dataset.art;
-        }
-      }
-    })
-    .catch(() => {})
-    // A failed cover can be asked for again when it scrolls back into view.
-    .finally(() => urls.forEach((url) => pickerArtPending.delete(url)));
-};
+/** The list itself — its groups, notes and the covers of the rows in view —
+ *  is shared/lists.js, drawn here as `.result` rows. */
+const picker = window.shared.playlistList({
+  scroll: el.playlistsScroll,
+  row: '.result',
+  ui: { head: pickerHead, note: pickerNote, row: pickerRow },
+  fetchArt: (urls) => window.widget.playlistArt(urls),
+});
 
 // Scroll events belong to the rendering steps a hidden document may skip, so
 // while the picker is open the rows in view are also rechecked on a timer. It
@@ -214,15 +131,11 @@ const openPicker = async () => {
   el.playlistsScroll.replaceChildren(pickerNote('Loading playlists…'));
 
   clearInterval(pickerArtTimer);
-  pickerArtTimer = setInterval(loadVisiblePickerArt, PICKER_ART_CHECK_MS);
+  pickerArtTimer = setInterval(picker.loadArt, PICKER_ART_CHECK_MS);
 
   const data = await fetchPicker();
   if (seq !== pickerSeq) return;
-  if (!data?.ok) {
-    el.playlistsScroll.replaceChildren(pickerNote('Could not load playlists.'));
-    return;
-  }
-  renderPicker(data);
+  picker.render(data);
 };
 
 const closePicker = () => {
@@ -288,83 +201,32 @@ document.addEventListener('click', (event) => {
 
 let artistSeq = 0;
 
-/** Replies by artist id, or by name for an artist without one:
- *  `{ at, reply, data }`, where `data` is set once a good reply lands so an
- *  open can draw it in the same frame. */
-const ARTIST_REUSE_MS = 10 * 60 * 1000;
-const ARTIST_PAGES_MAX = 24;
-const artistPages = new Map();
+/** The pages — kept replies, one section per artist filled in as each lands
+ *  — are shared/lists.js; this side names the markup, `.result` rows under
+ *  a head with the artist's name and Play all. */
+const artistPages = window.shared.artistPages({
+  fetch: (id, query) => window.widget.artistPage(id, query),
+  ui: {
+    section: {
+      root: 'artist-section',
+      head: 'artist-pop-head',
+      name: 'artist-pop-name',
+      playAll: 'artist-play-all',
+    },
+    note: pickerNote,
+    row: (song) =>
+      pickerRow({
+        kind: 'song',
+        id: song.videoId,
+        title: song.title,
+        sub: song.subtitle,
+        art: song.thumbnail,
+        current: song.videoId === state.song?.videoId,
+      }),
+  },
+});
 
-/** `query` is YouTube Music's own name, which an artist without an id is
- *  found by; `name` may be an `artistNames` rename. */
-const fetchArtist = ({ id, query }) => {
-  const key = id || `~${query}`;
-  const held = artistPages.get(key);
-  if (held && performance.now() - held.at < ARTIST_REUSE_MS) return held;
-  const entry = { at: performance.now(), data: null };
-  entry.reply = window.widget
-    .artistPage(id, query)
-    .catch((err) => ({ ok: false, error: String(err) }));
-  entry.reply.then((data) => {
-    // A failure is not kept here: Rust decides what is worth asking again.
-    if (data?.ok) entry.data = data;
-    else if (artistPages.get(key) === entry) artistPages.delete(key);
-  });
-  artistPages.delete(key);
-  artistPages.set(key, entry);
-  if (artistPages.size > ARTIST_PAGES_MAX) artistPages.delete(artistPages.keys().next().value);
-  return entry;
-};
-
-/** Artists warmed and shown for one track: a credit can list more names
- *  than a popup has room for. */
-const ARTISTS_MAX = 4;
-const songArtists = () => (state.song?.artists || []).slice(0, ARTISTS_MAX);
-
-/** One artist's section: their name and Play all, then their songs. */
-const artistSection = (artist, data) => {
-  const head = document.createElement('div');
-  head.className = 'artist-pop-head';
-  const name = document.createElement('span');
-  name.className = 'artist-pop-name';
-  name.textContent = artist.name;
-  head.append(name);
-
-  const section = document.createElement('div');
-  section.className = 'artist-section';
-  section.append(head);
-  if (!data) {
-    section.append(pickerNote('Loading top songs…'));
-    return section;
-  }
-  if (!data.ok) {
-    section.append(pickerNote(data.error || 'Could not load this artist.'));
-    return section;
-  }
-  const { songs, allSongs } = data.page;
-  if (allSongs) {
-    const all = document.createElement('button');
-    all.className = 'artist-play-all';
-    all.type = 'button';
-    all.dataset.id = allSongs;
-    all.textContent = 'Play all';
-    head.append(all);
-  }
-  if (!songs.length) section.append(pickerNote('No top songs on YouTube Music.'));
-  for (const song of songs) {
-    const row = pickerRow({
-      kind: 'song',
-      id: song.videoId,
-      title: song.title,
-      sub: song.subtitle,
-      current: song.videoId === state.song?.videoId,
-    });
-    const img = row.querySelector('img');
-    if (song.thumbnail) img.src = song.thumbnail;
-    section.append(row);
-  }
-  return section;
-};
+const songArtists = () => (state.song?.artists || []).slice(0, artistPages.limit);
 
 /** Under the subtitle, starting at the credit, kept inside the card. Every
  *  measurement first, then the writes: the width does not depend on the
@@ -382,43 +244,18 @@ const placeArtistPop = (link) => {
   pop.style.left = `${Math.round(left)}px`;
 };
 
-/** A section still loading only says so if its reply is not in quickly, so
- *  warm pages never flash a note. */
-const ARTIST_LOADING_NOTE_MS = 150;
-
 const openArtist = (link) => {
   if (pickerOpen) closePicker();
   const seq = ++artistSeq;
   artistOpen = true;
-  const artists = songArtists();
-  const entries = artists.map(fetchArtist);
-  let late = false;
-  const draw = () => {
-    if (seq !== artistSeq) return;
-    const shown = artists
-      .map((artist, i) => {
-        const data = entries[i].data || entries[i].settled || null;
-        return data || late ? artistSection(artist, data) : null;
-      })
-      .filter(Boolean);
-    el.artistPopScroll.replaceChildren(...shown);
-    placeArtistPop(link);
-  };
-
   el.artistPop.hidden = false;
-  draw();
-  const notes = setTimeout(() => {
-    late = true;
-    draw();
-  }, ARTIST_LOADING_NOTE_MS);
-  // Each section fills in as its page lands, in credit order.
-  for (const entry of entries) {
-    entry.reply.then((data) => {
-      entry.settled = data;
-      draw();
-    });
-  }
-  Promise.all(entries.map((entry) => entry.reply)).then(() => clearTimeout(notes));
+  artistPages.show(songArtists(), {
+    live: () => seq === artistSeq,
+    draw: (sections) => {
+      el.artistPopScroll.replaceChildren(...sections);
+      placeArtistPop(link);
+    },
+  });
 };
 
 const closeArtist = () => {
@@ -443,7 +280,7 @@ const warmArtists = () => {
   clearTimeout(artistWarmTimer);
   artistWarmTimer = setTimeout(() => {
     if (!pointerOnCard || state.status !== 'connected') return;
-    songArtists().forEach(fetchArtist);
+    songArtists().forEach(artistPages.page);
   }, ARTIST_CARD_HOVER_MS);
 };
 

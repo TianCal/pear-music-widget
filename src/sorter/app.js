@@ -36,14 +36,8 @@
   /** Resolves when the outgoing card has finished leaving. */
   let leaving = Promise.resolve();
 
-  // Same shape as the card's `formatTime`, hours included.
-  const clock = (s) => {
-    s = Math.max(0, Math.floor(s || 0));
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = String(s % 60).padStart(2, "0");
-    return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
-  };
+  // The card's clock reading (shared/format.js), hours included.
+  const clock = window.shared.formatTime;
   let lastPosition = 0;
   const basename = (p) => (p || "").split("/").filter(Boolean).pop() || p;
 

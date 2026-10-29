@@ -152,9 +152,10 @@ let state = {
   corners: {},
   cornersAutohide: 0,
   /* The whole queue, text only. Artwork arrives separately, by id, for the rows
-     a surface is actually showing — see `wantArt`. */
+     a surface is actually showing — see `wantArt`. Bounded (shared/artcache.js):
+     this webview's heap is its own. */
   queue: { items: [], current: null, truncated: false },
-  art: new Map(),
+  art: window.shared.artCache(),
   lyrics: null,
   lyricsState: 'idle',
   song: null,
@@ -200,34 +201,19 @@ let lastSubtitle = null;
 
 // ------------------------------------------------------------------ format
 
-const formatTime = (seconds) => {
-  const s = Math.max(0, Math.floor(seconds || 0));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = String(s % 60).padStart(2, '0');
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-};
-
-const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+// Shared with the strip and Sort Songs (shared/format.js); the one name the
+// other card scripts read it by.
+const clamp = window.shared.clamp;
 
 // ----------------------------------------------------------------- accent
 
-let paletteToken = 0;
+const paintPalette = window.shared.palettePainter({
+  extract: window.palette.extract,
+  style: document.documentElement.style,
+});
 
 /** The whole card is tinted from the cover, not just the transport. */
-const applyPalette = async (coverDataUrl) => {
-  const token = ++paletteToken;
-  const palette = await window.palette.extract(coverDataUrl, state.tint ?? 1);
-  if (token !== paletteToken) return; // a newer cover won the race
-
-  const root = document.documentElement.style;
-  root.setProperty('--accent', palette.accent);
-  root.setProperty('--accent-soft', palette.accentSoft);
-  root.setProperty('--wash-1', palette.wash1);
-  root.setProperty('--wash-2', palette.wash2);
-  root.setProperty('--wash-3', palette.wash3);
-  root.setProperty('--wash-base', palette.washBase);
-};
+const applyPalette = (coverDataUrl) => paintPalette(coverDataUrl, state.tint ?? 1);
 
 // A surface that was hidden when the track changed may have had nothing to
 // sample, so take the colours again once it is back on screen. Cheap, and it is
