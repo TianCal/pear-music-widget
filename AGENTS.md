@@ -9,7 +9,7 @@ file records the contracts that are easy to break.
 YouTube Music API Server (:26538)
   WebSocket push + REST control
               ↓
-src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
+src-tauri/src/ws.rs → state/ → Tauri IPC → src/app.js
                          ↑                     src/palette.js
                     src/api.rs
 ```
@@ -17,7 +17,7 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | File | Responsibility |
 | --- | --- |
 | `src-tauri/src/main.rs` | Setup, lifecycle, pollers, window events, `--doctor` |
-| `src-tauri/src/state.rs` | Player state, realtime messages, volume calibration |
+| `src-tauri/src/state/` | Player state, realtime messages, volume calibration (`mod.rs`); the queue channel (`queue.rs`); the lyrics channel and `LyricsView` (`lyrics.rs`) |
 | `src-tauri/src/api.rs` | REST, authentication, cover fetching |
 | `src-tauri/src/ws.rs` | WebSocket connection, backoff, re-authentication |
 | `src-tauri/src/window.rs` | Widget sizing, zoom, anchoring, persistence |
@@ -28,11 +28,12 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/macos.rs` | AppKit integration |
 | `src-tauri/src/search.rs` | Search, queue and artist page parsing |
 | `src-tauri/src/artist.rs` | Artist popup pages: fetch and cache |
-| `src-tauri/src/lyrics.rs` | Lyrics lookup, matching, and LRC parsing |
+| `src-tauri/src/lyrics/` | Lookup orders, caching and LRC parsing (`mod.rs`); one provider per file: `lrclib.rs`, `ytmusic.rs`, `kugeci.rs` |
 | `src-tauri/src/lyrics_cache.rs` | Memory and disk lyrics cache |
-| `src-tauri/src/local.rs` | Local-folder scanning and playback |
+| `src-tauri/src/local/` | Local-folder playback (`mod.rs`); folder scan, tags and index (`library.rs`); covers for local tracks (`art.rs`) |
 | `src-tauri/src/audio.rs` | Output streams and decoders shared by both local players |
-| `src-tauri/src/fsutil.rs` | Atomic file writes and the stable on-disk hash |
+| `src-tauri/src/fsutil.rs` | Atomic file writes, the stable on-disk hash, `~/Library` paths, clocks |
+| `src-tauri/src/text.rs` | Folding, bracket stripping, credit splitting, Han detection, URL encoding |
 | `src-tauri/src/artwork.rs` | Online covers for local files, disk cache |
 | `src-tauri/src/likes.rs` | Local like/dislike, stored on the drive |
 | `src-tauri/src/store.rs` | `settings.json` |
@@ -46,6 +47,12 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src/input.js` | Seek, volume, wheel and keys |
 | `src/boot.js` | Rust event wiring and first state (loads last) |
 | `src/palette.js` | Cover colour extraction |
+| `src/shared/format.js` | Clock reading and clamp, shared by the three pages |
+| `src/shared/artcache.js` | `artCache`: the bounded artwork LRU of the card and the strip |
+| `src/shared/tint.js` | `palettePainter`: writes a cover's palette onto a style |
+| `src/shared/volume.js` | `volumeControl`: throttle, final send, echo hold, wheel carry |
+| `src/shared/lists.js` | `playlistList` and `artistPages`, drawn with each page's own markup |
+| `scripts/*.test.cjs` | Renderer tests (`node --test 'scripts/*.test.cjs'`) |
 | `src/sorter/` | Sort Songs page (its own HTML, CSS and JS) |
 | `src/strip/` | Menu-bar strip page (its own HTML, CSS and JS) |
 
@@ -53,7 +60,7 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 
 1. **All network access belongs in Rust.** The renderer's CSP intentionally
    blocks it. Rust returns covers as `data:` URLs so canvas sampling is not
-   cross-origin tainted. `lyrics.rs` and `artwork.rs` are the only code
+   cross-origin tainted. `lyrics/` and `artwork.rs` are the only code
    allowed to contact a non-localhost host.
 2. **Keep the `state` event small.** It is emitted every second and must not
    contain cover, queue, or lyrics data. Those use separate change-only events;
@@ -87,7 +94,12 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
    The renderer is several classic scripts in one scope, in `index.html`
    order. State read by more than one file is declared in `app.js`. Anything
    whose callback can run before the last script loads (`window.widget.on*`,
-   `ResizeObserver`s, the first state) is wired in `boot.js`.
+   `ResizeObserver`s, the first state) is wired in `boot.js`. Code shared by
+   the card, the strip and Sort Songs lives in `src/shared/`: classic scripts
+   that each attach to `window.shared` inside an IIFE (the `palette.js`
+   pattern), read no page globals and declare nothing else at the top level.
+   Each HTML page loads only the shared files it uses, before the scripts
+   that call them.
 8. **Every feature works in both sources.** YouTube Music and Local Music are
    one card, so any control, menu item, panel or setting must be designed and
    tested for both, or must say on screen why it is source-specific (Delete
@@ -164,7 +176,9 @@ backoff and close an established socket. Pollers stand down while both surfaces
 are hidden, and the first surface to come on screen runs `refresh_all(false)`.
 `refresh_all` runs one at a time and skips itself within 2.5 s of the last
 (a new connection forces it, still reading REST for the placeholder
-shuffle/volume/repeat). Overlapping `refresh_queue` calls merge into one fetch
+shuffle/volume/repeat). The queue and lyrics channels are `state/queue.rs`
+and `state/lyrics.rs`, separate `impl Core` blocks; `Gate` and `refresh_all`
+stay in `state/mod.rs`. Overlapping `refresh_queue` calls merge into one fetch
 plus at most one rerun (`Gate`). Any surface coming on screen refetches the
 queue if the last fetch is older than 5 s (`QUEUE_SHOW_TTL`), since the queue
 has no push channel. `handle_message` never awaits: `apply_song`
@@ -251,7 +265,8 @@ panel open.
 
 ## Lyrics
 
-Two orders, chosen by `lyrics::fetch_lyrics` from the track id. The cache,
+Two orders, chosen by `lyrics::fetch_lyrics` (`lyrics/mod.rs`) from the track
+id; each provider is its own file under `lyrics/`. The cache,
 expiry and miss handling are shared.
 
 **Local files** (`lookup_local`) have the real album and exact duration but
@@ -410,6 +425,8 @@ with the progress row turning into the volume, a sideways swipe to skip, a
 right-click menu, the cover opening YouTube Music (not for local files), and
 two list views in its place: playlists (`list_playlists`) and the track's
 artists (`artist_page`, YouTube Music only; local credits are plain text).
+Both lists are `shared/lists.js`, the strip supplying its own row and note
+markup.
 
 - **Its own page and window** (`strip.rs`, label `strip`, `src/strip/`), like
   Sort Songs, so it shares no globals with the card. The window exists only
@@ -488,7 +505,8 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   artist) changes. The badge's bars
   bounce by `scaleY` only while playing with the sheet open; nothing else in
   the strip runs an animation.
-- **Colour.** The strip loads the card's `palette.js` as is: the accent and
+- **Colour.** The strip loads the card's `palette.js` and paints through the
+  same `shared/tint.js` painter: the accent and
   the three washes behind the open sheet come from the same algorithm and
   the same Cover tint setting as the widget and dropdown, and are redone when
   `state.tint` changes. The washes are painted once per cover, never animated.
@@ -543,6 +561,11 @@ Keep `parse_queue` and `queue_entries` as separate projections: the former drops
 unnamed slots, while the latter preserves API indexes. `QueueTrack::index`
 connects them. Update the renderer's current row optimistically while polling.
 
+Search results, queue rows and Up next rows are one `.track-row` with a kind
+modifier (`track-row--result|queue|upnext`) that sets `--row-art`, `--row-gap`
+and `--row-font`; the old `.result`/`.queue-item`/`.upnext-item` classes stay
+on the elements for the handlers and the skin rules.
+
 Stack's queue uses two rows, column flow, and three columns per view. Keep the
 gutter on the section rather than the scroller. Centre from each card's
 `offsetLeft`; percentage columns plus gaps make multiplication drift. Its wheel
@@ -552,7 +575,7 @@ deltas are too small to cross snap thresholds reliably.
 
 ## Local folders
 
-`local.rs` is a second source behind the same `Core` channels. While a folder
+`local/mod.rs` is a second source behind the same `Core` channels. While a folder
 is active, `Core::is_local` makes `handle_message`, `set_status`, `refresh_all`
 and the pollers stand down rather than closing the socket; leaving calls
 `leave_local` and `ws::retry`. YouTube-side writes go through
@@ -595,7 +618,7 @@ that started (or the last failure), never each file it skipped. If the root is
 no longer a directory it stops at the first failure. Position is pushed on
 `state` once per whole second, like YouTube Music's.
 
-`scan` lists the folder (cheap) and reads tags only for files whose size or
+`scan` (`local/library.rs`) lists the folder (cheap) and reads tags only for files whose size or
 mtime differs from the index at
 `~/Library/Caches/pear-music-widget/library/<hash of root>.json`. Reading
 every tag on a cold USB drive takes several seconds. The index records what
@@ -621,7 +644,7 @@ cover lookups, for YouTube Music and local files alike; apply it on output
 `Core::remap_artists`, which forgets the current track's lyrics miss and the
 artwork misses made under the old name.
 
-Covers: embedded or sidecar art first, then `artwork::find` — iTunes album
+Covers (`local/art.rs`): embedded or sidecar art first, then `artwork::find` — iTunes album
 (TW, HK, US stores; TW credits Mandopop in Chinese), Deezer album, iTunes song,
 then YouTube Music song search through the API server (square
 `googleusercontent` art only). Accept a result only when artist and name match
@@ -755,7 +778,9 @@ from its chorus. ← likes, → dislikes, ↓ skips.
 
 ## Volume
 
-The renderer's `setVolume` and Rust's `VOLUME_CHANGED` handler jointly enforce:
+The renderer's `setVolume` (`shared/volume.js`, `volumeControl`; `input.js`
+and the strip only supply `apply`, `volume` and `send`) and Rust's
+`VOLUME_CHANGED` handler jointly enforce:
 
 1. throttle sends to 70 ms and always flush the released value;
 2. prefer the local drag value for `VOLUME_ECHO` (1.5 s);
@@ -836,6 +861,7 @@ not consume title gutter, and is always absent from the dropdown.
 
 ```bash
 cargo test
+node --test 'scripts/*.test.cjs'
 cargo tauri build
 cargo run -- --doctor
 ./scripts/reinstall-local.sh
