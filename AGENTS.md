@@ -427,7 +427,30 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   for the rows in view, rechecked on a 300 ms timer while the list is up
   (scroll events may not come), and an empty reply rests a minute. In a list
   the wheel scrolls the list only.
-- **Right-click menu.** `strip_menu` pops `tray::build_strip_menu` under the
+- **Hover inside the sheet comes from Rust too.** WebKit's own `:hover`
+  reaches a never-active app's page about half a second late. While the
+  sheet is open the watcher also emits `strip-pointer` (window coordinates,
+  when the pointer moves; `-1,-1` when it leaves), and the page sets a
+  `.hover` class on what is under it (`pointAt`). Every hover rule in the
+  strip's CSS has a `.hover` twin. Beside Previous and Up next, inside the
+  column's fixed width, a queue button (brighter while the pointer is over
+  them) opens the queue view: every queue row, centred on the playing one, played
+  through `play_queue_index`, art by `queue_art` for the rows in view (a
+  missed row rests until `queue-art-ready` or 5 s), and `rating` in the
+  rows' identity so a local dislike redraws them dimmed. The playing row
+  in any list is marked by a band and a bar badge on its cover, not by
+  accent-coloured text alone, which read as disabled when the accent came
+  out muted. A track change only moves that mark (`markQueueCurrent`); the
+  rows are rebuilt only when their own key (index, id, rating, title,
+  artist) changes. The badge's bars
+  bounce by `scaleY` only while playing with the sheet open; nothing else in
+  the strip runs an animation.
+- **Colour.** The strip loads the card's `palette.js` as is: the accent and
+  the three washes behind the open sheet come from the same algorithm and
+  the same Cover tint setting as the widget and dropdown, and are redone when
+  `state.tint` changes. The washes are painted once per cover, never animated.
+- **Right-click menu.** `strip_menu` pops `tray::build_strip_menu` (which
+  carries Cover tint) under the
   pointer. It is modal, so `menu_open` makes the watcher stand down while it
   is up; otherwise the pointer moving into the menu would fold the sheet.
 - **Queue only while open.** `strip_open` registers queue demand for the open

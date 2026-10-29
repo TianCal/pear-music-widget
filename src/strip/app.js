@@ -56,6 +56,9 @@ function applyShape(next) {
 }
 
 function applyState(next) {
+  // Also on the first state: a cover that arrived before it was tinted at
+  // the default strength.
+  const tintChanged = next.tint !== state?.tint;
   // While a volume change settles, our own value beats the echoes still in
   // flight, which may land out of order (see the widget's `holdingVolume`).
   if (performance.now() < holdVolumeUntil) next = { ...next, volume: state.volume, muted: state.muted };
@@ -70,14 +73,33 @@ function applyState(next) {
     posAt = performance.now();
   }
   render();
+  if (tintChanged) applyPalette();
 }
 
 async function applyCover(next) {
   cover = next || '';
   render();
-  if (!cover) return;
-  const accent = await accentOf(cover).catch(() => null);
-  if (cover === next) root.style.setProperty('--accent', accent || '#8e8e93');
+  applyPalette();
+}
+
+let paletteToken = 0;
+
+// The washes differ between light and dark glass; follow an appearance switch
+// as the card does. Cheap: the cover's sampling is cached in palette.js.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyPalette());
+
+/** The cover's colours, by the card's own algorithm (`palette.js`) and its
+ *  Cover tint setting: the accent, and the washes behind the open sheet. */
+async function applyPalette() {
+  const token = ++paletteToken;
+  const palette = await window.palette.extract(cover, state?.tint ?? 1);
+  if (token !== paletteToken) return; // a newer cover or tint won the race
+  const style = root.style;
+  style.setProperty('--accent', palette.accent);
+  style.setProperty('--wash-1', palette.wash1);
+  style.setProperty('--wash-2', palette.wash2);
+  style.setProperty('--wash-3', palette.wash3);
+  style.setProperty('--wash-base', palette.washBase);
 }
 
 function render() {
@@ -209,6 +231,7 @@ function applyQueue(next) {
   const ids = new Set((queue.items || []).map((track) => track.videoId));
   for (const id of thumbs.keys()) if (!ids.has(id)) thumbs.delete(id);
   renderNeighbours();
+  renderQueueList(false);
 }
 
 // The hairline moves a pixel every few seconds; the sheet's clock every second.
@@ -282,6 +305,32 @@ listen('strip-hover', ({ payload }) => {
   if (payload || !shape.pinned) setOpen(payload);
 });
 
+// ---------------------------------------------------------------- pointer
+
+// WebKit's own hover reaches a never-active app's page late (about half a
+// second), so over the open sheet Rust says where the pointer is
+// (`strip-pointer`, every 40 ms while it moves) and the page highlights what
+// is under it, and brightens the queue button while it is over the tracks
+// either side.
+
+const HOVERABLE = '.neighbour, .more, .btn, .row, .back, .play-all, .artist-link, .track';
+const around = document.getElementById('around');
+let hovering = null;
+
+function pointAt(x, y) {
+  const under = x < 0 ? null : document.elementFromPoint(x, y);
+  const target = under?.closest(HOVERABLE) ?? null;
+  if (target !== hovering) {
+    hovering?.classList.remove('hover');
+    hovering = target;
+    hovering?.classList.add('hover');
+  }
+  const overAround = !!under?.closest('.around');
+  if (around.classList.contains('hovering') !== overAround) around.classList.toggle('hovering', overAround);
+}
+
+listen('strip-pointer', ({ payload }) => pointAt(payload.x, payload.y));
+
 // --------------------------------------------------------------- controls
 
 const command = (name, payload = null) => invoke('command', { name, payload });
@@ -311,6 +360,10 @@ root.addEventListener('click', (event) => {
   }
   if (event.target.closest('.artist-link')) {
     openArtists();
+    return;
+  }
+  if (event.target.closest('.more')) {
+    openQueue();
     return;
   }
   if (event.target.closest('[data-view="playlists"]')) {
@@ -376,8 +429,9 @@ let viewSeq = 0;
 
 function showView(name, title = '') {
   viewSeq += 1;
-  clearInterval(playlistArtTimer);
-  if (name === 'playlists') playlistArtTimer = setInterval(loadPlaylistArt, PLAYLIST_ART_CHECK_MS);
+  clearInterval(listArtTimer);
+  if (name === 'playlists') listArtTimer = setInterval(loadPlaylistArt, LIST_ART_CHECK_MS);
+  if (name === 'queue') listArtTimer = setInterval(loadQueueArt, LIST_ART_CHECK_MS);
   if (view === name && name === 'main') return;
   view = name;
   mainView.hidden = name !== 'main';
@@ -425,6 +479,20 @@ const group = (text) => {
   return node;
 };
 
+/** The playing row: a band, and a badge over its cover. */
+function markCurrent(row) {
+  row.classList.add('current');
+  const badge = document.createElement('span');
+  badge.className = 'now';
+  badge.innerHTML = '<i></i><i></i><i></i>';
+  row.append(badge);
+}
+
+function unmarkCurrent(row) {
+  row.classList.remove('current');
+  row.querySelector('.now')?.remove();
+}
+
 /** A list row: a cover (or a folder tile), the title over a subtitle. */
 function listRow({ kind, id, title, sub, art, current, disabled }) {
   const row = document.createElement('button');
@@ -454,7 +522,7 @@ function listRow({ kind, id, title, sub, art, current, disabled }) {
   words.append(t, s);
   row.append(lead, words);
   row.disabled = !!disabled;
-  if (current) row.classList.add('current');
+  if (current) markCurrent(row);
   return row;
 }
 
@@ -467,10 +535,10 @@ const playlistArtPending = new Set();
 const playlistArtFailed = new Map();
 const PLAYLIST_ART_RETRY_MS = 60 * 1000;
 // Scroll events belong to the rendering steps a never-active window's page
-// may skip, so while the list is up the rows in view are also rechecked on a
+// may skip, so while a list is up the rows in view are also rechecked on a
 // timer, as the card's picker does. It asks for nothing already in flight.
-const PLAYLIST_ART_CHECK_MS = 300;
-let playlistArtTimer = 0;
+const LIST_ART_CHECK_MS = 300;
+let listArtTimer = 0;
 
 async function openPlaylists() {
   showView('playlists', 'Playlists');
@@ -558,7 +626,117 @@ function loadPlaylistArt() {
 
 listScroll.addEventListener('scroll', () => {
   if (view === 'playlists') loadPlaylistArt();
+  if (view === 'queue') loadQueueArt();
 }, { passive: true });
+
+// ---- queue: every track, opened by the button beside the tracks either side.
+
+let queueListKey = '';
+/** Rows whose art missed a reply rest until `queue-art-ready` or a while. */
+const queueArtResting = new Map();
+const queueArtPending = new Set();
+const QUEUE_ART_REST_MS = 5000;
+const QUEUE_ART_BATCH = 48;
+
+function openQueue() {
+  showView('queue', 'Queue');
+  queueListKey = '';
+  renderQueueList(true);
+}
+
+/** Rebuilt only when the rows themselves change: titles and artists (a
+ *  rename, a relabelled slot) and `rating` (a local like or dislike) are in
+ *  the key. A track change only moves the current mark (`markQueueCurrent`),
+ *  so a 500-row queue is not rebuilt on every song. */
+function renderQueueList(first) {
+  if (view !== 'queue') return;
+  const items = queue.items || [];
+  const key = items.map((t) => `${t.index}:${t.videoId}:${t.rating || ''}:${t.title}:${t.artist}`).join('|');
+  if (key === queueListKey && !first) {
+    markQueueCurrent(false);
+    return;
+  }
+  const centre = first || !queueListKey;
+  queueListKey = key;
+  if (!items.length) {
+    const offline = state?.status === 'offline';
+    listScroll.replaceChildren(note(offline ? 'Music is not running.' : 'The queue is empty.'));
+    queueListKey = '';
+    return;
+  }
+  const keep = listScroll.scrollTop;
+  const rows = items.map((track) => {
+    const row = listRow({
+      kind: 'queue',
+      id: track.videoId,
+      title: track.title,
+      sub: track.artist,
+      art: thumbs.get(track.videoId),
+    });
+    row.dataset.index = track.index;
+    if (track.rating === 'DISLIKE') row.classList.add('disliked');
+    if (!thumbs.has(track.videoId)) row.querySelector('img').dataset.video = track.videoId;
+    return row;
+  });
+  listScroll.replaceChildren(...rows);
+  hovering = null;
+  if (!centre) listScroll.scrollTop = keep;
+  markQueueCurrent(centre);
+  loadQueueArt();
+}
+
+/** Move the band and badge to the playing row. A local folder longer than
+ *  the queue's 500 rows can be playing past the last one: then no row is
+ *  marked, and the list opens at its end, nearest to it. */
+function markQueueCurrent(centre) {
+  const rows = listScroll.children;
+  const at = queue.current;
+  const target = at != null && at < rows.length ? rows[at] : null;
+  const marked = listScroll.querySelector('.row.current');
+  if (marked && marked !== target) unmarkCurrent(marked);
+  if (target && !target.classList.contains('current')) markCurrent(target);
+  if (!centre) return;
+  if (target) target.scrollIntoView({ block: 'center' });
+  else if (at != null) listScroll.scrollTop = listScroll.scrollHeight;
+}
+
+/** Queue artwork is request/reply, for the rows in view only. */
+function loadQueueArt() {
+  if (view !== 'queue') return;
+  const top = listScroll.scrollTop - 60;
+  const bottom = listScroll.scrollTop + listScroll.clientHeight + 60;
+  const now = performance.now();
+  const ids = [];
+  for (const img of listScroll.querySelectorAll('img[data-video]')) {
+    const row = img.closest('.row');
+    // Rows are in order: nothing after the first one below the view is in it.
+    if (row.offsetTop > bottom) break;
+    if (row.offsetTop + row.offsetHeight < top) continue;
+    const id = img.dataset.video;
+    if (queueArtPending.has(id) || (queueArtResting.get(id) ?? 0) > now) continue;
+    ids.push(id);
+    if (ids.length >= QUEUE_ART_BATCH) break;
+  }
+  if (!ids.length) return;
+  ids.forEach((id) => queueArtPending.add(id));
+  invoke('queue_art', { ids, size: 128 })
+    .then((reply) => {
+      for (const id of ids) {
+        const src = reply?.art?.[id];
+        if (src) thumbs.set(id, src);
+        else queueArtResting.set(id, performance.now() + QUEUE_ART_REST_MS);
+      }
+      for (const img of listScroll.querySelectorAll('img[data-video]')) {
+        const src = thumbs.get(img.dataset.video);
+        if (src) {
+          img.src = src;
+          delete img.dataset.video;
+        }
+      }
+    })
+    .catch(() => {})
+    .finally(() => ids.forEach((id) => queueArtPending.delete(id)));
+}
 
 // ---- artists: the Top songs of each artist on the track, as on the card.
 
@@ -681,6 +859,9 @@ async function playFromList(target) {
   try {
     if (all) reply = await invoke('play_playlist', { kind: 'youtube', id: target.dataset.id });
     else if (kind === 'song') reply = await invoke('play_result', { videoId: target.dataset.id });
+    else if (kind === 'queue') {
+      reply = await invoke('play_queue_index', { index: Number(target.dataset.index), videoId: target.dataset.id });
+    }
     else reply = await invoke('play_playlist', { kind, id: target.dataset.id });
   } catch (err) {
     reply = { ok: false, error: String(err) };
@@ -690,7 +871,16 @@ async function playFromList(target) {
   if (seq !== viewSeq) return;
   target.classList.remove('busy');
   if (reply?.ok) {
-    showView('main');
+    // The queue stays up to pick from; its current row follows the queue.
+    if (kind !== 'queue') showView('main');
+    else {
+      // Move the mark now, as the card does; the next queue read confirms it.
+      const marked = listScroll.querySelector('.row.current');
+      if (marked !== target) {
+        if (marked) unmarkCurrent(marked);
+        markCurrent(target);
+      }
+    }
     return;
   }
   const sub = all ? null : target.querySelector('.s');
@@ -785,52 +975,6 @@ root.addEventListener(
   { passive: false },
 );
 
-// ------------------------------------------------------------ cover accent
-
-/** The cover's most present vivid hue, at a lightness readable on the bar. */
-async function accentOf(src) {
-  const img = new Image();
-  img.src = src;
-  await img.decode();
-  const size = 24;
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, size, size);
-  const data = ctx.getImageData(0, 0, size, size).data;
-
-  const buckets = Array.from({ length: 12 }, () => ({ w: 0, h: 0, s: 0 }));
-  for (let i = 0; i < data.length; i += 4) {
-    const [h, s, l] = hsl(data[i], data[i + 1], data[i + 2]);
-    const weight = s * Math.max(0, 1 - Math.abs(l - 0.5) * 1.8);
-    if (s < 0.2 || weight <= 0) continue;
-    const bucket = buckets[Math.floor(h * 12) % 12];
-    bucket.w += weight;
-    bucket.h += h * weight;
-    bucket.s += s * weight;
-  }
-  const best = buckets.reduce((a, b) => (b.w > a.w ? b : a));
-  if (best.w < 2) return null;
-  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-  const hue = Math.round((best.h / best.w) * 360);
-  const sat = Math.round(Math.min(0.85, best.s / best.w) * 100);
-  return `hsl(${hue} ${sat}% ${dark ? 64 : 48}%)`;
-}
-
-function hsl(r, g, b) {
-  r /= 255;
-  g /= 255;
-  b /= 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return [0, 0, l];
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return [h / 6, s, l];
-}
-
 // ------------------------------------------------------------------- boot
 
 // Listen first, and only then ask for the cold load: an event that landed
@@ -851,7 +995,11 @@ Promise.all([
     applyQueue(payload);
   }),
   // Lookups that missed a `queue_art` reply have landed; ask again.
-  listen('queue-art-ready', () => askForThumbs()),
+  listen('queue-art-ready', () => {
+    queueArtResting.clear();
+    askForThumbs();
+    loadQueueArt();
+  }),
   listen('strip-shape', ({ payload }) => applyShape(payload)),
 ])
   .then(() => Promise.all([invoke('strip_shape'), invoke('widget_state')]))

@@ -902,10 +902,12 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
-/// Right-click menu for the menu-bar strip: the track, the source, and the
-/// surfaces. The widget's look (skin, tint, corners) is the widget's menu's.
+/// Right-click menu for the menu-bar strip: the track, the source, Cover tint
+/// (one setting for every surface, as in the dropdown's menu), and the
+/// surfaces. The widget's own look (skin, corners) is the widget's menu's.
 pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let snapshot = app.state::<Arc<Core>>().snapshot();
+    let tint = app.state::<Arc<Store>>().get(|s| s.tint);
     let can_rate = snapshot.status == Status::Connected && snapshot.song.is_some();
     let rating = snapshot.like;
     let widget = app.get_webview_window(WIDGET);
@@ -925,6 +927,7 @@ pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             )?,
             &PredefinedMenuItem::separator(app)?,
             &source_submenu(app)?,
+            &tint_submenu(app, tint)?,
             &PredefinedMenuItem::separator(app)?,
             &CheckMenuItem::with_id(
                 app,

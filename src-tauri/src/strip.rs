@@ -183,6 +183,7 @@ fn show(app: &AppHandle) -> tauri::Result<()> {
         // hidden: the strip would float over its content.
         macos::join_all_desktops(&window);
         macos::set_ignores_mouse(&window, true);
+        macos::accept_mouse_moved(&window);
     }
     crate::on_screen(app, LABEL, true);
     if let Some(watcher) = strip.watcher.lock().expect("strip lock").as_ref() {
@@ -211,6 +212,7 @@ fn hide(app: &AppHandle) {
 fn watch_pointer(app: AppHandle) -> Thread {
     std::thread::spawn(move || {
         let mut checked = Instant::now();
+        let mut pointed: Option<(f64, f64)> = None;
         loop {
             if !app.state::<Arc<Store>>().get(|s| s.menu_bar_strip) {
                 std::thread::park();
@@ -233,6 +235,14 @@ fn watch_pointer(app: AppHandle) -> Thread {
                     macos::set_ignores_mouse(&window, !(inside && strip.open.load(Ordering::SeqCst)));
                 }
                 let _ = app.emit_to(LABEL, "strip-hover", inside);
+            }
+            // Over the open sheet, say where: WebKit's own hover reaches a
+            // never-active app's page late, so the page highlights from this.
+            let over = at.filter(|_| inside && strip.open.load(Ordering::SeqCst));
+            if over != pointed {
+                pointed = over;
+                let (x, y) = over.unwrap_or((-1.0, -1.0));
+                let _ = app.emit_to(LABEL, "strip-pointer", serde_json::json!({ "x": x, "y": y }));
             }
             if checked.elapsed() >= DISPLAY_CHECK {
                 checked = Instant::now();
