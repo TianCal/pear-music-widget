@@ -982,12 +982,21 @@ impl Local {
     /// nothing unless `root` is the open folder. Blocking IO.
     pub fn reload_likes(&self, core: &Arc<Core>, root: &Path) {
         let _loading = self.loading.lock().expect("loading lock");
+        // The read happens off the session lock: the menus take that lock on
+        // the main thread, and a drive that is slow or half unplugged would
+        // stall the menu bar for as long as the read takes. `loading` keeps
+        // the session from being replaced or trimmed meanwhile, so only the
+        // root needs checking again.
+        let Some(tracks) = self.with(|s| (s.root == root).then(|| s.tracks.clone())).flatten() else {
+            return;
+        };
+        let likes = Likes::load(root, &tracks);
         let Some(current) = self
             .with(|s| {
                 if s.root != root {
                     return None;
                 }
-                s.likes = Likes::load(&s.root, &s.tracks);
+                s.likes = likes;
                 s.rescope();
                 Some(s.current().map(|t| (t.id.clone(), s.likes.get(&t.id))))
             })

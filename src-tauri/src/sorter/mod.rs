@@ -17,7 +17,7 @@ mod player;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -190,6 +190,10 @@ impl Sorter {
         s.queue.first().map(|&i| s.tracks[i].clone())
     }
 
+    fn current_index(&self) -> Option<usize> {
+        self.session.lock().expect("session lock").as_ref()?.queue.first().copied()
+    }
+
     fn ahead(&self) -> Vec<Track> {
         let guard = self.session.lock().expect("session lock");
         let Some(s) = guard.as_ref() else {
@@ -200,6 +204,31 @@ impl Sorter {
             .take(PREFETCH + 1)
             .map(|&i| s.tracks[i].clone())
             .collect()
+    }
+
+    /// Pick up anything the player saved since: read the folder's ratings
+    /// again and hand back the session, locked, with them in place. The read
+    /// is drive IO and runs **off** the session lock — `sorter_view` is a
+    /// synchronous command, so the main thread waits on that lock, and a
+    /// slow or half-unplugged drive would stall it. `None` if the folder was
+    /// swapped while reading (the caller holds `ratings`, so nothing else
+    /// changes the tracks). Blocking IO.
+    fn reloaded(&self) -> Option<MutexGuard<'_, Option<Session>>> {
+        let (root, tracks) = {
+            let guard = self.session.lock().expect("session lock");
+            let s = guard.as_ref()?;
+            (s.root.clone(), s.tracks.clone())
+        };
+        let likes = Likes::load(&root, &tracks);
+        let mut guard = self.session.lock().expect("session lock");
+        let same = guard.as_ref().is_some_and(|s| {
+            s.root == root && s.tracks.len() == tracks.len() && s.tracks.iter().zip(&tracks).all(|(a, b)| a.id == b.id)
+        });
+        if !same {
+            return None;
+        }
+        guard.as_mut()?.likes = likes;
+        Some(guard)
     }
 }
 
@@ -626,17 +655,16 @@ pub async fn sorter_rate(app: AppHandle, like: bool) -> Result<(), String> {
 /// Blocking IO.
 fn rate(app: &AppHandle, sorter: &Arc<Sorter>, like: bool) {
     let _ratings = sorter.ratings.lock().expect("ratings lock");
+    // The card as it was when the key was pressed, before the read.
+    let Some(i) = sorter.current_index() else { return };
     let saved = {
-        let mut guard = sorter.session.lock().expect("session lock");
+        let Some(mut guard) = sorter.reloaded() else { return };
         let Some(s) = guard.as_mut() else { return };
-        let Some(&i) = s.queue.first() else { return };
-        // Pick up anything the player saved since.
-        s.likes = Likes::load(&s.root, &s.tracks);
         let before = s.likes.get(&s.tracks[i].id);
         let rating = if like { Rating::Like } else { Rating::Dislike };
         let save = s.likes.set(&s.tracks[i], Some(rating));
         s.history.push((i, before));
-        s.queue.remove(0);
+        s.queue.retain(|&j| j != i);
         // Rated in the player meanwhile: nothing left to decide.
         let (likes, tracks) = (&s.likes, &s.tracks);
         s.queue.retain(|&j| likes.get(&tracks[j].id).is_none());
@@ -676,12 +704,11 @@ pub async fn sorter_undo(app: AppHandle) {
 fn undo(app: &AppHandle, sorter: &Arc<Sorter>) {
     let _ratings = sorter.ratings.lock().expect("ratings lock");
     let save = {
-        let mut guard = sorter.session.lock().expect("session lock");
+        let Some(mut guard) = sorter.reloaded() else { return };
         let Some(s) = guard.as_mut() else { return };
         let Some((i, before)) = s.history.pop() else {
             return;
         };
-        s.likes = Likes::load(&s.root, &s.tracks);
         let save = s.likes.set(&s.tracks[i], before);
         s.queue.retain(|&j| j != i);
         s.queue.insert(0, i);
@@ -741,9 +768,8 @@ fn reset_ratings(app: &AppHandle) {
     let Some(sorter) = runtime() else { return };
     let _ratings = sorter.ratings.lock().expect("ratings lock");
     let saved = {
-        let mut guard = sorter.session.lock().expect("session lock");
+        let Some(mut guard) = sorter.reloaded() else { return };
         let Some(s) = guard.as_mut() else { return };
-        s.likes = Likes::load(&s.root, &s.tracks);
         let rated: Vec<usize> = (0..s.tracks.len())
             .filter(|&i| s.likes.get(&s.tracks[i].id).is_some())
             .collect();
@@ -877,9 +903,8 @@ fn trash_disliked(app: &AppHandle, sorter: &Sorter, ids: &[String]) -> (usize, V
         }
     }
     let save = {
-        let mut guard = sorter.session.lock().expect("session lock");
-        guard.as_mut().and_then(|s| {
-            s.likes = Likes::load(&s.root, &s.tracks);
+        let mut guard = sorter.reloaded();
+        guard.as_mut().and_then(|guard| guard.as_mut()).and_then(|s| {
             let mut last = None;
             for track in s.tracks.iter().filter(|t| moved.contains(&t.id)) {
                 last = s.likes.forget(track).or(last);
