@@ -20,12 +20,49 @@ let shape = { bar: 24, notch: 0, pinned: false };
 let state = null;
 let cover = '';
 let queue = { items: [], current: null };
-/** Queue artwork by video id, as `queue_art` replied. */
+/** Queue artwork by video id, as `queue_art` replied. Bounded as the card's
+ *  is (`cacheArt` in queue.js, kept in step by hand: the strip shares no
+ *  script with the card), since this webview owns its own heap too: the
+ *  same entry ceiling, and a character budget standing in for bytes, which
+ *  it mirrors because data URLs are ASCII. Insertion order is the eviction
+ *  order. */
 const thumbs = new Map();
+const THUMBS_CHARS = 4 * 1024 * 1024;
+const THUMBS_MAX = 256;
+let thumbChars = 0;
+
+const dropThumb = (id) => {
+  const held = thumbs.get(id);
+  if (held === undefined) return;
+  thumbs.delete(id);
+  thumbChars -= id.length + held.length;
+};
+
+const keepThumb = (id, src) => {
+  dropThumb(id);
+  thumbs.set(id, src);
+  thumbChars += id.length + src.length;
+  while (thumbs.size > THUMBS_MAX || thumbChars > THUMBS_CHARS) {
+    const oldest = thumbs.keys().next().value;
+    if (oldest === undefined) break;
+    dropThumb(oldest);
+  }
+};
+
 let posBase = 0;
 let posAt = performance.now();
 
-const binds = (name) => document.querySelectorAll(`[data-bind="${name}"]`);
+/** `[data-bind]` elements by name. The bound markup is static, so each
+ *  lookup is made once: `render` runs on every state push. */
+const bound = new Map();
+const binds = (name) => {
+  let list = bound.get(name);
+  if (!list) {
+    list = [...document.querySelectorAll(`[data-bind="${name}"]`)];
+    bound.set(name, list);
+  }
+  return list;
+};
 const setText = (name, text) =>
   binds(name).forEach((el) => {
     if (el.textContent !== text) el.textContent = text;
@@ -145,7 +182,7 @@ function render() {
   const loop = repeat === 'ONE' ? '#i-repeat-one' : '#i-repeat';
   if (repeatGlyph.getAttribute('href') !== loop) repeatGlyph.setAttribute('href', loop);
   const liked = (state?.like || '').toUpperCase() === 'LIKE';
-  document.querySelectorAll('.btn.like').forEach((btn) => btn.classList.toggle('on', liked));
+  likeBtns.forEach((btn) => btn.classList.toggle('on', liked));
 
   // The artist shows only when the whole name fits. Measuring forces layout,
   // so only when the words or the shape changed, not on every state push.
@@ -161,7 +198,16 @@ function render() {
 
 let lastFit = '';
 const hairline = bar.querySelector('.line b');
+const likeBtns = [...document.querySelectorAll('.btn.like')];
 let hairlinePx = -1;
+/** The hairline's width, kept by an observer: reading it in `tick` forced a
+ *  layout four times a second. */
+let lineWidth = 0;
+new ResizeObserver((entries) => {
+  lineWidth = entries[entries.length - 1].contentRect.width;
+  hairlinePx = -1; // the cached pixel is against the old width
+  tick();
+}).observe(hairline.parentElement);
 
 /**
  * Progress, written only when it would show: the hairline when it moves a
@@ -172,13 +218,13 @@ function tick() {
   const duration = state?.song?.songDuration || 0;
   const p = position();
   const frac = duration ? Math.min(1, p / duration) : 0;
-  const px = Math.round(frac * hairline.parentElement.offsetWidth);
+  const px = Math.round(frac * lineWidth);
   if (px !== hairlinePx) {
     hairlinePx = px;
     hairline.style.setProperty('--p', frac.toFixed(4));
   }
   if (!open) return;
-  sheet.querySelector('.track b').style.setProperty('--p', frac.toFixed(4));
+  sheetBar.style.setProperty('--p', frac.toFixed(4));
   setText('elapsed', fmt(p));
   setText('remaining', duration ? `-${fmt(duration - p)}` : '');
 }
@@ -211,42 +257,55 @@ function renderNeighbours() {
   askForThumbs();
 }
 
+/** Neighbours asked for and not yet answered, so a queue change during the
+ *  reply does not ask for the same rows again (see `queueArtPending`). */
+const neighbourArtPending = new Set();
+
 /** Artwork is request/reply: ask only for the rows on screen without it. */
 function askForThumbs() {
   if (!open) return;
   const ids = neighbours
-    .filter((row) => !row.hidden && !thumbs.has(row.dataset.videoId))
+    .filter((row) => !row.hidden && !thumbs.has(row.dataset.videoId) && !neighbourArtPending.has(row.dataset.videoId))
     .map((row) => row.dataset.videoId);
   if (!ids.length) return;
-  invoke('queue_art', { ids, size: 128 }).then((reply) => {
-    let added = false;
-    for (const [id, src] of Object.entries(reply?.art || {})) {
-      if (src && !thumbs.has(id)) {
-        thumbs.set(id, src);
-        added = true;
+  ids.forEach((id) => neighbourArtPending.add(id));
+  invoke('queue_art', { ids, size: 128 })
+    .then((reply) => {
+      let added = false;
+      for (const [id, src] of Object.entries(reply?.art || {})) {
+        if (src && !thumbs.has(id)) {
+          keepThumb(id, src);
+          added = true;
+        }
       }
-    }
-    if (added) renderNeighbours();
-  });
+      if (added) renderNeighbours();
+    })
+    .catch(() => {})
+    .finally(() => ids.forEach((id) => neighbourArtPending.delete(id)));
 }
 
 function applyQueue(next) {
   queue = next || { items: [], current: null };
   // Keep only what the current queue can still show.
   const ids = new Set((queue.items || []).map((track) => track.videoId));
-  for (const id of thumbs.keys()) if (!ids.has(id)) thumbs.delete(id);
+  for (const id of thumbs.keys()) if (!ids.has(id)) dropThumb(id);
   renderNeighbours();
   renderQueueList(false);
 }
 
+// Over a fullscreen app the bar is slid away (`strip-away`); nothing it
+// would draw is on screen, so the hairline waits until it is back.
+let away = false;
+
 // The hairline moves a pixel every few seconds; the sheet's clock every second.
 setInterval(() => {
-  if (state?.isPlaying) tick();
+  if (state?.isPlaying && !away) tick();
 }, 250);
 
 // --------------------------------------------------------------- hot area
 
 const sheet = document.getElementById('sheet');
+const sheetBar = sheet.querySelector('.track b');
 let lastHot = '';
 
 /**
@@ -337,7 +396,12 @@ function pointAt(x, y) {
 listen('strip-pointer', ({ payload }) => pointAt(payload.x, payload.y));
 
 // Over a fullscreen app the bar slides away with the menu bar, and back.
-listen('strip-away', ({ payload }) => root.classList.toggle('away', !!payload));
+listen('strip-away', ({ payload }) => {
+  away = !!payload;
+  root.classList.toggle('away', away);
+  // Catch the hairline up on what it skipped while away.
+  if (!away) tick();
+});
 
 // --------------------------------------------------------------- controls
 
@@ -731,7 +795,7 @@ function loadQueueArt() {
     .then((reply) => {
       for (const id of ids) {
         const src = reply?.art?.[id];
-        if (src) thumbs.set(id, src);
+        if (src) keepThumb(id, src);
         else queueArtResting.set(id, performance.now() + QUEUE_ART_REST_MS);
       }
       for (const img of listScroll.querySelectorAll('img[data-video]')) {
@@ -1005,6 +1069,7 @@ Promise.all([
   // Lookups that missed a `queue_art` reply have landed; ask again.
   listen('queue-art-ready', () => {
     queueArtResting.clear();
+    neighbourArtPending.clear();
     askForThumbs();
     loadQueueArt();
   }),
