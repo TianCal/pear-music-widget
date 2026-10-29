@@ -6,7 +6,8 @@
 //! before a click can open it.
 
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::image::Image;
@@ -1020,7 +1021,7 @@ fn after_skin_change(app: &AppHandle, edit: impl FnOnce(&mut crate::state::Playe
         spawned.refresh_queue().await;
         spawned.refresh_lyrics().await;
     });
-    refresh(app);
+    // The menu is rebuilt by `handle_menu`, which is the only way here.
 }
 
 /// Bring the floating widget back — without the menu item's other half.
@@ -1078,10 +1079,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                 }
             }
         }
-        "menuBarStrip" => {
-            crate::strip::set_shown(app, !store.get(|s| s.menu_bar_strip));
-            refresh(app);
-        }
+        "menuBarStrip" => crate::strip::set_shown(app, !store.get(|s| s.menu_bar_strip)),
         "hideWidget" => {
             if let Some(widget) = &widget {
                 let _ = widget.hide();
@@ -1184,7 +1182,8 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
 
 /// `source:*`: switch between YouTube Music, Local Music, Liked Songs and the
 /// saved folders. Each menu-bar checkmark is toggled by AppKit on click, so a
-/// choice that changes nothing refreshes the menu to put it back.
+/// choice that changes nothing still needs the menu rebuilt to put it back;
+/// `handle_menu` does that after every item, so nothing here has to.
 fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
     match id {
         "source:youtube" => {
@@ -1192,9 +1191,6 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
             if core.is_local() {
                 // `close` waits out a load in progress; not on the menu's thread.
                 tauri::async_runtime::spawn_blocking(move || crate::local::Local::close(&core));
-            } else {
-                // Already the source; undo AppKit's toggle of the checkmark.
-                refresh(app);
             }
         }
 
@@ -1209,8 +1205,8 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
                 _ if core.is_local() => {
                     tauri::async_runtime::spawn_blocking(move || local.set_scope(&core, false));
                 }
-                // Nothing to play: undo AppKit's toggle.
-                _ => refresh(app),
+                // Nothing to play.
+                _ => {}
             }
         }
         "source:liked" => {
@@ -1218,11 +1214,8 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
             let local = core.local();
             if core.is_local() {
                 tauri::async_runtime::spawn_blocking(move || local.set_scope(&core, true));
-            } else {
-                match local.target(&store) {
-                    Some(path) => open_scoped(app, std::path::PathBuf::from(path), Some(true)),
-                    None => refresh(app),
-                }
+            } else if let Some(path) = local.target(&store) {
+                open_scoped(app, std::path::PathBuf::from(path), Some(true));
             }
         }
         "source:choose" => {
@@ -1237,11 +1230,8 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
             if let Some(path) = other.strip_prefix("source:folder:") {
                 let core = app.state::<Arc<Core>>();
                 let current = store.get(|s| s.local_folder.clone());
-                // Already the source: nothing to switch, but the menu's
-                // checkmark was just toggled by AppKit, so put it back.
-                if core.is_local() && current.as_deref() == Some(path) {
-                    refresh(app);
-                } else {
+                // Already the source: nothing to switch.
+                if !(core.is_local() && current.as_deref() == Some(path)) {
                     open_folder(app, std::path::PathBuf::from(path));
                 }
             } else if let Some(path) = other.strip_prefix("source:forget:") {
@@ -1251,7 +1241,6 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
                         s.local_folder = None;
                     }
                 });
-                refresh(app);
             }
         }
     }
@@ -1370,8 +1359,38 @@ fn handle_setting(app: &AppHandle, store: &Arc<Store>, widget: Option<&tauri::We
 
 // --------------------------------------------------------------------- icon
 
+/// Decoded once each. `refresh_now` runs on every state change and every
+/// pointer entry into the icon, and was decoding a PNG each time to hand the
+/// status item the glyph it already showed.
 fn icon(connected: bool) -> tauri::Result<Image<'static>> {
-    Image::from_bytes(if connected { SOLID } else { HOLLOW })
+    static SOLID_ICON: OnceLock<Image<'static>> = OnceLock::new();
+    static HOLLOW_ICON: OnceLock<Image<'static>> = OnceLock::new();
+    let (held, bytes) = if connected {
+        (&SOLID_ICON, SOLID)
+    } else {
+        (&HOLLOW_ICON, HOLLOW)
+    };
+    if let Some(image) = held.get() {
+        return Ok(image.clone());
+    }
+    let image = Image::from_bytes(bytes)?;
+    Ok(held.get_or_init(|| image).clone())
+}
+
+/// Which glyph the status item shows: 1 hollow, 2 solid, 0 not yet set.
+/// `set_icon` rebuilds the item's NSImage, so it is only called on a change.
+static ICON_SHOWN: AtomicU8 = AtomicU8::new(0);
+
+fn show_icon(tray: &TrayIcon, connected: bool) {
+    let glyph = if connected { 2 } else { 1 };
+    if ICON_SHOWN.load(Ordering::SeqCst) == glyph {
+        return;
+    }
+    if let Ok(image) = icon(connected) {
+        let _ = tray.set_icon(Some(image));
+        let _ = tray.set_icon_as_template(true);
+        ICON_SHOWN.store(glyph, Ordering::SeqCst);
+    }
 }
 
 /// The icon's rectangle in logical points, which is what the panel positions
@@ -1410,6 +1429,7 @@ fn icon_rect(app: &AppHandle, position: tauri::Position, size: tauri::Size) -> R
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<TrayIcon> {
+    ICON_SHOWN.store(1, Ordering::SeqCst);
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(false)?)
         .icon_as_template(true)
@@ -1490,18 +1510,16 @@ fn refresh_now(app: &AppHandle) {
     let Some(core) = app.try_state::<Arc<Core>>() else {
         return;
     };
-    let snapshot = core.snapshot();
+    let (status, tooltip) = core.with_player(|player| {
+        let tooltip = match &player.song {
+            Some(song) => format!("{} — {}", song.title, song.artist),
+            None => format!("Perch Player — {}", status_label(player.status)),
+        };
+        (player.status, tooltip)
+    });
 
     // Hollow glyph whenever we cannot reach YouTube Music.
-    if let Ok(image) = icon(snapshot.status == Status::Connected) {
-        let _ = tray.set_icon(Some(image));
-        let _ = tray.set_icon_as_template(true);
-    }
-
-    let tooltip = match &snapshot.song {
-        Some(song) => format!("{} — {}", song.title, song.artist),
-        None => format!("Perch Player — {}", status_label(snapshot.status)),
-    };
+    show_icon(&tray, status == Status::Connected);
     let _ = tray.set_tooltip(Some(tooltip));
 
     if let Ok(menu) = build_tray_menu(app) {
