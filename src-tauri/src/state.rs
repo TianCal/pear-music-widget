@@ -20,7 +20,7 @@
 //! rows is asked for by id, for the rows a surface is actually showing, and
 //! comes back in a command reply — see `commands::queue_art`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -995,17 +995,22 @@ impl Core {
         let _ = self.app.emit("queue", &view);
     }
 
-    /// The artwork source URL a row was parsed with, for `queue_art` to resolve.
-    /// Looked up by video id rather than by index so a request that crosses a
-    /// queue change is applied to the right track or to none.
-    pub fn queue_art_src(&self, video_id: &str) -> Option<Arc<str>> {
-        self.queue
-            .lock()
-            .expect("queue lock")
-            .items
+    /// The artwork source URL each row was parsed with, for `queue_art` to
+    /// resolve. Looked up by video id rather than by index so a request that
+    /// crosses a queue change is applied to the right track or to none. One
+    /// walk of the queue for the whole request, not one per id.
+    pub fn queue_art_srcs(&self, video_ids: &[String]) -> Vec<(String, Arc<str>)> {
+        let queue = self.queue.lock().expect("queue lock");
+        let mut by_id: HashMap<&str, &Arc<str>> = HashMap::new();
+        for track in queue.items.iter() {
+            if let Some(art) = track.art.as_ref() {
+                by_id.entry(track.video_id.as_str()).or_insert(art);
+            }
+        }
+        video_ids
             .iter()
-            .find(|track| track.video_id == video_id)
-            .and_then(|track| track.art.clone())
+            .filter_map(|id| Some((id.clone(), Arc::clone(by_id.get(id.as_str())?))))
+            .collect()
     }
 
     fn set_lyrics(self: &Arc<Self>, view: LyricsView) {

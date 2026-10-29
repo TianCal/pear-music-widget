@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::{future, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
@@ -56,6 +56,9 @@ fn search_current(label: &str, seq: u64) -> bool {
 /// plus a screenful either side; anything past that is a runaway loop, not a
 /// viewport.
 const QUEUE_ART_MAX: usize = 48;
+/// Queue thumbnails fetched at once. Most are cache hits and cost nothing;
+/// the misses must not all leave together and crowd out the playing cover.
+const QUEUE_ART_CONCURRENCY: usize = 8;
 
 /// Pressing play when YouTube Music is not up should start it, not fail silently.
 const PLAYBACK_COMMANDS: [&str; 3] = ["togglePlay", "next", "previous"];
@@ -792,23 +795,22 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> A
         return ArtReply { ok: true, art };
     }
 
-    // One pass against the same keep-alive connection, the way the four-item
-    // queue already resolved its thumbnails; most of these are cache hits.
-    let resolved = future::join_all(wanted.into_iter().map(|id| {
-        let core = Arc::clone(&core);
-        async move {
-            let src = core.queue_art_src(&id)?;
-            let art = core.api.fetch_cover(Some(&src), size).await?;
-            Some((id, art))
-        }
-    }))
-    .await;
-
-    let art = resolved
-        .into_iter()
-        .flatten()
-        .map(|(id, art)| (id, SharedStr(art)))
-        .collect();
+    // Against the same keep-alive connection, a few at a time, the way search
+    // thumbnails are; most of these are cache hits. The sources are read in
+    // one pass over the queue rather than one per id.
+    let sources = core.queue_art_srcs(&wanted);
+    let art = futures_util::stream::iter(sources)
+        .map(|(id, src)| {
+            let core = Arc::clone(&core);
+            async move {
+                let art = core.api.fetch_cover(Some(&src), size).await?;
+                Some((id, SharedStr(art)))
+            }
+        })
+        .buffer_unordered(QUEUE_ART_CONCURRENCY)
+        .filter_map(|found| async move { found })
+        .collect()
+        .await;
 
     ArtReply { ok: true, art }
 }
