@@ -824,8 +824,15 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     }
 
     // Disk before network, and a disk hit is promoted into memory so the panel
-    // being reopened does not go back to the filesystem for it either.
-    if let Some(hit) = lyrics_cache::load(&song.video_id) {
+    // being reopened does not go back to the filesystem for it either. The
+    // read is on a blocking thread: this runs on an async worker, and the
+    // cache directory may be on a slow disk.
+    let id = song.video_id.clone();
+    let on_disk = tauri::async_runtime::spawn_blocking(move || lyrics_cache::load(&id))
+        .await
+        .ok()
+        .flatten();
+    if let Some(hit) = on_disk {
         remember(&song.video_id, &hit);
         return hit;
     }
@@ -837,7 +844,12 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     };
 
     remember(&song.video_id, &result);
-    lyrics_cache::store(&song.video_id, &result);
+    // Also off the worker: a store past the cap sweeps the whole directory.
+    // Awaited, so a `forget_miss` the caller makes next cannot run before the
+    // miss it means to forget has landed. By now the lookup is complete, so
+    // a caller dropped here has still only cached a final answer.
+    let (id, stored) = (song.video_id.clone(), result.clone());
+    let _ = tauri::async_runtime::spawn_blocking(move || lyrics_cache::store(&id, &stored)).await;
 
     result
 }

@@ -185,40 +185,71 @@ fn read_cache(key: &str) -> Cached {
     }
 }
 
-enum Outcome<'a> {
-    Hit(&'a [u8]),
+/// `read_cache` for the lookup, which runs on an async worker: a hit is a
+/// 640 px JPEG, a real read, so it goes to a blocking thread.
+async fn read_cached(key: &str) -> Cached {
+    let key = key.to_string();
+    tauri::async_runtime::spawn_blocking(move || read_cache(&key))
+        .await
+        .unwrap_or(Cached::Unknown)
+}
+
+/// The first hit among `keys` (`Ok(Some)`), a miss for every one of them
+/// (`Ok(None)`), or `Err` when at least one is still unknown. One trip to a
+/// blocking thread for the lot.
+async fn read_cached_any(keys: &[String]) -> Result<Option<(String, Vec<u8>)>, ()> {
+    let keys = keys.to_vec();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut unknown = false;
+        for key in keys {
+            match read_cache(&key) {
+                Cached::Hit(bytes) => return Ok(Some((key, bytes))),
+                Cached::Miss => {}
+                Cached::Unknown => unknown = true,
+            }
+        }
+        if unknown {
+            Err(())
+        } else {
+            Ok(None)
+        }
+    })
+    .await
+    .unwrap_or(Err(()))
+}
+
+enum Outcome {
+    Hit(Vec<u8>),
     Miss { partial: bool },
     Failed,
 }
 
+/// On a blocking thread, whatever the outcome: the lookup runs on an async
+/// worker, and even a one-byte miss file is a write the worker should not
+/// wait on.
 fn write_cache(key: &str, outcome: Outcome) {
-    let base = dir();
-    if std::fs::create_dir_all(&base).is_err() {
-        return;
-    }
-    match outcome {
-        Outcome::Hit(bytes) => {
-            // Hits never expire, so a torn one would stand forever: synced and
-            // renamed into place, on a blocking thread rather than the async
-            // worker running the lookup.
-            let (hit, miss, bytes) = (
-                base.join(format!("{key}.jpg")),
-                base.join(format!("{key}.miss")),
-                bytes.to_vec(),
-            );
-            tauri::async_runtime::spawn_blocking(move || {
-                let _ = crate::fsutil::write_atomic(&hit, &bytes);
-                let _ = std::fs::remove_file(miss);
-            });
+    let key = key.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = dir();
+        if std::fs::create_dir_all(&base).is_err() {
+            return;
         }
-        Outcome::Miss { partial } => {
-            let body: &[u8] = if partial { PARTIAL } else { b"" };
-            let _ = std::fs::write(base.join(format!("{key}.miss")), body);
+        match outcome {
+            Outcome::Hit(bytes) => {
+                // Hits never expire, so a torn one would stand forever: synced
+                // and renamed into place.
+                let _ = crate::fsutil::write_atomic(&base.join(format!("{key}.jpg")), &bytes);
+                let _ = std::fs::remove_file(base.join(format!("{key}.miss")));
+            }
+            Outcome::Miss { partial } => {
+                let body: &[u8] = if partial { PARTIAL } else { b"" };
+                let _ = std::fs::write(base.join(format!("{key}.miss")), body);
+            }
+            Outcome::Failed => {
+                let _ = std::fs::write(base.join(format!("{key}.miss")), FAILED);
+            }
         }
-        Outcome::Failed => {
-            let _ = std::fs::write(base.join(format!("{key}.miss")), FAILED);
-        }
-    }
+    });
 }
 
 /// Every key this track's cover could be stored under, album first. Callers
@@ -322,16 +353,8 @@ pub async fn find(core: &Arc<Core>, wanted: &Wanted, priority: Priority) -> Opti
         return None;
     }
     let keys = keys(wanted);
-    let mut unknown = false;
-    for key in &keys {
-        match read_cache(key) {
-            Cached::Hit(bytes) => return Some((key.clone(), bytes)),
-            Cached::Miss => {}
-            Cached::Unknown => unknown = true,
-        }
-    }
-    if !unknown {
-        return None;
+    if let Ok(answer) = read_cached_any(&keys).await {
+        return answer;
     }
 
     let slot = {
@@ -364,7 +387,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
     let http = core.api.client();
 
     if let Some(album_key) = album_key(wanted) {
-        match read_cache(&album_key) {
+        match read_cached(&album_key).await {
             Cached::Hit(bytes) => return Some((album_key, bytes)),
             Cached::Miss => {}
             Cached::Unknown => {
@@ -381,7 +404,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
                 if let Some(url) = found {
                     match download(http, &url).await {
                         Some(bytes) => {
-                            write_cache(&album_key, Outcome::Hit(&bytes));
+                            write_cache(&album_key, Outcome::Hit(bytes.clone()));
                             return Some((album_key, bytes));
                         }
                         None => failed = true,
@@ -393,7 +416,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
     }
 
     let track_key = key("track", &wanted.artist, &wanted.title);
-    match read_cache(&track_key) {
+    match read_cached(&track_key).await {
         Cached::Hit(bytes) => Some((track_key, bytes)),
         Cached::Miss => None,
         Cached::Unknown => {
@@ -407,7 +430,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
                 match itunes(http, wanted, "song", country, priority).await {
                     Ok(Some(url)) => match download(http, &url).await {
                         Some(bytes) => {
-                            write_cache(&track_key, Outcome::Hit(&bytes));
+                            write_cache(&track_key, Outcome::Hit(bytes.clone()));
                             return Some((track_key, bytes));
                         }
                         None => failed = true,
@@ -421,7 +444,7 @@ async fn lookup(core: &Arc<Core>, wanted: &Wanted, priority: &Priority) -> Optio
             }
             match youtube(core, wanted).await {
                 Ok(Some(bytes)) => {
-                    write_cache(&track_key, Outcome::Hit(&bytes));
+                    write_cache(&track_key, Outcome::Hit(bytes.clone()));
                     Some((track_key, bytes))
                 }
                 // A provider failed: not an answer, but not worth asking again
