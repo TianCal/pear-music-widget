@@ -146,15 +146,23 @@ fn at_most(src: &str, max: u32) -> Cow<'_, str> {
     }
 }
 
-/// Insertion-ordered cache of cover URL → data URL. Cover URLs are stable per
-/// video, so a small map saves refetching artwork on every track repeat.
+/// Least-recently-used cache of cover URL → data URL. Cover URLs are stable
+/// per video, so a small map saves refetching artwork on every track repeat.
 ///
 /// Held as `Arc<str>`: the same string is handed to the state, to the event
 /// payload and back to the next cache hit, and none of them needs its own copy.
+///
+/// Use order is kept lazily: every use stamps the entry and pushes the stamp
+/// onto `order`, and eviction skips stamps the entry has since moved past.
+/// A hit is then O(1) rather than a walk of the order — `queue_art` takes up
+/// to 48 of them per request, under the lock.
 pub(crate) struct ImageCache {
-    order: VecDeque<String>,
-    entries: HashMap<String, Arc<str>>,
+    /// (stamp, key), oldest first. Holds a stale stamp for each use an entry
+    /// has had since the one it is at; `compact` drops them.
+    order: VecDeque<(u64, String)>,
+    entries: HashMap<String, (Arc<str>, u64)>,
     bytes: usize,
+    stamp: u64,
 }
 
 impl ImageCache {
@@ -163,6 +171,7 @@ impl ImageCache {
             order: VecDeque::new(),
             entries: HashMap::new(),
             bytes: 0,
+            stamp: 0,
         }
     }
 
@@ -172,30 +181,48 @@ impl ImageCache {
     /// — it walks past far more artwork than the cache holds, and without this
     /// the rows you are about to scroll back to are the first ones dropped.
     pub(crate) fn get(&mut self, key: &str) -> Option<Arc<str>> {
-        let hit = self.entries.get(key).cloned()?;
-        if let Some(at) = self.order.iter().position(|held| held == key) {
-            self.order.remove(at);
-            self.order.push_back(key.to_string());
-        }
+        let (hit, held) = self.entries.get_mut(key)?;
+        let hit = Arc::clone(hit);
+        self.stamp += 1;
+        *held = self.stamp;
+        self.order.push_back((self.stamp, key.to_string()));
+        self.compact();
         Some(hit)
     }
 
     pub(crate) fn insert(&mut self, key: String, value: Arc<str>) {
+        self.stamp += 1;
         self.bytes += key.len() + value.len();
-        if let Some(replaced) = self.entries.insert(key.clone(), value) {
+        if let Some((replaced, _)) = self.entries.insert(key.clone(), (value, self.stamp)) {
             self.bytes -= key.len() + replaced.len();
-        } else {
-            self.order.push_back(key);
         }
+        self.order.push_back((self.stamp, key));
 
-        while self.order.len() > IMAGE_CACHE_MAX || self.bytes > IMAGE_CACHE_BYTES {
-            let Some(oldest) = self.order.pop_front() else {
+        while self.entries.len() > IMAGE_CACHE_MAX || self.bytes > IMAGE_CACHE_BYTES {
+            let Some((stamp, oldest)) = self.order.pop_front() else {
                 break;
             };
-            if let Some(dropped) = self.entries.remove(&oldest) {
+            // A stale stamp: the entry was used again since, and is further
+            // along the order.
+            if self.entries.get(&oldest).is_none_or(|(_, held)| *held != stamp) {
+                continue;
+            }
+            if let Some((dropped, _)) = self.entries.remove(&oldest) {
                 self.bytes -= oldest.len() + dropped.len();
             }
         }
+        self.compact();
+    }
+
+    /// Keep the order from growing with every hit: once it holds more stale
+    /// stamps than live ones, rebuild it from the live ones. Amortised O(1).
+    fn compact(&mut self) {
+        if self.order.len() <= 2 * self.entries.len() + 16 {
+            return;
+        }
+        let entries = &self.entries;
+        self.order
+            .retain(|(stamp, key)| entries.get(key).is_some_and(|(_, held)| held == stamp));
     }
 }
 
@@ -722,7 +749,27 @@ mod tests {
         assert!(cache.bytes <= IMAGE_CACHE_BYTES);
         assert!(cache.entries.len() < 4, "the oldest covers should be gone");
         assert!(cache.get("cover-3").is_some(), "the newest one stays");
-        assert_eq!(cache.order.len(), cache.entries.len());
+        assert!(cache.order.len() >= cache.entries.len());
+    }
+
+    #[test]
+    fn a_hit_is_promoted_past_the_entries_inserted_after_it() {
+        let mut cache = ImageCache::new();
+        let big: Arc<str> = "x".repeat(IMAGE_CACHE_BYTES / 4).into();
+        for index in 0..3 {
+            cache.insert(format!("cover-{index}"), Arc::clone(&big));
+        }
+        assert!(cache.get("cover-0").is_some());
+        // The fourth tips the byte cap: the least recently *used* goes.
+        cache.insert("cover-3".into(), Arc::clone(&big));
+        assert!(cache.get("cover-0").is_some(), "the promoted one stays");
+        assert!(cache.get("cover-1").is_none(), "the untouched oldest goes");
+        assert!(cache.bytes <= IMAGE_CACHE_BYTES);
+        // The order never outgrows the live entries by more than the slack.
+        for _ in 0..1000 {
+            cache.get("cover-0");
+        }
+        assert!(cache.order.len() <= 2 * cache.entries.len() + 16);
     }
 }
 
