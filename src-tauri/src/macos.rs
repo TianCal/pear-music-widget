@@ -520,6 +520,31 @@ pub struct TopOfDisplay {
     pub menu_bar: Option<f64>,
 }
 
+/// The dictionary keys `top_of_main_display` reads, as retained `NSString`s
+/// built once: it runs every second, or every 100 ms in fullscreen, and was
+/// making the eight strings each time. Kept as addresses because a raw
+/// pointer cannot sit in a static; an immutable string is safe to share.
+fn window_keys() -> [usize; 8] {
+    static KEYS: std::sync::OnceLock<[usize; 8]> = std::sync::OnceLock::new();
+    *KEYS.get_or_init(|| {
+        [
+            c"kCGWindowLayer",
+            c"kCGWindowOwnerPID",
+            c"kCGWindowAlpha",
+            c"kCGWindowBounds",
+            c"X",
+            c"Y",
+            c"Width",
+            c"Height",
+        ]
+        .map(|name: &CStr| unsafe {
+            let string: *mut AnyObject = msg_send![class!(NSString), alloc];
+            let string: *mut AnyObject = msg_send![string, initWithUTF8String: name.as_ptr()];
+            string as usize
+        })
+    })
+}
+
 /// Read through Quartz's window list, which is safe off the main thread; the
 /// array it returns is toll-free bridged to `NSArray`, so it is read with
 /// plain messages.
@@ -534,14 +559,8 @@ pub fn top_of_main_display() -> TopOfDisplay {
         if list.is_null() {
             return TopOfDisplay::default();
         }
-        let key = |name: &CStr| -> *mut AnyObject { msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()] };
-        let (layer_key, owner_key, alpha_key, bounds_key) = (
-            key(c"kCGWindowLayer"),
-            key(c"kCGWindowOwnerPID"),
-            key(c"kCGWindowAlpha"),
-            key(c"kCGWindowBounds"),
-        );
-        let (x_key, y_key, w_key, h_key) = (key(c"X"), key(c"Y"), key(c"Width"), key(c"Height"));
+        let [layer_key, owner_key, alpha_key, bounds_key, x_key, y_key, w_key, h_key] =
+            window_keys().map(|key| key as *mut AnyObject);
         let number = |dict: *mut AnyObject, k: *mut AnyObject| -> Option<f64> {
             let value: *mut AnyObject = msg_send![dict, objectForKey: k];
             (!value.is_null()).then(|| msg_send![value, doubleValue])
