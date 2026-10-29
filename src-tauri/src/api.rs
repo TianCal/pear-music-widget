@@ -238,6 +238,8 @@ pub struct Api {
     /// steps aside while any are, so a lookup the user did not ask for never
     /// delays one they did.
     searches_waiting: std::sync::atomic::AtomicUsize,
+    /// Woken when `searches_waiting` reaches zero, for `search_background`.
+    searches_idle: tokio::sync::Notify,
     queue_slot: tokio::sync::Mutex<()>,
     /// One `play_song` at a time. Each reads the playing slot only once
     /// YouTube has answered for its song, so two in flight could finish in
@@ -274,6 +276,7 @@ impl Api {
             images: Mutex::new(ImageCache::new()),
             search_slot: tokio::sync::Mutex::new(()),
             searches_waiting: std::sync::atomic::AtomicUsize::new(0),
+            searches_idle: tokio::sync::Notify::new(),
             queue_slot: tokio::sync::Mutex::new(()),
             play_slot: tokio::sync::Mutex::new(()),
             auth_slot: tokio::sync::Mutex::new(()),
@@ -531,7 +534,9 @@ impl Api {
         use std::sync::atomic::Ordering;
         self.searches_waiting.fetch_add(1, Ordering::SeqCst);
         let _slot = self.search_slot.lock().await;
-        self.searches_waiting.fetch_sub(1, Ordering::SeqCst);
+        if self.searches_waiting.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.searches_idle.notify_waiters();
+        }
         if !still_wanted() {
             return None;
         }
@@ -544,8 +549,14 @@ impl Api {
     pub async fn search_background(&self, query: &str) -> Result<Value> {
         use std::sync::atomic::Ordering;
         loop {
-            while self.searches_waiting.load(Ordering::SeqCst) > 0 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            // Armed before the count is read, so a search that finishes
+            // between the read and the wait still wakes this.
+            let idle = self.searches_idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if self.searches_waiting.load(Ordering::SeqCst) > 0 {
+                idle.await;
+                continue;
             }
             let _slot = self.search_slot.lock().await;
             if self.searches_waiting.load(Ordering::SeqCst) == 0 {
