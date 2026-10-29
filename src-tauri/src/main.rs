@@ -200,10 +200,7 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
                 return;
             }
             api.prevent_close();
-            if let Some(window) = app.get_webview_window(label) {
-                let _ = window.hide();
-                on_screen(app, label, false);
-            }
+            window::hide_window(app, label);
         }
 
         // A dropdown that stays up after you click elsewhere is not a dropdown.

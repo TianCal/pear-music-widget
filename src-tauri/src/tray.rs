@@ -788,14 +788,7 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &artist_names_submenu(app)?,
             &MenuItem::with_id(app, "sortSongs", "Sort Songs…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &CheckMenuItem::with_id(
-                app,
-                "showWidget",
-                "Show floating widget",
-                widget_alive,
-                widget_visible,
-                None::<&str>,
-            )?,
+            &show_widget_item(app, widget_alive, widget_visible)?,
             &always_on_top_item(app, always_on_top)?,
             &CheckMenuItem::with_id(
                 app,
@@ -848,13 +841,40 @@ fn rating_of(app: &AppHandle) -> (bool, Option<Like>) {
     })
 }
 
+/// Like and Dislike, offered while a track is playing and ticked by its
+/// rating. The same pair heads every surface's right-click menu.
+fn rating_items(app: &AppHandle) -> tauri::Result<[CheckMenuItem<tauri::Wry>; 2]> {
+    let (can_rate, rating) = rating_of(app);
+    Ok([
+        CheckMenuItem::with_id(app, "like", "Like", can_rate, rating == Some(Like::Like), None::<&str>)?,
+        CheckMenuItem::with_id(
+            app,
+            "dislike",
+            "Dislike",
+            can_rate,
+            rating == Some(Like::Dislike),
+            None::<&str>,
+        )?,
+    ])
+}
+
+/// "Show floating widget": ticked while the widget is up, greyed while there
+/// is no widget window at all.
+fn show_widget_item(
+    app: &AppHandle,
+    alive: bool,
+    visible: bool,
+) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    CheckMenuItem::with_id(app, "showWidget", "Show floating widget", alive, visible, None::<&str>)
+}
+
 /// Right-click menu for the floating widget itself: the things you would want
 /// while looking at it, minus the app-level plumbing that belongs in the tray.
 ///
 /// Every item here acts on the window you right-clicked; the dropdown has its
 /// own menu.
 pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let (can_rate, rating) = rating_of(app);
+    let [like, dislike] = rating_items(app)?;
     let store = app.state::<Arc<Store>>();
     let alive = app.get_webview_window(WIDGET).is_some();
     let skin = window::skin_of(&store);
@@ -862,22 +882,8 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         app,
         &[
-            &CheckMenuItem::with_id(
-                app,
-                "like",
-                "Like",
-                can_rate,
-                rating == Some(Like::Like),
-                None::<&str>,
-            )?,
-            &CheckMenuItem::with_id(
-                app,
-                "dislike",
-                "Dislike",
-                can_rate,
-                rating == Some(Like::Dislike),
-                None::<&str>,
-            )?,
+            &like,
+            &dislike,
             &PredefinedMenuItem::separator(app)?,
             &source_submenu(app)?,
             &PredefinedMenuItem::separator(app)?,
@@ -911,7 +917,7 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// (one setting for every surface, as in the dropdown's menu), and the
 /// surfaces. The widget's own look (skin, corners) is the widget's menu's.
 pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let (can_rate, rating) = rating_of(app);
+    let [like, dislike] = rating_items(app)?;
     let tint = app.state::<Arc<Store>>().get(|s| s.tint);
     let widget = app.get_webview_window(WIDGET);
     let widget_visible = widget.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
@@ -919,27 +925,13 @@ pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         app,
         &[
-            &CheckMenuItem::with_id(app, "like", "Like", can_rate, rating == Some(Like::Like), None::<&str>)?,
-            &CheckMenuItem::with_id(
-                app,
-                "dislike",
-                "Dislike",
-                can_rate,
-                rating == Some(Like::Dislike),
-                None::<&str>,
-            )?,
+            &like,
+            &dislike,
             &PredefinedMenuItem::separator(app)?,
             &source_submenu(app)?,
             &tint_submenu(app, tint)?,
             &PredefinedMenuItem::separator(app)?,
-            &CheckMenuItem::with_id(
-                app,
-                "showWidget",
-                "Show floating widget",
-                widget.is_some(),
-                widget_visible,
-                None::<&str>,
-            )?,
+            &show_widget_item(app, widget.is_some(), widget_visible)?,
             &MenuItem::with_id(app, "menuBarStrip", "Hide from menu bar", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
@@ -1073,20 +1065,14 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
         "showWidget" => {
             if let Some(widget) = &widget {
                 if widget.is_visible().unwrap_or(false) {
-                    let _ = widget.hide();
-                    crate::on_screen(app, WIDGET, false);
+                    window::hide_widget(app);
                 } else {
                     show_widget(app);
                 }
             }
         }
         "menuBarStrip" => crate::strip::set_shown(app, !store.get(|s| s.menu_bar_strip)),
-        "hideWidget" => {
-            if let Some(widget) = &widget {
-                let _ = widget.hide();
-                crate::on_screen(app, WIDGET, false);
-            }
-        }
+        "hideWidget" => window::hide_widget(app),
         "alwaysOnTop" => {
             let next = !store.get(|s| s.always_on_top);
             store.update_soon(|s| s.always_on_top = next);

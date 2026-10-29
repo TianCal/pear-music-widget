@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -215,22 +215,24 @@ fn size_for_skin(store: &Store, skin: &str) -> (f64, f64) {
 
 // ----------------------------------------------------------------- geometry
 
-/// Work areas in logical points, which is what the store and every size in this
-/// module are expressed in.
+/// A monitor's work area in logical points, which is what the store and every
+/// size in this module are expressed in.
+fn rect_of(monitor: &Monitor) -> Rect {
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    Rect {
+        x: area.position.x as f64 / scale,
+        y: area.position.y as f64 / scale,
+        width: area.size.width as f64 / scale,
+        height: area.size.height as f64 / scale,
+    }
+}
+
 fn work_areas(app: &AppHandle) -> Vec<Rect> {
     app.available_monitors()
         .unwrap_or_default()
         .iter()
-        .map(|monitor| {
-            let scale = monitor.scale_factor();
-            let area = monitor.work_area();
-            Rect {
-                x: area.position.x as f64 / scale,
-                y: area.position.y as f64 / scale,
-                width: area.size.width as f64 / scale,
-                height: area.size.height as f64 / scale,
-            }
-        })
+        .map(rect_of)
         .collect()
 }
 
@@ -238,16 +240,8 @@ fn primary_work_area(app: &AppHandle) -> Rect {
     app.primary_monitor()
         .ok()
         .flatten()
-        .map(|monitor| {
-            let scale = monitor.scale_factor();
-            let area = monitor.work_area();
-            Rect {
-                x: area.position.x as f64 / scale,
-                y: area.position.y as f64 / scale,
-                width: area.size.width as f64 / scale,
-                height: area.size.height as f64 / scale,
-            }
-        })
+        .as_ref()
+        .map(rect_of)
         .unwrap_or(Rect {
             x: 0.0,
             y: 0.0,
@@ -538,6 +532,22 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     crate::on_screen(app, WIDGET, true);
 
     Ok(window)
+}
+
+/// Put a window away without destroying it, and tell `Core` that nobody is
+/// looking at it, so the pollers can stand down. Hiding rather than closing
+/// is what lets the tray bring the window back; see `main.rs`'s close path.
+pub fn hide_window(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.hide();
+        crate::on_screen(app, label, false);
+    }
+}
+
+/// "Hide widget" in the menus, the card's close button and the tray's
+/// checkbox all put the widget away the same way.
+pub fn hide_widget(app: &AppHandle) {
+    hide_window(app, WIDGET);
 }
 
 /// The shape the window should hold: the skin's, plus the height of whichever

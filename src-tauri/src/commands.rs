@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use crate::api::{COVER_PX, THUMB_PX};
 use crate::search;
 use crate::state::{Bootstrap, Core, Repeat};
-use crate::window::{self, DROPDOWN, WIDGET};
+use crate::window::{self, DROPDOWN};
 
 /// Backoff for waiting on the player after an insert or a jump: a handful of
 /// checks, early ones close together, rather than a fixed-rate burst. Each
@@ -887,10 +887,7 @@ pub fn context_menu(app: AppHandle, window: WebviewWindow) {
 /// second, differently-behaved way out.
 #[tauri::command]
 pub fn hide_widget(app: AppHandle) {
-    if let Some(widget) = app.get_webview_window(WIDGET) {
-        let _ = widget.hide();
-        crate::on_screen(&app, WIDGET, false);
-    }
+    crate::window::hide_widget(&app);
 }
 
 /// Escape inside the dropdown closes it, like a real menu.
