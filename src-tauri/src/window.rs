@@ -806,8 +806,9 @@ pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
     if !SKINS.contains(&skin) {
         return;
     }
+    // The skin itself is already stored: `tray::set_skin` writes it before
+    // hopping here, and everything below reads it back from the store.
     let store = app.state::<Arc<Store>>().inner().clone();
-    store.update(|s| s.skin = skin.to_string());
 
     // A lyrics panel cannot stay open over a skin that shows the lyrics. Closed
     // here rather than by the page, which may be hidden and not hear about the
@@ -827,7 +828,7 @@ pub fn apply_skin(app: &AppHandle, window: &WebviewWindow, skin: &str) {
     // Come back to whatever size the user last left this skin at.
     let size = size_for_skin(&store, skin);
     let position = resize_keeping_corner(app, window, size);
-    store.update(|s| s.bounds = Some(position));
+    store.update_soon(|s| s.bounds = Some(position));
 
     macos::set_aspect_ratio(window, Some(shape));
     apply_zoom_to(

@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -421,6 +422,10 @@ pub struct Store {
     /// the *latest* settings, so writers racing each other cannot leave an
     /// older snapshot on disk, and an unchanged file is not rewritten.
     written: Mutex<String>,
+    /// Set by `update_soon`; cleared by the one background writer it keeps
+    /// going, which writes again while this is set. A burst of edits is one
+    /// writer and, usually, one write of the settings as they ended up.
+    dirty: AtomicBool,
 }
 
 /// `~/Library/Application Support/pear-music-widget` — the literal directory the
@@ -464,6 +469,7 @@ impl Store {
             path,
             settings: Mutex::new(settings),
             written: Mutex::new(String::new()),
+            dirty: AtomicBool::new(false),
         }
     }
 
@@ -482,20 +488,38 @@ impl Store {
     }
 
     /// `update` for callers on the AppKit main thread or an async worker. The
-    /// edit applies now; the fsync'd write runs on a thread of its own, where
-    /// a slow disk stalls nobody. Writes always serialise the latest settings
-    /// under the write lock, so concurrent ones still leave the newest on
-    /// disk, and quitting writes synchronously (`Local::remember` via `quit`).
+    /// edit applies now; the fsync'd write runs on a blocking thread, where a
+    /// slow disk stalls nobody. One writer at a time: an edit arriving while
+    /// it runs marks the store dirty again and the same writer goes round once
+    /// more, so a skin switch's several edits are one write, not one each.
+    /// Writes always serialise the latest settings under the write lock, so
+    /// concurrent ones still leave the newest on disk, and quitting calls
+    /// `flush` so nothing queued here is lost to the exit.
     pub fn update_soon(self: &Arc<Self>, edit: impl FnOnce(&mut Settings)) {
         edit(&mut self.settings.lock().expect("settings lock"));
+        if self.dirty.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let store = Arc::clone(self);
-        let _ = std::thread::Builder::new()
-            .name("settings-write".into())
-            .spawn(move || {
-                if let Err(err) = store.write() {
-                    eprintln!("[store] failed to persist settings: {err}");
-                }
-            });
+        tauri::async_runtime::spawn_blocking(move || loop {
+            store.dirty.store(false, Ordering::SeqCst);
+            if let Err(err) = store.write() {
+                eprintln!("[store] failed to persist settings: {err}");
+            }
+            // An edit that landed during the write found `dirty` set and did
+            // not start a writer of its own; it is this one's to write.
+            if !store.dirty.load(Ordering::SeqCst) {
+                break;
+            }
+        });
+    }
+
+    /// Write now whatever `update_soon` has not yet written. For quitting,
+    /// which may come straight after the edit that queued the write.
+    pub fn flush(&self) {
+        if let Err(err) = self.write() {
+            eprintln!("[store] failed to persist settings: {err}");
+        }
     }
 
     /// Temporary file, sync, rename: a crash or power loss mid-write leaves the

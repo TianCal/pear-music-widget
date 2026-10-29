@@ -985,8 +985,9 @@ pub fn build_panel_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 pub fn set_skin(app: &AppHandle, skin: &str) {
     // Stored before the hop, so the refreshes below read the new skin wherever
-    // this is called from.
-    app.state::<Arc<Store>>().update(|s| s.skin = skin.to_string());
+    // this is called from. `apply_skin` saves the bounds it moves to; this is
+    // the only write of the skin itself.
+    app.state::<Arc<Store>>().update_soon(|s| s.skin = skin.to_string());
     // An open lyrics panel is closed by `apply_skin`; the skin wants the lyrics
     // from now on, and leaving the panel's claim would outlive it.
     if window::skin_shows_lyrics(skin) {
@@ -1004,7 +1005,7 @@ pub fn set_skin(app: &AppHandle, skin: &str) {
 }
 
 pub fn set_panel_skin(app: &AppHandle, skin: &str) {
-    app.state::<Arc<Store>>().update(|s| s.panel_skin = skin.to_string());
+    app.state::<Arc<Store>>().update_soon(|s| s.panel_skin = skin.to_string());
     let (handle, layout) = (app.clone(), skin.to_string());
     let _ = app.run_on_main_thread(move || crate::panel::apply_panel_skin(&handle, &layout));
     after_skin_change(app, |state| state.panel_skin = skin.to_string());

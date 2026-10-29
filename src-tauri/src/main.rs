@@ -96,6 +96,11 @@ fn before_exit(app: &AppHandle) {
     if let Some(core) = app.try_state::<Arc<Core>>() {
         core.local().remember(&core);
     }
+    // A write `update_soon` queued moments ago would otherwise die with the
+    // process: the last setting changed is the one you would notice missing.
+    if let Some(store) = app.try_state::<Arc<Store>>() {
+        store.flush();
+    }
 }
 
 /// Pressing play when YouTube Music is not up should start it. Resetting the
