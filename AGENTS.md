@@ -395,9 +395,11 @@ artists (`artist_page`, YouTube Music only; local credits are plain text).
   reads `state`, `cover` and `queue`. While it is up something is on screen,
   so the pollers keep running. It joins every desktop but not fullscreen
   Spaces. On top of that, the watcher asks Quartz once a second whether
-  another app's ordinary window covers the whole menu-bar display
-  (`macos::fullscreen_on_main_display`: a fullscreen app, a game, a
-  presentation); while one does, the strip hides (`set_covered`, off screen
+  another app's ordinary window reaches the menu-bar display's top edge,
+  where in a normal Space only the menu bar can be
+  (`macos::fullscreen_on_main_display`: a fullscreen app, Split View, whose
+  windows do not span the display, a game). `visibleFrame` cannot tell: it
+  keeps the menu bar's height in fullscreen. While one does, the strip hides (`set_covered`, off screen
   for `on_screen`, setting unchanged) and the pointer watch stands down.
 - **The window never resizes.** A webview shows its old picture for a frame
   after a resize, pinned to the corner, which reads as a jump or a flash. The

@@ -502,10 +502,13 @@ pub fn set_frame(window: &WebviewWindow, x: f64, y: f64, width: f64, height: f64
     });
 }
 
-/// Whether another app's window covers the whole of the menu-bar display: a
-/// fullscreen app, or a borderless full-screen window such as a game or a
-/// presentation. The menu bar is hidden then, and anything drawn where it
-/// was would sit on that app's content.
+/// Whether a fullscreen Space is showing on the menu-bar display: another
+/// app's ordinary window reaches the display's top edge, where in a normal
+/// Space only the menu bar can be. That holds for one app alone and for Split
+/// View, where each app takes part of the width (Chrome measured at 1200 of
+/// 1920 points), and for a borderless full-screen game or presentation. The
+/// menu bar is hidden then, and anything drawn where it was would sit on that
+/// app's content. (`visibleFrame` is no help: it kept the menu bar's height.)
 ///
 /// Quartz's window list is safe off the main thread; the array it returns is
 /// toll-free bridged to `NSArray`, so it is read with plain messages.
@@ -548,12 +551,19 @@ pub fn fullscreen_on_main_display() -> bool {
             if bounds.is_null() {
                 continue;
             }
-            let near = |k, want: f64| number(bounds, k).is_some_and(|v| (v - want).abs() < 1.0);
-            if near(x_key, screen.origin.x)
-                && near(y_key, screen.origin.y)
-                && near(w_key, screen.size.width)
-                && near(h_key, screen.size.height)
-            {
+            let (Some(x), Some(y), Some(w), Some(h)) = (
+                number(bounds, x_key),
+                number(bounds, y_key),
+                number(bounds, w_key),
+                number(bounds, h_key),
+            ) else {
+                continue;
+            };
+            // At the top edge, over this display, and more than a sliver
+            // (fullscreen apps split their chrome into thin strips too).
+            let at_top = (y - screen.origin.y).abs() < 1.0;
+            let over = x < screen.origin.x + screen.size.width && x + w > screen.origin.x;
+            if at_top && over && w >= 200.0 && h >= 100.0 {
                 covered = true;
                 break;
             }
