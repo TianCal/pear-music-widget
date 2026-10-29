@@ -14,7 +14,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Notify;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use crate::api::ErrorCode;
 use crate::state::{Core, Status};
@@ -142,6 +142,14 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
         .await
     {
         Ok(Ok((socket, _response))) => socket,
+        // A server that refuses the upgrade outright has rejected the token
+        // just as surely as one that accepts and then closes with 1008.
+        Ok(Err(WsError::Http(response)))
+            if matches!(response.status().as_u16(), 401 | 403) =>
+        {
+            reject(core, &token);
+            return Outcome::Reconnect;
+        }
         Ok(Err(err)) => {
             core.set_status(Status::Offline, &format!("Could not reach the API server: {err}"));
             return Outcome::Reconnect;
@@ -191,9 +199,7 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     }
 
     if policy_rejection {
-        // The server rejected our token — drop it so the next attempt re-authorises.
-        core.api.clear_token();
-        core.set_status(Status::Unauthorized, "The API server rejected the saved token");
+        reject(core, &token);
     } else {
         core.set_status(
             Status::Offline,
@@ -206,4 +212,13 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
     }
 
     Outcome::Reconnect
+}
+
+/// The server rejected the token this socket used. Forget that one so the
+/// next attempt re-authorises, but only that one: `refresh_all`'s requests
+/// may already have hit 401 and stored a fresh token while the socket was
+/// still open, and clearing it would ask the user to approve twice.
+fn reject(core: &Arc<Core>, token: &str) {
+    core.api.reject_token(token);
+    core.set_status(Status::Unauthorized, "The API server rejected the saved token");
 }

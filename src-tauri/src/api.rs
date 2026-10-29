@@ -321,13 +321,9 @@ impl Api {
         }
     }
 
-    pub fn clear_token(&self) {
-        self.store.update_soon(|s| s.token = None);
-    }
-
     /// Forget `used` after the server rejected it — unless a newer token has
     /// already replaced it, which a late 401 must not throw away.
-    fn reject_token(&self, used: &str) {
+    pub fn reject_token(&self, used: &str) {
         self.store.update_soon(|s| {
             if s.token.as_deref() == Some(used) {
                 s.token = None;
