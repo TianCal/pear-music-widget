@@ -1110,31 +1110,50 @@ body.panel .close-widget {
   background: var(--rail);
 }
 
-.result {
+/* One track row — a cover beside a title over a subtitle — for search results
+   (`.result`), the queue panel (`.queue-item`) and the Up next strip
+   (`.upnext-item`): the lists sit one panel apart and should not disagree
+   about how dense a track row is. Each kind sets its art size, gap and title
+   size; anything else that differs stays in the kind's own rule. */
+.track-row {
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 5px 6px;
+  gap: var(--row-gap);
   border: 0;
   border-radius: 8px;
-  background: transparent;
   text-align: left;
   cursor: pointer;
   transition: background 0.12s ease;
 }
 
-.result:hover,
-.result.active {
+.track-row:hover {
   background: var(--hover);
 }
 
-.result img {
+.track-row img {
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+  width: var(--row-art);
+  height: var(--row-art);
   border-radius: 5px;
   object-fit: cover;
+}
+
+.track-row--result,
+.track-row--queue {
+  --row-art: 30px;
+  --row-gap: 9px;
+  --row-font: 12px;
+  width: 100%;
+  padding: 5px 6px;
+  background: transparent;
+}
+
+.track-row--result img,
+.track-row--queue img {
+  background: var(--hover);
+}
+
+.result.active {
   background: var(--hover);
 }
 
@@ -1152,7 +1171,7 @@ body.panel .close-widget {
 }
 
 .result-title {
-  font-size: 12px;
+  font-size: var(--row-font);
   font-weight: 500;
   color: var(--fg);
   line-height: 1.35;
@@ -1216,25 +1235,7 @@ body.panel .close-widget {
   background: var(--rail);
 }
 
-/* Same metrics as a search result: the two lists sit one panel apart and should
-   not disagree about how dense a track row is. */
-.queue-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 5px 6px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.12s ease;
-}
-
-.queue-item:hover {
-  background: var(--hover);
-}
+/* The row itself is `.track-row`, with a search result's metrics. */
 
 /* A disliked local file: still in the list and still playable by picking it,
    but advancing skips it, so it reads as set aside. */
@@ -1252,15 +1253,6 @@ body.panel .close-widget {
   font-weight: 600;
 }
 
-.queue-item img {
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  border-radius: 5px;
-  object-fit: cover;
-  background: var(--hover);
-}
-
 .queue-text {
   min-width: 0;
   flex: 1;
@@ -1275,7 +1267,7 @@ body.panel .close-widget {
 }
 
 .queue-name {
-  font-size: 12px;
+  font-size: var(--row-font);
   font-weight: 500;
   color: var(--fg);
   line-height: 1.35;
@@ -1497,34 +1489,22 @@ body.skin-stack .upnext:not([hidden]) {
   color: var(--accent);
 }
 
-.upnext-item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+/* A `.track-row` in a well: smaller, tighter, and on its own tile. */
+.track-row--upnext {
+  --row-art: 36px;
+  --row-gap: 7px;
+  --row-font: 10.5px;
   min-width: 0;
   padding: 5px;
-  border: 0;
-  border-radius: 8px;
   background: var(--well-item);
-  text-align: left;
-  cursor: pointer;
   transition: background 0.12s ease, transform 0.12s ease;
-}
-
-.upnext-item:hover {
-  background: var(--hover);
 }
 
 .upnext-item:active {
   transform: scale(0.97);
 }
 
-.upnext-item img {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  border-radius: 5px;
-  object-fit: cover;
+.track-row--upnext img {
   background: var(--rail);
 }
 
@@ -1541,7 +1521,7 @@ body.skin-stack .upnext:not([hidden]) {
 }
 
 .upnext-name {
-  font-size: 10.5px;
+  font-size: var(--row-font);
   font-weight: 500;
   color: var(--fg);
   line-height: 1.3;

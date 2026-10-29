@@ -30,10 +30,11 @@ const pickerHead = (text) => {
 };
 
 /** A `.result` row: `lead` (a cover or a tile), then a title over a subtitle.
- *  The picker, the artist popup and search all draw these. */
+ *  The picker, the artist popup and search all draw these. It is a
+ *  `.track-row` (styles.css) with the result kind's metrics. */
 const resultRow = (lead, title, sub) => {
   const row = document.createElement('button');
-  row.className = 'result';
+  row.className = 'result track-row track-row--result';
   row.type = 'button';
   const text = document.createElement('span');
   text.className = 'result-text';

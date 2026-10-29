@@ -109,10 +109,12 @@ const queueIdentity = (items) =>
 
 /** One queue slot as a button: its art, title and artist. `kind` names the
  *  classes (`upnext-item`, `queue-item`, …), so the strip and the panel share
- *  the markup and differ only in CSS. */
+ *  the markup and differ only in CSS: the row is a `.track-row` whose kind
+ *  modifier sets its metrics, and the kind's own class is what the click
+ *  handlers and the skins' rules look for. */
 const trackRow = (kind, item, playing) => {
   const row = document.createElement('button');
-  row.className = `${kind}-item`;
+  row.className = `track-row track-row--${kind} ${kind}-item`;
   // Only the playing track is marked. Already-played ones are left at full
   // strength — they are as readable as anything else in the list.
   if (playing) row.className += ' now';
