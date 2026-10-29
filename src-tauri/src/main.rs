@@ -20,6 +20,7 @@ mod search;
 mod sorter;
 mod state;
 mod store;
+mod strip;
 mod tray;
 mod window;
 mod ws;
@@ -242,6 +243,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     window::create(&handle)?;
     panel::create(&handle)?;
+    strip::setup(&handle)?;
     tray::create(&handle)?;
 
     ws::spawn(Arc::clone(&core), realtime);
@@ -315,6 +317,9 @@ fn main() {
             commands::hide_widget,
             commands::hide_panel,
             commands::retry,
+            strip::strip_shape,
+            strip::strip_hot,
+            strip::strip_open,
             sorter::sorter_view,
             sorter::sorter_extras,
             sorter::sorter_choose_folder,

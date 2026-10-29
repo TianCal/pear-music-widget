@@ -400,3 +400,101 @@ mod tests {
         assert!(!path.exists());
     }
 }
+
+/// The menu bar's height and the camera housing's width on the display that
+/// has the menu bar, in points; the width is 0 on a display without a notch.
+///
+/// Read rather than posted, like `double_click_interval`: a question for
+/// `NSScreen`, not an edit queued behind a resize. Call on the main thread.
+pub fn menu_bar_shape() -> (f64, f64) {
+    unsafe {
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        if count == 0 {
+            return (24.0, 0.0);
+        }
+        let screen: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
+        let frame: NSRect = msg_send![screen, frame];
+        let visible: NSRect = msg_send![screen, visibleFrame];
+        let bar = (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height);
+        // An auto-hiding menu bar leaves no inset; draw at the usual height.
+        let bar = if bar >= 20.0 { bar } else { 24.0 };
+
+        // The two strips either side of the notch, macOS 12 and later.
+        let responds: bool =
+            msg_send![screen, respondsToSelector: objc2::sel!(auxiliaryTopLeftArea)];
+        if !responds {
+            return (bar, 0.0);
+        }
+        let left: NSRect = msg_send![screen, auxiliaryTopLeftArea];
+        let right: NSRect = msg_send![screen, auxiliaryTopRightArea];
+        if left.size.width <= 0.0 || right.size.width <= 0.0 {
+            return (bar, 0.0);
+        }
+        (bar, (frame.size.width - left.size.width - right.size.width).max(0.0))
+    }
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> NSPoint;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+/// Where the pointer is, in points from the top-left of the primary display:
+/// the same space as Tauri's logical positions.
+///
+/// Read through Quartz rather than `NSEvent`, so any thread can ask and a
+/// poller needs no main-thread hop. For a window in an app that is never
+/// active: WebKit sends hover only to the active app.
+pub fn pointer_location() -> Option<(f64, f64)> {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let at = CGEventGetLocation(event);
+        CFRelease(event);
+        Some((at.x, at.y))
+    }
+}
+
+/// On every desktop Space, but not over another app's fullscreen window.
+pub fn join_all_desktops(window: &WebviewWindow) {
+    with_ns_window(window, move |handle| unsafe {
+        let _: () = msg_send![handle, setCollectionBehavior: CAN_JOIN_ALL_SPACES];
+    });
+}
+
+/// Let clicks fall through to whatever is underneath, or take them.
+pub fn set_ignores_mouse(window: &WebviewWindow, ignore: bool) {
+    with_ns_window(window, move |handle| unsafe {
+        let _: () = msg_send![handle, setIgnoresMouseEvents: ignore];
+    });
+}
+
+/// Move and size a window in one AppKit call, queued like everything else
+/// here. `x` and `y` are top-left, in the logical coordinates Tauri uses,
+/// whose origin is the top-left of the primary display.
+pub fn set_frame(window: &WebviewWindow, x: f64, y: f64, width: f64, height: f64) {
+    with_ns_window(window, move |handle| unsafe {
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        if count == 0 {
+            return;
+        }
+        let primary: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
+        let screen: NSRect = msg_send![primary, frame];
+        // AppKit counts up from the primary display's bottom edge.
+        let frame = NSRect::new(
+            NSPoint::new(x, screen.size.height - y - height),
+            NSSize::new(width, height),
+        );
+        let _: () = msg_send![handle, setFrame: frame, display: true];
+    });
+}

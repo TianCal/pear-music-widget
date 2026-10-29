@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Perch Strip</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5Z"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.9" y="4.6" width="4.2" height="14.8" rx="1.5"/><rect x="12.9" y="4.6" width="4.2" height="14.8" rx="1.5"/></symbol>
+      <symbol id="i-prev" viewBox="0 0 24 24"><path d="M7 5.5a1 1 0 0 1 2 0v4.9l8.4-5.3A1 1 0 0 1 19 6v12a1 1 0 0 1-1.6.8L9 13.6v4.9a1 1 0 0 1-2 0Z"/></symbol>
+      <symbol id="i-next" viewBox="0 0 24 24"><path d="M17 5.5a1 1 0 0 0-2 0v4.9L6.6 5.1A1 1 0 0 0 5 6v12a1 1 0 0 0 1.6.8L15 13.6v4.9a1 1 0 0 0 2 0Z"/></symbol>
+      <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3s-7.9-4.6-7.9-9.9A4.6 4.6 0 0 1 12 7.4a4.6 4.6 0 0 1 7.9 3c0 5.3-7.9 9.9-7.9 9.9Z"/></symbol>
+    </defs>
+  </svg>
+
+  <main id="strip">
+    <!-- One menu bar tall: the record, the song, its artist if the whole
+         name fits, and a hairline of progress underneath. -->
+    <div class="bar" id="bar">
+      <div class="wing l">
+        <span class="record"><i class="disc"></i><img class="cover" data-bind="cover" alt=""></span>
+        <span class="song" data-bind="title"></span>
+      </div>
+      <div class="gap"><span class="dash">—</span></div>
+      <div class="wing r">
+        <span class="artist" id="artist" data-bind="artist"></span>
+      </div>
+      <i class="line"><b data-bind="progress"></b></i>
+    </div>
+
+    <!-- Drops in on hover, over the bar on a flat display, under it beside a
+         notch. Always laid out, so opening never changes layout. -->
+    <div class="sheet" id="sheet">
+      <div class="head">
+        <span class="record lg"><i class="disc"></i><img class="cover" data-bind="cover" alt=""></span>
+        <div class="meta">
+          <p class="song" data-bind="title"></p>
+          <p class="byline" data-bind="byline"></p>
+        </div>
+        <!-- The tracks either side in the queue; click one to play it. -->
+        <div class="around">
+          <button class="neighbour" data-at="-1" hidden>
+            <img class="thumb" alt="">
+            <span class="words"><span class="name"></span><span class="where">Previous</span></span>
+          </button>
+          <button class="neighbour" data-at="1" hidden>
+            <img class="thumb" alt="">
+            <span class="words"><span class="name"></span><span class="where">Up next</span></span>
+          </button>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="btn like" data-cmd="like" title="Like"><svg><use href="#i-heart"/></svg></button>
+        <button class="btn" data-cmd="previous" title="Previous"><svg><use href="#i-prev"/></svg></button>
+        <button class="btn pp" data-cmd="togglePlay" title="Play/Pause"><svg><use data-bind="ppIcon" href="#i-play"/></svg></button>
+        <button class="btn" data-cmd="next" title="Next"><svg><use href="#i-next"/></svg></button>
+        <span class="btn spacer"></span>
+      </div>
+      <div class="progress">
+        <span data-bind="elapsed">0:00</span>
+        <i class="track" data-seek><b data-bind="progress"></b></i>
+        <span data-bind="remaining">0:00</span>
+      </div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

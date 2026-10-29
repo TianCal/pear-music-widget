@@ -22,6 +22,7 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src-tauri/src/ws.rs` | WebSocket connection, backoff, re-authentication |
 | `src-tauri/src/window.rs` | Widget sizing, zoom, anchoring, persistence |
 | `src-tauri/src/panel.rs` | Menu-bar dropdown and blur handling |
+| `src-tauri/src/strip.rs` | Now playing strip at the top centre of the menu bar |
 | `src-tauri/src/tray.rs` | Status item and menus |
 | `src-tauri/src/commands.rs` | Renderer commands |
 | `src-tauri/src/macos.rs` | AppKit integration |
@@ -46,6 +47,7 @@ src-tauri/src/ws.rs → state.rs → Tauri IPC → src/app.js
 | `src/boot.js` | Rust event wiring and first state (loads last) |
 | `src/palette.js` | Cover colour extraction |
 | `src/sorter/` | Sort Songs page (its own HTML, CSS and JS) |
+| `src/strip/` | Menu-bar strip page (its own HTML, CSS and JS) |
 
 ## Non-negotiable rules
 
@@ -367,6 +369,61 @@ the picker. It closes for panels, search, the picker, Escape, an outside click,
 going offline, switching to a folder and a change of credit, and it blocks
 the playback shortcuts while open. A drifting subtitle pauses while the
 pointer is on the credit.
+
+## Menu-bar strip
+
+Tray → **Show now playing in menu bar** (`menuBarStrip`, a boolean) puts the
+playing song at the top centre of the display with the menu bar: the cover
+with a record peeking out, the song title, the artist only if the whole name
+fits (never an ellipsis), and a hairline of progress. Hovering drops a sheet
+with controls and the queue's previous and next tracks: over the bar on a
+flat display, under the menu bar beside a notch. Clicking the bar does
+nothing, and a sideways swipe over the open sheet skips. It is one design,
+not a skin: it has no skin setting and no lyrics.
+
+- **Its own page and window** (`strip.rs`, label `strip`, `src/strip/`), like
+  Sort Songs, so it shares no globals with the card. The window exists only
+  while the setting is on: `show` builds it, `hide` destroys it. It is a
+  surface like the others: `crate::on_screen` on every show and hide, and it
+  reads `state`, `cover` and `queue`. While it is up something is on screen,
+  so the pollers keep running. It joins every desktop but not fullscreen
+  apps, whose menu bar is hidden.
+- **The window never resizes.** A webview shows its old picture for a frame
+  after a resize, pinned to the corner, which reads as a jump or a flash. The
+  window is one fixed transparent box (`WINDOW`) centred on the top edge at
+  `NSStatusWindowLevel` (over the menu bar, under its menus). It lets clicks
+  through except while the sheet is open *and* the pointer is on it, so the
+  menu bar beside the sheet never loses a click to the fold delay. Position
+  it at build time or through `macos::set_frame`; a `set_frame` posted right
+  after building loses to the builder's own position. The watcher re-checks
+  the menu bar's display every 2 s and re-centres and re-shapes after a dock,
+  unplug or resolution change.
+- **Animate transform and opacity only.** The sheet is always laid out
+  (`visibility: hidden` when folded) and opens by transform and opacity, which
+  the compositor runs without WebKit laying out each frame. Animating height,
+  width or grid rows dropped frames. Progress is a `scaleX`, written only when
+  the hairline moves a whole pixel, and the sheet's bar and clock only while
+  it is open; a transition on it would run every frame while playing.
+- **Hover comes from Rust.** The app is never active, so WebKit sends the
+  page no hover. The page reports the drawn part of the window (`strip_hot`:
+  the bar, or the sheet plus slack while open). While the strip is on, a
+  thread reads the pointer through Quartz (`macos::pointer_location`, no
+  main-thread hop) every 40 ms near the top of the screen and every 150 ms
+  elsewhere, and emits `strip-hover` when it crosses the drawn part. Off, the
+  thread parks.
+- **Queue only while open.** `strip_open` registers queue demand for the open
+  sheet (`Core::want_queue`, which fetches unless a recent queue is held), so
+  a strip that is merely showing never fetches `/queue`. A queue-owning skin
+  counts only while its own surface is on screen (`queue_wanted`), or the
+  strip would keep the widget's queue fetching. Neighbour artwork is
+  `queue_art` request/reply, like every other queue surface.
+- **Notch.** `macos::menu_bar_shape` reads the menu bar height and the camera
+  housing's width; with a notch the song sits left of it and the artist right,
+  in equal columns so the camera stays centred. `PMW_NOTCH=<points>` fakes a
+  notch on a flat display and `PMW_STRIP_OPEN=1` pins the sheet open.
+- **Settings.** Test builds stored a design name in `menuBarStrip`;
+  `strip_from_file` reads any name but `off` as shown, so those files still
+  parse.
 
 ## Search and queue
 

@@ -1216,8 +1216,14 @@ impl Core {
         if !self.showing() {
             return false;
         }
-        if crate::window::skin_shows_queue(&crate::window::skin_of(&self.store))
-            || crate::window::skin_shows_queue(&crate::window::panel_skin_of(&self.store))
+        // A skin's own queue counts only while its surface is the one on
+        // screen: the menu-bar strip alone must not fetch the widget's queue.
+        let drawn = |label: &str, skin: String| {
+            crate::window::skin_shows_queue(&skin)
+                && self.on_screen.lock().expect("screen lock").contains(label)
+        };
+        if drawn(crate::window::WIDGET, crate::window::skin_of(&self.store))
+            || drawn(crate::window::DROPDOWN, crate::window::panel_skin_of(&self.store))
         {
             return true;
         }
@@ -1227,6 +1233,27 @@ impl Core {
 
     pub fn set_queue_wanted(&self, label: &str, wanted: bool) {
         self.queue_demand.set_wanted(label, wanted);
+    }
+
+    /// A surface just started or stopped showing queue rows. Starting fetches
+    /// the queue unless what is held is recent: while nobody wanted it, track
+    /// changes left it empty (`queue_visible`).
+    pub fn want_queue(self: &Arc<Self>, label: &str, wanted: bool) {
+        self.set_queue_wanted(label, wanted);
+        if !wanted {
+            return;
+        }
+        let held = !self.queue.lock().expect("queue lock").items.is_empty();
+        let fresh = self
+            .queue_fetched_at
+            .lock()
+            .expect("time lock")
+            .is_some_and(|at| at.elapsed() < QUEUE_SHOW_TTL);
+        if held && fresh && !self.is_local() {
+            return;
+        }
+        let core = Arc::clone(self);
+        tauri::async_runtime::spawn(async move { core.refresh_queue().await });
     }
 
     /// Refresh the queue once YouTube Music has finished reordering it. The

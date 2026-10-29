@@ -117,6 +117,20 @@ where
     })
 }
 
+/// `menuBarStrip` is a boolean, but test builds stored the name of a design
+/// there. Any name other than `off` meant shown; anything else unreadable
+/// means hidden, rather than failing the whole file's parse.
+fn strip_from_file<'de, D>(de: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Bool(shown) => shown,
+        serde_json::Value::String(name) => name != "off",
+        _ => false,
+    })
+}
+
 fn default_host() -> String {
     "127.0.0.1".into()
 }
@@ -169,6 +183,9 @@ pub struct Settings {
     /// skin returns; today both can only be Stack.
     #[serde(rename = "panelSkin", default = "default_skin")]
     pub panel_skin: String,
+    /// Whether the strip at the top centre of the menu bar is up.
+    #[serde(rename = "menuBarStrip", default, deserialize_with = "strip_from_file")]
+    pub menu_bar_strip: bool,
     #[serde(rename = "alwaysOnTop", default = "default_always_on_top")]
     pub always_on_top: bool,
     #[serde(default = "default_opacity")]
@@ -267,6 +284,7 @@ impl Default for Settings {
             sizes: BTreeMap::new(),
             skin: default_skin(),
             panel_skin: default_skin(),
+            menu_bar_strip: false,
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
             liquid_glass: default_liquid_glass(),
@@ -523,6 +541,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test builds stored a design name in `menuBarStrip`. A file holding one
+    /// must still parse, or it would be set aside and the token lost with it.
+    #[test]
+    fn reads_a_stored_strip_design_as_shown() {
+        let read = |text: &str| serde_json::from_str::<Settings>(text).expect("parses").menu_bar_strip;
+        assert!(read(r#"{ "menuBarStrip": true }"#));
+        assert!(!read(r#"{ "menuBarStrip": false }"#));
+        assert!(read(r#"{ "menuBarStrip": "title" }"#));
+        assert!(!read(r#"{ "menuBarStrip": "off" }"#));
+        assert!(!read(r#"{ "menuBarStrip": 3 }"#));
+        assert!(!read("{}"));
+    }
 
     /// A settings file that fails to parse is silently replaced by the defaults
     /// — position, sizes and the cached token with it — so the shape change on

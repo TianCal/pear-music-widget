@@ -1,0 +1,303 @@
+/* The menu-bar strip. The window is a fixed transparent box (strip.rs) that
+   lets clicks through; the bar, one menu bar tall, and the sheet are placed
+   in it, centred on its top edge. */
+
+@property --p {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+:root {
+  --bar: 24px;
+  --notch: 0px;
+  --accent: #8e8e93;
+  --fg: rgba(0, 0, 0, 0.86);
+  --dim: rgba(0, 0, 0, 0.48);
+  --faint: rgba(0, 0, 0, 0.12);
+  --sheet: rgb(246, 246, 247);
+  --edge: rgba(0, 0, 0, 0.1);
+  --ease: cubic-bezier(0.25, 0.9, 0.3, 1);
+  --fold: 0.24s;
+  --serif: ui-serif, "New York", "Songti SC", Georgia, serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: rgba(255, 255, 255, 0.94);
+    --dim: rgba(255, 255, 255, 0.52);
+    --faint: rgba(255, 255, 255, 0.16);
+    --sheet: rgb(34, 34, 36);
+    --edge: rgba(255, 255, 255, 0.12);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  color: var(--fg);
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The window is a fixed transparent box (strip.rs); the bar and the sheet are
+   placed in it, centred on its top edge. Nothing here changes layout when
+   the sheet opens: only transform and opacity move, which the compositor
+   animates without asking WebKit to lay out or repaint each frame. */
+#strip { position: absolute; inset: 0; }
+
+/* ------------------------------------------------------------- the bar */
+
+.bar {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  height: var(--bar);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  white-space: nowrap;
+  transition: opacity 0.15s ease-out;
+}
+/* Open, the bar's words give way to the sheet's. */
+#strip.open .bar { opacity: 0; }
+
+.wing { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.gap { display: flex; align-items: center; justify-content: center; }
+
+/* A notch: the wings sit either side of the camera, as wide as each other so
+   the camera stays dead centre. */
+#strip.notched .bar {
+  display: grid;
+  grid-template-columns: 1fr calc(var(--notch) + 12px) 1fr;
+  gap: 0;
+}
+#strip.notched .wing.l { justify-content: flex-end; }
+#strip.notched .wing.r { justify-content: flex-start; }
+#strip.notched .gap > * { display: none; }
+
+.bar .song {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.artist {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--dim);
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 13px;
+}
+.dash { color: var(--dim); }
+/* An artist that would need an ellipsis is left out rather than cut. */
+.bar.solo .artist, .bar.solo .dash { display: none; }
+
+/* The record peeking out of its sleeve, further while playing. */
+.record { position: relative; display: inline-block; width: 24px; height: 16px; flex: none; }
+.cover {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  border-radius: 2px;
+  object-fit: cover;
+  background: var(--faint);
+  box-shadow: 1px 0 2px rgba(0, 0, 0, 0.25);
+}
+.cover:not([src]) { visibility: hidden; }
+.disc {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 15px;
+  height: 15px;
+  margin-top: -7.5px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, var(--accent) 0 22%, #111 23% 27%, transparent 28%),
+    repeating-radial-gradient(circle, #1b1b1b 0 1px, #262626 1px 2px);
+  transition: left 0.5s var(--ease);
+}
+#strip.playing .record .disc { left: 8px; }
+
+.line {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 2px;
+  height: 1.5px;
+  background: var(--faint);
+  border-radius: 1px;
+}
+/* Around a notch with no artist, the song sits left of the camera alone. */
+#strip.notched .bar.solo .line { right: calc(50% + var(--notch) / 2 + 6px); }
+
+/* Scaled, not sized: a transform is composited, where a width would lay out
+   and repaint. No transition, which would run every frame while playing. */
+.line b, .track b {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transform-origin: 0 50%;
+  transform: scaleX(var(--p));
+}
+
+/* ------------------------------------------------------------ the sheet */
+
+/* Drops in from the top edge on a flat display; beside a notch it hangs
+   under the menu bar instead, so the camera is never over it. Hidden, it is
+   still laid out, so its size is known before it opens. */
+.sheet {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 380px;
+  padding: 12px 18px 14px;
+  background: var(--sheet);
+  border: 0.5px solid var(--edge);
+  border-top: 0;
+  border-radius: 0 0 16px 16px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.08);
+  transform-origin: 50% 0;
+  transform: translateX(-50%) translateY(-8px) scale(0.97);
+  opacity: 0;
+  visibility: hidden;
+  will-change: transform, opacity;
+  transition: transform var(--fold) var(--ease), opacity 0.14s ease-in,
+    visibility 0s linear var(--fold);
+}
+#strip.notched .sheet { top: var(--bar); border-top: 0.5px solid var(--edge); border-radius: 16px; }
+#strip.open .sheet {
+  transform: translateX(-50%);
+  opacity: 1;
+  visibility: visible;
+  transition: transform var(--fold) var(--ease), opacity 0.16s ease-out, visibility 0s;
+}
+
+.head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.meta { min-width: 0; }
+.meta p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.around {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 124px;
+  padding-left: 10px;
+  border-left: 0.5px solid var(--edge);
+}
+.around:not(:has(.neighbour:not([hidden]))) { visibility: hidden; }
+.neighbour {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 2px 4px;
+  margin: 0 -4px;
+  border-radius: 7px;
+  text-align: left;
+  font: inherit;
+}
+.neighbour[hidden] { display: none; }
+.neighbour:hover { background: var(--faint); }
+.thumb {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--faint);
+}
+.thumb:not([src]) { visibility: hidden; }
+.words { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.words .name { font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.words .where {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.meta .song { font-family: var(--serif); font-size: 18px; font-weight: 600; }
+.byline { font-family: var(--serif); font-style: italic; font-size: 12.5px; color: var(--dim); margin-top: 4px; }
+
+.record.lg { width: 74px; height: 64px; }
+.record.lg .cover { width: 64px; height: 64px; border-radius: 3px; box-shadow: 2px 0 6px rgba(0, 0, 0, 0.3); }
+.record.lg .disc { width: 60px; height: 60px; margin-top: -30px; left: 4px; }
+#strip.open.playing .record.lg .disc { left: 12px; animation: spin 3.2s linear infinite; }
+@keyframes spin { to { transform: rotate(1turn); } }
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 6px;
+}
+.btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+.btn svg { width: 18px; height: 18px; fill: currentColor; }
+.btn:hover { background: var(--faint); }
+.btn:active { transform: scale(0.92); }
+.btn.pp { width: 34px; height: 34px; }
+.btn.pp svg { width: 24px; height: 24px; }
+.btn.like { color: var(--dim); }
+.btn.like.on { color: var(--accent); }
+.btn.spacer { visibility: hidden; }
+
+.progress {
+  display: grid;
+  grid-template-columns: 34px 1fr 34px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.progress span:last-child { text-align: right; }
+.track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--faint);
+  overflow: hidden;
+}
+.track:hover { height: 6px; }
+
+/* ------------------------------------------------------------- nothing on */
+
+#strip.empty .record, #strip.empty .line { display: none; }

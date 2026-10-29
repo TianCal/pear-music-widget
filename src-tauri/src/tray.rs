@@ -797,6 +797,14 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &always_on_top_item(app, always_on_top)?,
+            &CheckMenuItem::with_id(
+                app,
+                "menuBarStrip",
+                "Show now playing in menu bar",
+                true,
+                store.get(|s| s.menu_bar_strip),
+                None::<&str>,
+            )?,
             &skin_submenu(app, "skin", "Skin", &widget_skin)?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
@@ -1025,6 +1033,10 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
                     show_widget(app);
                 }
             }
+        }
+        "menuBarStrip" => {
+            crate::strip::set_shown(app, !store.get(|s| s.menu_bar_strip));
+            refresh(app);
         }
         "hideWidget" => {
             if let Some(widget) = &widget {
