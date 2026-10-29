@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::lyrics_cache;
 use crate::state::Song;
+use crate::text::{clean_title, fold, has_cjk, kugeci_title, lead_artist, urlencode_form};
 
 const ENDPOINT: &str = "https://lrclib.net/api";
 const YTM_ENDPOINT: &str = "https://music.youtube.com/youtubei/v1";
@@ -93,47 +94,9 @@ mod line_shape_tests {
 static CACHE: LazyLock<Mutex<(Vec<String>, HashMap<String, Option<Lyrics>>)>> =
     LazyLock::new(|| Mutex::new((Vec::new(), HashMap::new())));
 
-static CLEAN_PATTERNS: LazyLock<[Regex; 5]> = LazyLock::new(|| {
-    [
-        Regex::new(r"\([^)]*\)").unwrap(),
-        Regex::new(r"\[[^\]]*\]").unwrap(),
-        Regex::new(r"《[^》]*》").unwrap(),
-        Regex::new(r"【[^】]*】").unwrap(),
-        Regex::new(r"(?i)\b(official|music\s+video|lyrics?|audio|m/?v|hd|4k)\b").unwrap(),
-    ]
-});
-static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 static STAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(\d+):(\d{1,2}(?:[.:]\d{1,3})?)\]").unwrap());
 static BRACKETED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\]]*\]").unwrap());
-/// Separators are whole words, but against ASCII letters only (`(?-u:\b)`): a
-/// Han character next to "feat." is a boundary, so "陈奕迅feat.王菲" splits.
-static ARTIST_SPLIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)、|,|&|(?-u:\b)(?:and|with|feat|ft)(?-u:\b)\.?").unwrap()
-});
-
-/// YouTube Music titles carry a lot that LRCLib will not match on — bracketed
-/// soundtrack credits, 《…》 wrappers, "Official Music Video". Strip them for the
-/// fallback search, but try the untouched title first: for plenty of tracks the
-/// full string is the exact match.
-pub fn clean_title(title: &str) -> String {
-    let mut stripped = title.to_string();
-    for pattern in CLEAN_PATTERNS.iter() {
-        stripped = pattern.replace_all(&stripped, " ").into_owned();
-    }
-    let stripped = WHITESPACE.replace_all(&stripped, " ").trim().to_string();
-    if stripped.is_empty() {
-        title.to_string()
-    } else {
-        stripped
-    }
-}
-
-/// Collaborations are listed several ways; LRCLib matches on the lead artist.
-pub fn lead_artist(artist: &str) -> String {
-    let head = ARTIST_SPLIT.split(artist).next().unwrap_or("");
-    WHITESPACE.replace_all(head, " ").trim().to_string()
-}
 
 /// `[mm:ss.xx]text`, possibly several stamps per line. Blank lines are kept —
 /// they are the instrumental gaps, and the roll needs them to breathe.
@@ -239,23 +202,9 @@ fn best_search_hit(hits: &Value, duration: f64) -> Option<&Value> {
 fn query_string(params: &[(&str, String)]) -> String {
     params
         .iter()
-        .map(|(key, value)| format!("{key}={}", urlencode(value)))
+        .map(|(key, value)| format!("{key}={}", urlencode_form(value)))
         .collect::<Vec<_>>()
         .join("&")
-}
-
-fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            b' ' => out.push('+'),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 async fn request(http: &reqwest::Client, path: &str) -> Option<Value> {
@@ -438,22 +387,6 @@ async fn fetch_ytmusic(http: &reqwest::Client, video_id: &str) -> Option<Lyrics>
 const KUGECI_ENDPOINT: &str = "https://www.kugeci.com";
 const KUGECI_MAX_BYTES: usize = 1024 * 1024;
 
-// Strip promotional labels only. Keeping Live / remix / acoustic qualifiers
-// prevents a studio recording from borrowing timings from a different version.
-static KUGECI_PROMO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:official(?:\s+music)?\s+video|official\s+audio|official\s+lyrics?|music\s+video|lyrics?\s+video|official|audio|lyrics?|m/?v|hd|4k)\b").unwrap()
-});
-
-// Empty brackets left by promotional labels are immaterial to matching.
-static KUGECI_EMPTY_BRACKETS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\(\s*\)|\[\s*\]|【\s*】").unwrap());
-
-fn kugeci_title(title: &str) -> String {
-    let title = KUGECI_PROMO.replace_all(title, " ");
-    let title = KUGECI_EMPTY_BRACKETS.replace_all(&title, " ");
-    WHITESPACE.replace_all(&title, " ").trim().to_string()
-}
-
 static KUGECI_SUBTITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(.*?)\s*[（(]([^()（）]+)[）)]\s*$").unwrap());
 static KUGECI_VERSION: LazyLock<Regex> = LazyLock::new(|| {
@@ -489,9 +422,9 @@ fn kugeci_title_matches_keys(candidate: &str, wanted: &[String]) -> bool {
     !candidate.is_empty() && wanted.iter().any(|title| *title == candidate)
 }
 
-/// `artwork::fold`, plus 迴→回, which the site's titles use interchangeably.
+/// `text::fold`, plus 迴→回, which the site's titles use interchangeably.
 fn kugeci_key(text: &str) -> String {
-    crate::artwork::fold(text).replace('迴', "回")
+    fold(text).replace('迴', "回")
 }
 
 static KUGECI_ARTIST_SPLIT: LazyLock<Regex> = LazyLock::new(|| {
@@ -814,7 +747,7 @@ async fn fetch_kugeci(
         }
         let mut paths = Vec::new();
         for query in queries {
-            if let Some(html) = kugeci_page(http, &format!("/search?q={}", urlencode(&query))).await
+            if let Some(html) = kugeci_page(http, &format!("/search?q={}", urlencode_form(&query))).await
             {
                 paths = kugeci_candidates(&html, title, artist);
                 if !paths.is_empty() {
@@ -1095,13 +1028,6 @@ fn within_duration(hit: &Value, duration: f64, slack: f64) -> bool {
     }
 }
 
-/// Han characters: the catalogue Kugeci covers.
-fn has_cjk(text: &str) -> bool {
-    text.chars().any(|c| {
-        matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F)
-    })
-}
-
 /// `3:45` or `1:02:03` at the end of a YouTube Music result's subtitle
 /// (`Artist • Album • 3:45`), in seconds.
 fn subtitle_duration(subtitle: &str) -> Option<f64> {
@@ -1163,14 +1089,6 @@ mod local_order_tests {
         assert!(settle(Some(words(false, How::Search)), &mut plain).is_none());
         assert_eq!(plain.as_ref().map(|w| w.how), Some(How::Exact));
         assert_eq!(settle(Some(words(true, How::Kugeci)), &mut plain).map(|w| w.how), Some(How::Kugeci));
-    }
-
-    #[test]
-    fn kugeci_is_for_han_text_only() {
-        assert!(has_cjk("不懂"));
-        assert!(has_cjk("凍結"));
-        assert!(!has_cjk("Always Online"));
-        assert!(!has_cjk("Jay"));
     }
 
     #[test]
@@ -1636,14 +1554,6 @@ mod tests {
         assert_eq!(lines[1].time, Some(60.0));
     }
 
-    #[test]
-    fn strips_what_lrclib_will_not_match_on() {
-        assert_eq!(clean_title("Song (Official Music Video)"), "Song");
-        assert_eq!(clean_title("《Theme》 Track [4K]"), "Track");
-        // Stripping everything leaves the original rather than an empty query.
-        assert_eq!(clean_title("(Official)"), "(Official)");
-    }
-
     fn timed(lines: Value) -> Value {
         serde_json::json!({
             "contents": { "elementRenderer": { "newElement": { "type": { "componentType": {
@@ -1731,24 +1641,6 @@ mod tests {
         });
         assert_eq!(shape_ytmusic(&browse), None);
         assert_eq!(shape_ytmusic(&timed(serde_json::json!([]))), None);
-    }
-
-    #[test]
-    fn takes_the_lead_artist_only() {
-        assert_eq!(lead_artist("A feat. B"), "A");
-        assert_eq!(lead_artist("A、B"), "A");
-        assert_eq!(lead_artist("A & B"), "A");
-        assert_eq!(lead_artist("Solo"), "Solo");
-        assert_eq!(lead_artist("A ft. B"), "A");
-        assert_eq!(lead_artist("A with B"), "A");
-        // Separators are whole words, not letters inside a name.
-        assert_eq!(lead_artist("Taylor Swift"), "Taylor Swift");
-        assert_eq!(lead_artist("Bill Withers"), "Bill Withers");
-        assert_eq!(lead_artist("Daft Punk"), "Daft Punk");
-        assert_eq!(lead_artist("Feather Lane"), "Feather Lane");
-        // Glued to Han characters, as Chinese credits often are.
-        assert_eq!(lead_artist("陈奕迅feat.王菲"), "陈奕迅");
-        assert_eq!(lead_artist("周杰倫ft.費玉清"), "周杰倫");
     }
 }
 

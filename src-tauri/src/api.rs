@@ -296,7 +296,7 @@ impl Api {
         let url = format!(
             "{}/auth/{}",
             self.store.http_base(),
-            urlencode(&self.store.get(|s| s.client_id.clone()))
+            crate::text::urlencode(&self.store.get(|s| s.client_id.clone()))
         );
 
         let res = self
@@ -782,18 +782,4 @@ mod tests {
         }
         assert!(cache.order.len() <= 2 * cache.entries.len() + 16);
     }
-}
-
-/// Minimal percent-encoding for a path segment or query value.
-pub fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }

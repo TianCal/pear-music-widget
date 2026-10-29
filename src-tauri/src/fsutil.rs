@@ -1,8 +1,49 @@
-//! Small file and hashing helpers shared by the stores and caches.
+//! Small file, path, clock and hashing helpers shared by the stores and caches.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The directory name under `~/Library`. It is the Electron build's (Electron
+/// derived it from the package name, not the bundle id), so settings and
+/// caches survive the port.
+pub const APP: &str = "pear-music-widget";
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+/// `~/Library/Application Support/<app>`: settings and anything else the user
+/// would miss.
+pub fn support_dir(app: &str) -> PathBuf {
+    home().join("Library/Application Support").join(app)
+}
+
+/// `~/Library/Caches/pear-music-widget/<name>`: derived data that can be
+/// thrown away, in the directory macOS is allowed to throw away under disk
+/// pressure.
+pub fn cache_dir(name: &str) -> PathBuf {
+    home().join("Library/Caches").join(APP).join(name)
+}
+
+/// Seconds since the epoch. The lyrics cache stamps its records with these.
+pub fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Milliseconds since the epoch. Likes stamp their entries with these, and
+/// the two units are kept apart on purpose: each file keeps the unit it was
+/// first written in.
+pub fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Write `bytes` to `path` via a synced temporary file and a rename, so a
 /// crash or a drive pulled mid-write never leaves an empty or half file.

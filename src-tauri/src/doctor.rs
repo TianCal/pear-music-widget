@@ -171,7 +171,7 @@ pub async fn run() -> i32 {
     }
 
     // 4. Realtime channel.
-    let url = format!("ws://{host}:{port}{api}/ws?token={}", crate::api::urlencode(&token));
+    let url = format!("ws://{host}:{port}{api}/ws?token={}", crate::text::urlencode(&token));
     match tokio::time::timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(url)).await {
         Ok(Ok((socket, _))) => {
             let (_sink, mut stream) = socket.split();

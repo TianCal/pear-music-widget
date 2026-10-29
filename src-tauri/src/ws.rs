@@ -135,7 +135,7 @@ async fn connect_once(core: &Arc<Core>, realtime: &Arc<Realtime>) -> Outcome {
         "{}{}/ws?token={}",
         core.store.ws_base(),
         crate::api::API,
-        crate::api::urlencode(&token)
+        crate::text::urlencode(&token)
     );
 
     let socket = match tokio::time::timeout(HANDSHAKE_TIMEOUT, tokio_tungstenite::connect_async(url))

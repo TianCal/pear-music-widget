@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fsutil::unix_secs;
 use crate::lyrics::{How, LyricLine, Lyrics};
 
 /// Megabytes, and what the menu offers. `0` is off — nothing is read and
@@ -82,11 +83,7 @@ struct Stored {
 // ----------------------------------------------------------------- the store
 
 pub fn dir() -> PathBuf {
-    DIR.get_or_init(|| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join("Library/Caches/pear-music-widget/lyrics")
-    })
-    .clone()
+    DIR.get_or_init(|| crate::fsutil::cache_dir("lyrics")).clone()
 }
 
 /// Set the cap and take stock of what is already on disk. Called at startup and
@@ -132,13 +129,6 @@ fn path_for(video_id: &str) -> Option<PathBuf> {
     Some(dir().join(safe_name(video_id)?))
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// `Some(hit)` — including `Some(None)` for a remembered miss — or `None` when
 /// this track is not in the cache and has to be fetched.
 pub fn load(video_id: &str) -> Option<Option<Lyrics>> {
@@ -147,7 +137,7 @@ pub fn load(video_id: &str) -> Option<Option<Lyrics>> {
     }
     let path = path_for(video_id)?;
     let record: Record = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
-    record_result(record, now())
+    record_result(record, unix_secs())
 }
 
 fn record_result(record: Record, now: u64) -> Option<Option<Lyrics>> {
@@ -179,7 +169,7 @@ pub fn store(video_id: &str, lyrics: &Option<Lyrics>) {
     let _write = WRITES.lock().expect("lyrics cache writes");
     let record = Record {
         v: VERSION,
-        at: now(),
+        at: unix_secs(),
         lyrics: lyrics.as_ref().map(|words| Stored {
             synced: words.synced,
             how: words.how,

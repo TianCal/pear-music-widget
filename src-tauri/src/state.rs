@@ -1184,7 +1184,7 @@ impl Core {
         let by_artist = by_artist(song.media_type.as_deref());
         let mut links: Vec<ArtistLink> = match &slot {
             Some(track) => track.artists.to_vec(),
-            None if crate::store::split_credit(&song.api_artist).len() == 1 => {
+            None if crate::text::split_credit(&song.api_artist).len() == 1 => {
                 vec![ArtistLink::named(&song.api_artist)]
             }
             None => Vec::new(),

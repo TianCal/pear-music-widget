@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::text::CREDIT_SEPARATORS;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Position {
     pub x: f64,
@@ -365,24 +367,10 @@ impl Settings {
     }
 }
 
-/// Credit separators YouTube Music and common tag writers use.
-static ARTIST_SEPARATORS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"\s*(?:,|，|&|、|/|;|(?-u:\b)feat(?-u:\b)\.?|(?-u:\b)ft\.)\s*").expect("separator regex")
-});
-
 /// Whether `names` has an entry for the whole credit, as `map_artist` tries
 /// first.
 pub fn renames_whole(names: &BTreeMap<String, String>, credit: &str) -> bool {
     names.keys().any(|from| from.trim().eq_ignore_ascii_case(credit.trim()))
-}
-
-/// The names in a credit, split where `map_artist` splits it.
-pub fn split_credit(credit: &str) -> Vec<&str> {
-    ARTIST_SEPARATORS
-        .split(credit)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect()
 }
 
 /// The credit as it should be shown. The whole string is tried first, so a
@@ -404,7 +392,7 @@ pub fn map_artist(names: &BTreeMap<String, String>, artist: &str) -> String {
     }
     let mut out = String::new();
     let mut last = 0;
-    for sep in ARTIST_SEPARATORS.find_iter(artist) {
+    for sep in CREDIT_SEPARATORS.find_iter(artist) {
         let credit = &artist[last..sep.start()];
         out.push_str(&lookup(credit).unwrap_or_else(|| credit.to_string()));
         out.push_str(sep.as_str());
@@ -428,14 +416,10 @@ pub struct Store {
     dirty: AtomicBool,
 }
 
-/// `~/Library/Application Support/pear-music-widget` — the literal directory the
-/// Electron build used (Electron derives it from the package name, not the
-/// bundle id), so settings survive the port.
+/// `~/Library/Application Support/pear-music-widget/settings.json` — the
+/// literal directory the Electron build used, so settings survive the port.
 fn settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home)
-        .join("Library/Application Support/pear-music-widget")
-        .join("settings.json")
+    crate::fsutil::support_dir(crate::fsutil::APP).join("settings.json")
 }
 
 /// The settings file as it stands, without touching it; `None` if it is
@@ -454,10 +438,7 @@ impl Store {
                 // The next write would replace a file we could not read with
                 // defaults, losing the token, sizes and saved folders to one
                 // stray comma. Keep it aside so a hand edit can be repaired.
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let stamp = crate::fsutil::unix_secs();
                 let aside = path.with_extension(format!("json.broken-{stamp}"));
                 eprintln!("[store] settings.json does not parse ({err}); kept as {}", aside.display());
                 let _ = std::fs::rename(&path, &aside);
@@ -565,6 +546,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::split_credit;
 
     /// Test builds stored a design name in `menuBarStrip`. A file holding one
     /// must still parse, or it would be set aside and the token lost with it.

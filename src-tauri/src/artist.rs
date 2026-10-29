@@ -120,7 +120,7 @@ static IDS: LazyLock<Memo<String>> = LazyLock::new(Memo::new);
 /// when `id` is empty, from the cache or fetched now.
 pub async fn page(api: &Api, id: &str, name: &str) -> Result<Arc<ArtistPage>, Failed> {
     let id = if id.is_empty() {
-        IDS.get(&crate::artwork::fold(name), || resolve(api, name)).await?
+        IDS.get(&crate::text::fold(name), || resolve(api, name)).await?
     } else {
         id.to_string()
     };

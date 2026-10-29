@@ -238,8 +238,7 @@ impl Sorter {
 /// A title without its bracketed notes, folded: 小酒窩, 小酒窝 (Live) and
 /// 小酒窝(feat.蔡卓妍)（粤语版） all give 小酒窝.
 fn title_key(title: &str) -> String {
-    let bare = title.split(['(', '（', '[', '【']).next().unwrap_or(title);
-    crate::artwork::fold(bare)
+    crate::text::fold(crate::text::before_brackets(title))
 }
 
 fn title_keys(tracks: &[Track]) -> Vec<String> {
@@ -299,8 +298,7 @@ struct Own {
 }
 
 fn own_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Library/Application Support/pear-music-sorter/settings.json")
+    crate::fsutil::support_dir("pear-music-sorter").join("settings.json")
 }
 
 fn own() -> Own {

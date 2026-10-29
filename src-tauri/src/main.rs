@@ -21,6 +21,7 @@ mod sorter;
 mod state;
 mod store;
 mod strip;
+mod text;
 mod tray;
 mod window;
 mod ws;

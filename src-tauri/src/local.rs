@@ -1589,11 +1589,7 @@ pub fn folder_key(root: &Path) -> String {
 }
 
 fn index_path(root: &Path) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let name = folder_key(root);
-    PathBuf::from(home)
-        .join("Library/Caches/pear-music-widget/library")
-        .join(format!("{name}.json"))
+    crate::fsutil::cache_dir("library").join(format!("{}.json", folder_key(root)))
 }
 
 /// Every audio file under `root`, tags read only for files the index does not

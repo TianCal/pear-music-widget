@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::artwork::fold as norm;
+use crate::text::{before_brackets, fold as norm};
 use crate::lyrics::Lyrics;
 
 /// Clip start sits this far before the chorus's first line, so the lead-in
@@ -53,8 +53,6 @@ static CREDIT: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("credit regex")
 });
-static BRACKETED_TAIL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[\(（\[【].*$").expect("bracket regex"));
 
 /// Repeats are rarely identical in LRC files: 了/的 swaps, a dropped word.
 /// Compared on the lines' prepared `chars`, so the n² comparisons below
@@ -120,7 +118,7 @@ fn lines_of(lyrics: &Lyrics) -> Vec<Line> {
 }
 
 fn refine(lines: &[Line], start: usize, len: usize, title: &str) -> (usize, How) {
-    let title = norm(&BRACKETED_TAIL.replace(title, ""));
+    let title = norm(before_brackets(title));
     if title.chars().count() >= 2 {
         let from = start.saturating_sub(6);
         let to = (start + len).min(lines.len());

@@ -39,6 +39,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::state::Core;
+use crate::text::{fold, lead_artist, strip_brackets};
 
 /// Stored size; requests are downscaled from it. Twice `COVER_PX` keeps the
 /// card sharp on a Retina display.
@@ -56,8 +57,6 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 const ITUNES_COUNTRIES: [&str; 2] = ["tw", "us"];
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
-static BRACKETS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[(（\[【][^)）\]】]*[)）\]】]").expect("bracket regex"));
 static RELEASE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\s*-\s*(single|ep)\s*$|\s+(ep|single)\s*$").expect("suffix regex")
 });
@@ -71,27 +70,14 @@ pub struct Wanted {
 }
 
 fn dir() -> PathBuf {
-    DIR.get_or_init(|| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join("Library/Caches/pear-music-widget/artwork")
-    })
-    .clone()
+    DIR.get_or_init(|| crate::fsutil::cache_dir("artwork")).clone()
 }
 
 // ------------------------------------------------------------------ matching
 
-/// Simplified, lowercased, letters and digits only.
-pub(crate) fn fold(text: &str) -> String {
-    fast2s::convert(text)
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
-}
-
 /// `fold` after dropping bracketed notes and a trailing "- Single"/"EP".
 fn core_name(text: &str) -> String {
-    let text = BRACKETS.replace_all(text, " ");
+    let text = strip_brackets(text);
     fold(&RELEASE_SUFFIX.replace(&text, ""))
 }
 
@@ -122,7 +108,7 @@ pub fn name_score(ours: &str, theirs: &str) -> u8 {
 }
 
 pub fn artist_matches(ours: &str, theirs: &str) -> bool {
-    let ours = fold(&crate::lyrics::lead_artist(ours));
+    let ours = fold(&lead_artist(ours));
     let theirs = fold(theirs);
     !ours.is_empty() && !theirs.is_empty() && (theirs.contains(&ours) || ours.contains(&theirs))
 }
@@ -144,7 +130,7 @@ fn best<'a>(
 // --------------------------------------------------------------------- cache
 
 fn key(kind: &str, artist: &str, name: &str) -> String {
-    let text = format!("{kind}\0{}\0{}", fold(&crate::lyrics::lead_artist(artist)), core_name(name));
+    let text = format!("{kind}\0{}\0{}", fold(&lead_artist(artist)), core_name(name));
     format!("{kind}-{:016x}", crate::fsutil::stable_hash(&text))
 }
 
@@ -523,8 +509,8 @@ async fn pace_itunes(priority: &Priority) {
 /// Search terms without the notes that make providers miss: bracketed
 /// remaster tags, bitrates, "黑胶转录 24-96".
 fn term(wanted: &Wanted, name: &str) -> String {
-    let name = BRACKETS.replace_all(name, " ");
-    format!("{} {}", crate::lyrics::lead_artist(&wanted.artist), name.trim())
+    let name = strip_brackets(name);
+    format!("{} {}", lead_artist(&wanted.artist), name.trim())
 }
 
 async fn itunes(
@@ -584,7 +570,7 @@ async fn deezer(http: &reqwest::Client, wanted: &Wanted) -> Probe<String> {
 /// Square song art from YouTube Music's own search, through the API server.
 /// `Err` when YouTube Music is not reachable.
 async fn youtube(core: &Arc<Core>, wanted: &Wanted) -> Probe<Vec<u8>> {
-    let query = format!("{} {}", wanted.title, crate::lyrics::lead_artist(&wanted.artist));
+    let query = format!("{} {}", wanted.title, lead_artist(&wanted.artist));
     let payload = core.api.search(&query).await.map_err(|_| ())?;
     let results = crate::search::parse_search_results(&payload);
     let Some(hit) = results

@@ -487,7 +487,7 @@ fn artist_links(byline: Option<&Value>) -> Vec<ArtistLink> {
         }
         let Some(browse) = dig(run, &["navigationEndpoint", "browseEndpoint"]) else {
             links.extend(
-                crate::store::split_credit(text)
+                crate::text::split_credit(text)
                     .into_iter()
                     .filter(|name| !JOINERS.contains(&name.to_lowercase().as_str()))
                     .map(ArtistLink::named),
@@ -537,7 +537,7 @@ pub fn find_artist(payload: &Value, name: &str) -> Option<String> {
                         Some(text) => text.to_string(),
                         None => column_text(node, 0),
                     };
-                    if crate::artwork::fold(&text) == wanted {
+                    if crate::text::fold(&text) == wanted {
                         if let Some(id) = browse.get("browseId").and_then(Value::as_str) {
                             return Some(id.to_string());
                         }
@@ -548,7 +548,7 @@ pub fn find_artist(payload: &Value, name: &str) -> Option<String> {
             _ => None,
         }
     }
-    let wanted = crate::artwork::fold(name);
+    let wanted = crate::text::fold(name);
     if wanted.is_empty() {
         return None;
     }

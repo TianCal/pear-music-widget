@@ -28,11 +28,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fsutil::write_atomic;
+use crate::fsutil::{unix_millis, write_atomic};
 use crate::local::Track;
 
 const DIR: &str = ".pear-music";
@@ -175,24 +174,15 @@ fn drive_file(root: &Path) -> PathBuf {
 }
 
 fn fallback_file(root: &Path) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
     let name = crate::local::folder_key(root);
-    PathBuf::from(home)
-        .join("Library/Application Support/pear-music-widget/likes")
+    crate::fsutil::support_dir(crate::fsutil::APP)
+        .join("likes")
         .join(format!("{name}.json"))
-}
-
-/// Milliseconds since the epoch.
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Orphans older than this are dropped.
 fn orphan_cutoff() -> u64 {
-    now().saturating_sub(ORPHAN_DAYS * 24 * 60 * 60 * 1000)
+    unix_millis().saturating_sub(ORPHAN_DAYS * 24 * 60 * 60 * 1000)
 }
 
 fn relative(root: &Path, track: &Track) -> Option<String> {
@@ -328,7 +318,7 @@ impl Likes {
                 duration: track.duration,
                 title: track.title.clone(),
                 artist: track.artist.clone(),
-                at: now(),
+                at: unix_millis(),
             },
         );
         match rating {
