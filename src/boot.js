@@ -101,10 +101,7 @@ const listening = [
   window.widget.onState(live('state', applyState)),
   window.widget.onCover(live('cover', applyCover)),
   window.widget.onQueue(live('queue', applyQueue)),
-  window.widget.onQueueArtReady(() => {
-    queueArtInView();
-    upnextArtInView();
-  }),
+  window.widget.onQueueArtReady(queueArtReady),
   window.widget.onLyrics(live('lyrics', applyLyrics)),
 ].map((off) => off.ready);
 

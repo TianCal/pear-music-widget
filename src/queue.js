@@ -50,6 +50,11 @@ const cacheArt = (videoId, art) => {
 
 let artPending = null;
 let artTimer = null;
+/** Ids sent and not yet answered. Rust replies after up to 1.5 s with what
+ *  is ready; without this, every scroll pause meanwhile re-sent the same
+ *  ids. Cleared by `queueArtReady`: that nudge is Rust saying the lookups
+ *  that missed a reply have landed, so asking again is the point. */
+const artInFlight = new Set();
 
 /** Must match `QUEUE_ART_MAX` in commands.rs, which answers for this many ids
  *  and drops the rest. */
@@ -60,7 +65,7 @@ const QUEUE_ART_MAX = 48;
  *  recently asked-for ids last and sends only the newest `QUEUE_ART_MAX`: after
  *  a long drag those are the rows it stopped on, not the ones it passed. */
 const wantArt = (ids, size) => {
-  const missing = ids.filter((id) => id && !state.art.has(id));
+  const missing = ids.filter((id) => id && !state.art.has(id) && !artInFlight.has(id));
   if (!missing.length) return;
 
   artPending = artPending || { ids: new Set(), size };
@@ -74,7 +79,14 @@ const wantArt = (ids, size) => {
   artTimer = setTimeout(async () => {
     const batch = artPending;
     artPending = null;
-    const reply = await window.widget.queueArt([...batch.ids].slice(-QUEUE_ART_MAX), batch.size);
+    const asked = [...batch.ids].slice(-QUEUE_ART_MAX);
+    asked.forEach((id) => artInFlight.add(id));
+    let reply;
+    try {
+      reply = await window.widget.queueArt(asked, batch.size);
+    } finally {
+      asked.forEach((id) => artInFlight.delete(id));
+    }
     if (!reply?.ok) return;
 
     const landed = new Set();
@@ -358,6 +370,15 @@ const queueArtInView = () => {
 };
 
 el.queueList.addEventListener('scroll', queueArtInView, { passive: true });
+
+/** Rust's `queue-art-ready` nudge: lookups that missed a reply have landed,
+ *  so every row on screen without art asks again, in flight or not. Wired
+ *  in boot.js. */
+const queueArtReady = () => {
+  artInFlight.clear();
+  queueArtInView();
+  upnextArtInView();
+};
 
 el.queueList.addEventListener('click', (event) => {
   const row = event.target.closest('.queue-item');
