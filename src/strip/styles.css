@@ -30,10 +30,10 @@
   --artist-font: var(--serif);
   --artist-style: italic;
   --artist-size: 13px;
-  --title-font: var(--serif);
+  --title-font: var(--song-font);
   --title-size: 18px;
   --title-weight: 600;
-  --byline-font: var(--serif);
+  --byline-font: var(--song-font);
   --byline-style: normal;
   color-scheme: light dark;
 }
