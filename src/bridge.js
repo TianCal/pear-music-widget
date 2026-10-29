@@ -22,18 +22,24 @@ const { getCurrentWindow } = window.__TAURI__.window;
 
 const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel';
 
-/** Register a listener and hand back an unsubscribe, like `ipcRenderer.off`. */
+/** Register a listener and hand back an unsubscribe, like `ipcRenderer.off`.
+ *  Registration is asynchronous: `off.ready` resolves once the listener is
+ *  in place, which a cold load must wait for before asking for state, or an
+ *  event emitted in between is lost and the reply it would have superseded
+ *  stays on screen. */
 const on = (event, handler) => {
   let stop = null;
   let cancelled = false;
-  listen(event, ({ payload }) => handler(payload)).then((unlisten) => {
+  const ready = listen(event, ({ payload }) => handler(payload)).then((unlisten) => {
     if (cancelled) unlisten();
     else stop = unlisten;
   });
-  return () => {
+  const off = () => {
     cancelled = true;
     if (stop) stop();
   };
+  off.ready = ready;
+  return off;
 };
 
 window.widget = {

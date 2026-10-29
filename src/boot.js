@@ -97,29 +97,38 @@ const live = (channel, apply) => (payload) => {
   apply(payload);
 };
 
-window.widget.onState(live('state', applyState));
-window.widget.onCover(live('cover', applyCover));
-window.widget.onQueue(live('queue', applyQueue));
-window.widget.onQueueArtReady(() => {
-  queueArtInView();
-  upnextArtInView();
-});
-window.widget.onLyrics(live('lyrics', applyLyrics));
+const listening = [
+  window.widget.onState(live('state', applyState)),
+  window.widget.onCover(live('cover', applyCover)),
+  window.widget.onQueue(live('queue', applyQueue)),
+  window.widget.onQueueArtReady(() => {
+    queueArtInView();
+    upnextArtInView();
+  }),
+  window.widget.onLyrics(live('lyrics', applyLyrics)),
+].map((off) => off.ready);
 
 // One reply carries all four channels: a window loading from cold cannot wait a
-// track for the artwork to change.
-window.widget.getState().then((boot) => {
-  if (!heardLive.has('cover')) applyCover(boot.cover);
-  if (!heardLive.has('queue')) applyQueue(boot.queue);
-  if (!heardLive.has('lyrics')) applyLyrics(boot.lyrics);
-  if (!heardLive.has('state')) applyState(boot.state);
+// track for the artwork to change. Listen first, and only then ask: the
+// listeners above register asynchronously, and a cover or queue event emitted
+// after the reply was built but before they were in place would be lost —
+// those change once a track, so the card would show the old art until the
+// next one. (The strip boots the same way.)
+Promise.all(listening)
+  .then(() => window.widget.getState())
+  .then((boot) => {
+    if (!heardLive.has('cover')) applyCover(boot.cover);
+    if (!heardLive.has('queue')) applyQueue(boot.queue);
+    if (!heardLive.has('lyrics')) applyLyrics(boot.lyrics);
+    if (!heardLive.has('state')) applyState(boot.state);
 
-  // The widget reopens the panel it was left showing. The main process has
-  // already sized the window for it; this is what tells the page to draw it and
-  // the main process that somebody is watching, so the lyrics get fetched.
-  if (!IS_PANEL && boot.panel === 'lyrics') toggleLyrics();
-  else if (!IS_PANEL && boot.panel === 'queue') toggleQueue();
-});
+    // The widget reopens the panel it was left showing. The main process has
+    // already sized the window for it; this is what tells the page to draw it
+    // and the main process that somebody is watching, so the lyrics get
+    // fetched.
+    if (!IS_PANEL && boot.panel === 'lyrics') toggleLyrics();
+    else if (!IS_PANEL && boot.panel === 'queue') toggleQueue();
+  });
 
 window.addEventListener('resize', refreshMarquees);
 
