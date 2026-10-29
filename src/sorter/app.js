@@ -254,10 +254,7 @@
       $("namesakes").hidden = !view.card.sameName;
       $("namesakes").textContent = view.card.sameName ? `后面还有 ${view.card.sameName} 首同名歌` : "";
       $("dur").textContent = clock(view.card.duration);
-      $("pos").textContent = "0:00";
-      $("head").style.transition = "none";
-      $("head").style.left = "0";
-      $("played").style.width = "0";
+      showPosition(0, false);
       lastPosition = 0;
       setPlaying(false);
       renderCover();
@@ -282,7 +279,13 @@
     }
   }
 
+  /** The glyph as drawn, so the five-a-second progress events rewrite the
+   *  icon's markup only when it changes. */
+  let playingShown = null;
+
   function setPlaying(on) {
+    if (on === playingShown) return;
+    playingShown = on;
     $("play-icon").innerHTML = on
       ? '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'
       : '<path d="M8 5v14l11-7z"/>';
@@ -321,13 +324,14 @@
     invoke("sorter_seek", { at }).catch((err) => toast(String(err)));
   }
 
+  /** One fraction on the track, which the bar scales and the head slides
+   *  by (transforms, composited; `width` and `left` laid the row out on
+   *  every progress event). `still` turns the easing off for a jump. */
   function showPosition(position, animate) {
     const d = view?.card?.duration || 1;
-    const pct = `${Math.min(100, Math.max(0, (position / d) * 100))}%`;
-    $("head").style.transition = animate ? "" : "none";
-    $("played").style.transition = animate ? "" : "none";
-    $("head").style.left = pct;
-    $("played").style.width = pct;
+    const frac = Math.min(1, Math.max(0, position / d));
+    $("timeline").classList.toggle("still", !animate);
+    $("track").style.setProperty("--p", frac.toFixed(5));
     $("pos").textContent = clock(position);
   }
 
@@ -427,6 +431,11 @@
 
   // Drag (or click) anywhere on the bar to play from there.
   const track = $("track");
+  // The head slides by a fraction of the track's width, which only CSS with
+  // the width in hand can turn into pixels.
+  new ResizeObserver((entries) => {
+    track.style.setProperty("--track-w", `${entries[entries.length - 1].contentRect.width}px`);
+  }).observe(track);
   const at = (e) => {
     const r = track.getBoundingClientRect();
     const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));

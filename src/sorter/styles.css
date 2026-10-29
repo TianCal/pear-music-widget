@@ -168,17 +168,24 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 }
 /* A taller hit band than the bar it drags. */
 .timeline .track::before { content: ""; position: absolute; inset: -8px 0; }
+/* Progress is `--p` on the track: the bar scales to it and the head slides
+   by it, both transforms the compositor runs without laying the row out.
+   `--track-w` is the track's width, kept by the script's observer. */
 .played {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
+  right: 0;
   border-radius: 3px;
   background: var(--secondary);
   opacity: 0.35;
-  transition: width 0.2s linear;
+  transform-origin: 0 50%;
+  transform: scaleX(var(--p, 0));
+  transition: transform 0.2s linear;
 }
-.timeline.dragging .head, .timeline.dragging .played { transition: none; }
+.timeline.dragging .head, .timeline.dragging .played,
+.timeline.still .head, .timeline.still .played { transition: none; }
 .clip {
   position: absolute;
   top: 0;
@@ -190,13 +197,15 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .head {
   position: absolute;
   top: -3px;
+  left: 0;
   width: 12px;
   height: 12px;
   margin-left: -6px;
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-  transition: left 0.2s linear;
+  transform: translateX(calc(var(--p, 0) * var(--track-w, 0px)));
+  transition: transform 0.2s linear;
 }
 .times {
   display: flex;
