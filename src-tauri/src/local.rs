@@ -61,6 +61,8 @@ const QUEUE_ART_WAIT: Duration = Duration::from_millis(1500);
 
 /// Prefix for local ids. Also keeps them inside `lyrics_cache::safe_name`.
 pub const ID_PREFIX: &str = "local-";
+/// Concurrent decodes of files' own art; see `Local::decodes`.
+const FILE_ART_DECODES: usize = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
@@ -73,10 +75,43 @@ pub struct Track {
     pub duration: f64,
     /// Embedded picture or sidecar image found at scan time. Without one the
     /// file is never reopened for art — `artwork::find` is asked instead.
-    pub has_art: bool,
+    /// The index holds only `None` or `Embedded`; the sidecar is found per
+    /// scan, since it can come and go without the audio file changing.
+    #[serde(default, alias = "has_art", deserialize_with = "art_field")]
+    pub art: Art,
     /// Bytes on disk, from the listing. Part of the likes fingerprint.
     #[serde(default)]
     pub size: u64,
+}
+
+/// What a track's own cover is, so one `cover.jpg` shared by an album is
+/// decoded once for the album rather than once per row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Art {
+    #[default]
+    None,
+    /// A picture in the file's own tags.
+    Embedded,
+    /// A `cover.jpg` (or the like) beside the file.
+    Sidecar(PathBuf),
+}
+
+/// An index written before `Art` stored `has_art`, a bool that meant
+/// embedded — the sidecar was always layered on at scan time. Read it as
+/// such so those files parse and need no tag re-read.
+fn art_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Art, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Field {
+        Flag(bool),
+        Kind(Art),
+    }
+    Ok(match Field::deserialize(d)? {
+        Field::Flag(true) => Art::Embedded,
+        Field::Flag(false) => Art::None,
+        Field::Kind(art) => art,
+    })
 }
 
 impl Track {
@@ -286,8 +321,14 @@ pub struct Local {
     /// menus never stat a possibly dead mount on the main thread.
     present: Mutex<HashMap<String, bool>>,
     /// Sized, encoded artwork: `file:<path>@<px>` for a file's own art,
-    /// `<artwork key>@<px>` for an online cover.
+    /// `side:<sidecar path>@<px>` for a folder's, `<artwork key>@<px>` for
+    /// an online cover.
     images: Mutex<ImageCache>,
+    /// File art decodes in flight at once. A screen of queue rows arrives
+    /// together; unbounded, every row read and decoded its own copy of the
+    /// same sidecar against a USB drive. Each decode checks the memo once it
+    /// has its turn, so the rows after the first find the album's copy.
+    decodes: tokio::sync::Semaphore,
 }
 
 impl Local {
@@ -303,6 +344,7 @@ impl Local {
             ticks: AtomicU64::new(0),
             present: Mutex::new(HashMap::new()),
             images: Mutex::new(ImageCache::new()),
+            decodes: tokio::sync::Semaphore::new(FILE_ART_DECODES),
         }
     }
 
@@ -820,16 +862,20 @@ impl Local {
         self.images.lock().expect("images lock").insert(key, art);
     }
 
-    fn file_key(track: &Track, size: u32) -> String {
-        format!("file:{}@{size}", track.path.display())
+    /// The memo key for a track's own art: per file for an embedded
+    /// picture, per sidecar for a folder's, so an album shares one resize.
+    fn file_key(track: &Track, size: u32) -> Option<String> {
+        match &track.art {
+            Art::None => None,
+            Art::Embedded => Some(format!("file:{}@{size}", track.path.display())),
+            Art::Sidecar(sidecar) => Some(format!("side:{}@{size}", sidecar.display())),
+        }
     }
 
     /// The cover if it is already sized in memory. No IO at all.
     fn cover_now(&self, core: &Arc<Core>, track: &Track, size: u32) -> Option<Arc<str>> {
-        if track.has_art {
-            if let Some(hit) = self.memo(&Self::file_key(track, size)) {
-                return Some(hit);
-            }
+        if let Some(hit) = Self::file_key(track, size).and_then(|key| self.memo(&key)) {
+            return Some(hit);
         }
         crate::artwork::keys(&Self::wanted(core, track))
             .iter()
@@ -839,11 +885,11 @@ impl Local {
     /// The file's own art, sized; blocking IO and decode, so callers run it
     /// off the async workers.
     fn file_art(&self, track: &Track, size: u32) -> Option<Arc<str>> {
-        let key = Self::file_key(track, size);
+        let key = Self::file_key(track, size)?;
         if let Some(hit) = self.memo(&key) {
             return Some(hit);
         }
-        let art = read_art(&track.path, size)?;
+        let art = read_art(track, size)?;
         self.remember_art(key, art.clone());
         Some(art)
     }
@@ -859,7 +905,10 @@ impl Local {
         if let Some(hit) = self.cover_now(core, track, size) {
             return Some(hit);
         }
-        if track.has_art {
+        if track.art != Art::None {
+            // A turn at decoding first: the memo is checked again inside
+            // `file_art`, so rows sharing a sidecar decode it once.
+            let _turn = self.decodes.acquire().await.ok()?;
             let (local, owned) = (Arc::clone(self), track.clone());
             let art = tauri::async_runtime::spawn_blocking(move || local.file_art(&owned, size))
                 .await
@@ -1425,7 +1474,7 @@ impl Local {
             .map(|t| {
                 let artist = crate::store::map_artist(names, &t.artist);
                 let size = crate::api::THUMB_PX;
-                let own = t.has_art.then(|| self.file_art(&t, size)).flatten();
+                let own = self.file_art(&t, size);
                 let thumbnail = own.or_else(|| {
                     let wanted = crate::artwork::Wanted {
                         artist: artist.clone(),
@@ -1556,13 +1605,12 @@ pub fn scan(root: &Path) -> Vec<Track> {
     };
 
     // Sidecars are per folder: look once per folder, not once per file.
-    let with_sidecar: HashSet<PathBuf> = files
+    let sidecars: HashMap<PathBuf, PathBuf> = files
         .iter()
         .filter_map(|file| file.path.parent())
         .collect::<HashSet<_>>()
         .into_iter()
-        .filter(|dir| sidecar_in(dir).is_some())
-        .map(Path::to_path_buf)
+        .filter_map(|dir| Some((dir.to_path_buf(), sidecar_in(dir)?)))
         .collect();
 
     let stale: Vec<&Listed> = files.iter().filter(|file| !known(file, &index)).collect();
@@ -1607,7 +1655,11 @@ pub fn scan(root: &Path) -> Vec<Track> {
         .filter_map(|file| index.get(&file.path))
         .map(|entry| {
             let mut track = entry.track.clone();
-            track.has_art |= track.path.parent().is_some_and(|dir| with_sidecar.contains(dir));
+            if track.art == Art::None {
+                if let Some(sidecar) = track.path.parent().and_then(|dir| sidecars.get(dir)) {
+                    track.art = Art::Sidecar(sidecar.clone());
+                }
+            }
             track.size = entry.size;
             track
         })
@@ -1688,7 +1740,7 @@ fn untagged_track(root: &Path, path: &Path) -> Track {
         artist: top,
         album: album_from_dir(&parent),
         duration: 0.0,
-        has_art: false,
+        art: Art::None,
         size: 0,
     }
 }
@@ -1697,7 +1749,9 @@ fn read_track(root: &Path, path: &Path) -> Track {
     let mut track = untagged_track(root, path);
     if let Ok(file) = lofty::read_from_path(path) {
         track.duration = file.properties().duration().as_secs_f64();
-        track.has_art = file.tags().iter().any(|tag| !tag.pictures().is_empty());
+        if file.tags().iter().any(|tag| !tag.pictures().is_empty()) {
+            track.art = Art::Embedded;
+        }
         if let Some(tag) = file.primary_tag().or_else(|| file.first_tag()) {
             if let Some(title) = tag.title().filter(|t| !t.trim().is_empty()) {
                 track.title = title.trim().to_string();
@@ -1721,16 +1775,20 @@ fn read_track(root: &Path, path: &Path) -> Track {
     track
 }
 
-/// Embedded picture first, then a conventional sidecar, downscaled to `size`
-/// so a 3 MB scan never rides an event.
-fn read_art(path: &Path, size: u32) -> Option<Arc<str>> {
-    let bytes = art_bytes(path)?;
+/// The track's own art as the scan found it, downscaled to `size` so a 3 MB
+/// scan never rides an event.
+fn read_art(track: &Track, size: u32) -> Option<Arc<str>> {
+    let bytes = art_bytes(track)?;
     Some(crate::artwork::data_url(&crate::artwork::resize(&bytes, size)?))
 }
 
 /// The file's own picture or its folder's sidecar, as stored. Blocking IO.
-pub fn art_bytes(path: &Path) -> Option<Vec<u8>> {
-    embedded_art(path).or_else(|| sidecar_art(path))
+pub fn art_bytes(track: &Track) -> Option<Vec<u8>> {
+    match &track.art {
+        Art::None => None,
+        Art::Embedded => embedded_art(&track.path),
+        Art::Sidecar(sidecar) => std::fs::read(sidecar).ok(),
+    }
 }
 
 fn embedded_art(path: &Path) -> Option<Vec<u8>> {
@@ -1740,10 +1798,6 @@ fn embedded_art(path: &Path) -> Option<Vec<u8>> {
         .flat_map(|tag| tag.pictures())
         .next()
         .map(|picture| picture.data().to_vec())
-}
-
-fn sidecar_art(path: &Path) -> Option<Vec<u8>> {
-    std::fs::read(sidecar_in(path.parent()?)?).ok()
 }
 
 fn sidecar_in(dir: &Path) -> Option<PathBuf> {
@@ -1769,7 +1823,7 @@ mod tests {
                 artist: "A".into(),
                 album: String::new(),
                 duration: 100.0,
-                has_art: false,
+                art: Art::None,
                 size: i as u64,
             })
             .collect();
@@ -1897,6 +1951,23 @@ mod tests {
         let id = id_for(Path::new("/Volumes/X/双截棍.wav"));
         assert!(id.starts_with(ID_PREFIX));
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn an_old_index_with_has_art_still_parses() {
+        let entry = |art: &str| {
+            format!(
+                r#"{{"size":1,"modified":2,"track":{{"id":"local-a","path":"/m/a.flac","title":"A","artist":"B","album":"C","duration":1.0,{art}}}}}"#
+            )
+        };
+        let old: Indexed = serde_json::from_str(&entry(r#""has_art":true"#)).unwrap();
+        assert_eq!(old.track.art, Art::Embedded);
+        let old: Indexed = serde_json::from_str(&entry(r#""has_art":false"#)).unwrap();
+        assert_eq!(old.track.art, Art::None);
+        let new: Indexed = serde_json::from_str(&entry(r#""art":"embedded""#)).unwrap();
+        assert_eq!(new.track.art, Art::Embedded);
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(json.contains(r#""art":"embedded""#), "{json}");
     }
 
     /// `PMW_SCAN=/path cargo test scan_folder -- --ignored --nocapture`

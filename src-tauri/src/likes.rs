@@ -370,7 +370,7 @@ mod tests {
             artist: "林俊杰".into(),
             album: String::new(),
             duration: 200.0,
-            has_art: false,
+            art: crate::local::Art::None,
             size,
         }
     }
