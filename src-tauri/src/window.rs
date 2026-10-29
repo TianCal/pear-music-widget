@@ -127,9 +127,12 @@ pub struct WindowExtras {
 
 pub struct WindowState {
     extras: Mutex<HashMap<String, WindowExtras>>,
-    /// Bumped on every move/resize; a persist task only writes if it is still
-    /// the latest.
+    /// Bumped on every move/resize; the persist task writes once this has
+    /// held still for the debounce.
     persist_seq: AtomicU64,
+    /// Whether a persist task is waiting. One task per burst of events, not
+    /// one per event: a 120 Hz drag would otherwise leave hundreds sleeping.
+    persist_pending: AtomicBool,
     quitting: AtomicBool,
 }
 
@@ -138,6 +141,7 @@ impl WindowState {
         Self {
             extras: Mutex::new(HashMap::new()),
             persist_seq: AtomicU64::new(0),
+            persist_pending: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
         }
     }
@@ -572,7 +576,11 @@ fn is_ours(state: &WindowState, label: &str, rect: Rect) -> bool {
 /// A move or resize the user performed. While a panel is open the window
 /// carries the panel's height, so the collapsed shape it must return to is
 /// re-derived from the width rather than read off the window.
-pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow) {
+///
+/// `resized` says which event this was. Only a resize can change the zoom,
+/// and a drag delivers a `Moved` per frame: re-measuring the window and
+/// re-sending the zoom for each of them was most of the work of dragging.
+pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow, resized: bool) {
     let state = state(app).inner().clone();
     let label = window.label().to_string();
     let rect = bounds_of(window);
@@ -589,7 +597,9 @@ pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow) {
         });
     }
 
-    apply_zoom(app, window);
+    if resized {
+        apply_zoom_to(app, window, rect);
+    }
     schedule_persist(app);
 }
 
@@ -601,13 +611,32 @@ pub fn on_geometry_changed(app: &AppHandle, window: &WebviewWindow) {
 /// expanded window may have slid up to fit the screen.
 pub fn schedule_persist(app: &AppHandle) {
     let state = state(app).inner().clone();
-    let seq = state.persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut seen = state.persist_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    // A task is already waiting; it will see the bump and wait on.
+    if state.persist_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let app = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if state.persist_seq.load(Ordering::SeqCst) != seq {
-            return;
+        // Until the geometry has held still for the whole debounce.
+        loop {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let now = state.persist_seq.load(Ordering::SeqCst);
+            if now != seen {
+                seen = now;
+                continue;
+            }
+            state.persist_pending.store(false, Ordering::SeqCst);
+            // An event between that load and that store found the task still
+            // pending and did not start another: take it over, unless one did.
+            if state.persist_seq.load(Ordering::SeqCst) == seen {
+                break;
+            }
+            if state.persist_pending.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            seen = state.persist_seq.load(Ordering::SeqCst);
         }
         let Some(window) = app.get_webview_window(WIDGET) else {
             return;

@@ -206,10 +206,11 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
         }
 
         // Both carry the same question — did the user do this, or did we? —
-        // so both go through one place that can tell.
+        // so both go through one place that can tell. Only a resize re-zooms.
         WindowEvent::Moved(_) | WindowEvent::Resized(_) if label == WIDGET => {
             if let Some(window) = app.get_webview_window(WIDGET) {
-                window::on_geometry_changed(app, &window);
+                let resized = matches!(event, WindowEvent::Resized(_));
+                window::on_geometry_changed(app, &window, resized);
             }
         }
 
