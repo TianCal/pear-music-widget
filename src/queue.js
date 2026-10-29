@@ -116,9 +116,14 @@ const unpaintedIds = (rows, from, to) => {
 /** What a list draws from each item. The playing slot is left out on purpose:
  *  it moves once a track, and rebuilding every row — up to 500 of them — to
  *  move one marker was the whole cost of a track change. The title and artist
- *  are in because a rename of an artist re-sends the queue with new text. */
+ *  are in because a rename of an artist re-sends the queue with new text. The
+ *  slot index is in because a row jumps by it (`data-slot`): when an unnamed
+ *  slot drops out the indexes shift under rows that otherwise look the same,
+ *  and a stale one sends the jump down the forward-search fallback. */
 const queueIdentity = (items) =>
-  items.map((item) => `${item.videoId}:${item.rating || ''}:${item.title}\t${item.artist}`).join('\n');
+  items
+    .map((item) => `${item.index}:${item.videoId}:${item.rating || ''}:${item.title}\t${item.artist}`)
+    .join('\n');
 
 /** One queue slot as a button: its art, title and artist. `kind` names the
  *  classes (`upnext-item`, `queue-item`, …), so the strip and the panel share
