@@ -366,16 +366,19 @@ const artistSection = (artist, data) => {
   return section;
 };
 
-/** Under the subtitle, starting at the credit, kept inside the card. */
+/** Under the subtitle, starting at the credit, kept inside the card. Every
+ *  measurement first, then the writes: the width does not depend on the
+ *  height, and reading it after a write would lay the card out twice. */
 const placeArtistPop = (link) => {
   const card = el.card.getBoundingClientRect();
   const line = el.subtitle.parentElement.getBoundingClientRect();
   const name = link.getBoundingClientRect();
   const pop = el.artistPop;
+  const width = pop.offsetWidth;
   const top = Math.round(line.bottom - card.top + 4);
+  const left = clamp(name.left - card.left - 6, 7, card.width - width - 7);
   pop.style.top = `${top}px`;
   pop.style.maxHeight = `${Math.max(80, card.height - top - 7)}px`;
-  const left = clamp(name.left - card.left - 6, 7, card.width - pop.offsetWidth - 7);
   pop.style.left = `${Math.round(left)}px`;
 };
 

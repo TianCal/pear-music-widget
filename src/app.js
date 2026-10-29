@@ -249,29 +249,51 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 
 // --------------------------------------------------------------- marquee
 
-/** Measure long text, optionally giving newly displayed text one complete pass. */
-const setupMarquee = (span, { intro = false } = {}) => {
-  const box = span.parentElement;
-  box.classList.remove('scroll', 'intro');
-  span.style.removeProperty('--drift-distance');
+/** Measure long text, optionally giving newly displayed text one complete
+ *  pass. In three phases — put every line back at rest, measure them all,
+ *  then write — so two lines cost one layout, not a write-measure-write
+ *  each. The reset has to come first: `scroll` widens the box by its fade. */
+const setupMarquees = (spans, { intro = false } = {}) => {
+  for (const span of spans) {
+    span.parentElement.classList.remove('scroll', 'intro');
+    span.style.removeProperty('--drift-distance');
+  }
+  const overflows = spans.map((span) => span.scrollWidth - span.parentElement.clientWidth);
 
-  const overflow = span.scrollWidth - box.clientWidth;
-  if (overflow <= 4) return;
-
-  // Overshoot by the width of the fade so the tail clears the mask entirely.
-  const distance = overflow + 18;
-  const duration = clamp(distance / 16, 5, 18);
-  span.style.setProperty('--drift-distance', `${-distance}px`);
-  span.style.setProperty('--drift-duration', `${duration}s`);
-  span.style.setProperty('--drift-cycle-duration', `${duration * 2}s`);
-  box.classList.add('scroll');
+  const drifting = [];
+  spans.forEach((span, i) => {
+    const overflow = overflows[i];
+    if (overflow <= 4) return;
+    // Overshoot by the width of the fade so the tail clears the mask entirely.
+    const distance = overflow + 18;
+    const duration = clamp(distance / 16, 5, 18);
+    span.style.setProperty('--drift-distance', `${-distance}px`);
+    span.style.setProperty('--drift-duration', `${duration}s`);
+    span.style.setProperty('--drift-cycle-duration', `${duration * 2}s`);
+    span.parentElement.classList.add('scroll');
+    drifting.push(span);
+  });
 
   // Hover owns the animation while the pointer is already here; starting the
   // intro afterwards would make the text move again when the pointer leaves.
-  if (intro && !el.titles.matches(':hover')) {
-    void box.offsetWidth;
-    box.classList.add('intro');
+  if (intro && drifting.length && !el.titles.matches(':hover')) {
+    void el.titles.offsetWidth; // once, so the intro restarts from its first frame
+    for (const span of drifting) span.parentElement.classList.add('intro');
   }
+};
+
+/** Give `span` its intro pass on the next frame. A new song changes both
+ *  lines; collected, they are measured together. */
+const introPending = new Set();
+const introMarquee = (span) => {
+  if (!introPending.size) {
+    requestAnimationFrame(() => {
+      const spans = [...introPending];
+      introPending.clear();
+      setupMarquees(spans, { intro: true });
+    });
+  }
+  introPending.add(span);
 };
 
 /** Recalculate the resting title width without replaying its intro pass.
@@ -283,8 +305,7 @@ const refreshMarquees = () => {
   marqueesPending = true;
   requestAnimationFrame(() => {
     marqueesPending = false;
-    setupMarquee(el.title);
-    setupMarquee(el.subtitle);
+    setupMarquees([el.title, el.subtitle]);
   });
 };
 
@@ -520,9 +541,7 @@ const renderSong = ({ restartMarquee = false } = {}) => {
     lastTitle = title;
     el.title.textContent = title;
   }
-  if (titleChanged || restartMarquee) {
-    requestAnimationFrame(() => setupMarquee(el.title, { intro: true }));
-  }
+  if (titleChanged || restartMarquee) introMarquee(el.title);
 
   const subtitleChanged = subtitle !== lastSubtitle;
   if (subtitleChanged) {
@@ -532,9 +551,7 @@ const renderSong = ({ restartMarquee = false } = {}) => {
     if (artistOpen) closeArtist();
     if (pointerOnCard) warmArtists();
   }
-  if (subtitleChanged || restartMarquee) {
-    requestAnimationFrame(() => setupMarquee(el.subtitle, { intro: true }));
-  }
+  if (subtitleChanged || restartMarquee) introMarquee(el.subtitle);
 
 };
 
@@ -750,10 +767,7 @@ const applyState = (next) => {
     // The strip changed shape and maybe axis, so it is drawn and centred anew.
     upnextRendered = null;
     // Column widths and font sizes both changed, so the drift maths is stale.
-    requestAnimationFrame(() => {
-      setupMarquee(el.title);
-      setupMarquee(el.subtitle);
-    });
+    requestAnimationFrame(() => setupMarquees([el.title, el.subtitle]));
   }
 
   // A seek we just issued takes a moment to be reflected; ignore stale positions
