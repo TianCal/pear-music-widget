@@ -320,6 +320,7 @@ fn main() {
             strip::strip_shape,
             strip::strip_hot,
             strip::strip_open,
+            strip::strip_menu,
             sorter::sorter_view,
             sorter::sorter_extras,
             sorter::sorter_choose_folder,

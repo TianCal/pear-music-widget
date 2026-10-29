@@ -56,6 +56,9 @@ function applyShape(next) {
 }
 
 function applyState(next) {
+  // While a volume change settles, our own value beats the echoes still in
+  // flight, which may land out of order (see the widget's `holdingVolume`).
+  if (performance.now() < holdVolumeUntil) next = { ...next, volume: state.volume, muted: state.muted };
   // Whole-second pushes trail the real playhead by up to a second. Keep the
   // running estimate when a push is merely behind it on the same track.
   const predicted = position();
@@ -85,7 +88,17 @@ function render() {
   const idle = state?.status === 'offline' ? 'Music is not running' : 'Nothing playing';
   setText('title', song?.title || idle);
   setText('artist', song?.artist || '');
-  setText('byline', [song?.artist, song?.album].filter(Boolean).join(' · '));
+  renderByline(song);
+  // The artist view is about the track it was opened on, and needs a
+  // connection. A queue read relabelling the same track's credit (romanised
+  // names becoming linked ones) is not a reason to leave it.
+  if (view === 'artist' && (state?.status === 'offline' || song?.videoId !== artistsFor)) showView('main');
+  // The cover opens YouTube Music; a local file has nothing to open there.
+  const local = state?.source === 'local';
+  if (cover3.dataset.local !== String(local)) {
+    cover3.dataset.local = String(local);
+    cover3.title = local ? '' : 'Open YouTube Music';
+  }
 
   binds('cover').forEach((img) => {
     if (cover) {
@@ -98,6 +111,12 @@ function render() {
   binds('ppIcon').forEach((use) => {
     if (use.getAttribute('href') !== glyph) use.setAttribute('href', glyph);
   });
+  shuffleBtn.classList.toggle('lit', !!state?.shuffle);
+  // Only ALL and ONE light it; NONE and a mode not yet known both read off.
+  const repeat = (state?.repeat || '').toUpperCase();
+  repeatBtn.classList.toggle('lit', repeat === 'ALL' || repeat === 'ONE');
+  const loop = repeat === 'ONE' ? '#i-repeat-one' : '#i-repeat';
+  if (repeatGlyph.getAttribute('href') !== loop) repeatGlyph.setAttribute('href', loop);
   const liked = (state?.like || '').toUpperCase() === 'LIKE';
   document.querySelectorAll('.btn.like').forEach((btn) => btn.classList.toggle('on', liked));
 
@@ -244,7 +263,15 @@ function setOpen(want) {
     root.classList.toggle('open', open);
     // Open takes clicks and wants the queue; folded lets clicks through.
     invoke('strip_open', { open });
-    if (open) askForThumbs();
+    if (open) {
+      askForThumbs();
+      warmArtists();
+    } else {
+      // Back to the main view once the sheet has folded out of sight.
+      setTimeout(() => {
+        if (!open) showView('main');
+      }, 300);
+    }
     reportHot();
   }, want ? 30 : 160);
 }
@@ -278,40 +305,482 @@ root.addEventListener('click', (event) => {
     invoke('play_queue_index', { index: Number(row.dataset.index), videoId: row.dataset.videoId });
     return;
   }
+  if (event.target.closest('.record.lg .cover')) {
+    if (state?.source !== 'local') invoke('open_app');
+    return;
+  }
+  if (event.target.closest('.artist-link')) {
+    openArtists();
+    return;
+  }
+  if (event.target.closest('[data-view="playlists"]')) {
+    openPlaylists();
+    return;
+  }
+  if (event.target.closest('.back')) {
+    showView('main');
+    return;
+  }
+  const pick = event.target.closest('.list-scroll .row, .list-scroll .play-all');
+  if (pick) {
+    playFromList(pick);
+    return;
+  }
   const btn = event.target.closest('[data-cmd]');
   const name = btn?.dataset.cmd;
-  if (!name) return;
-  if (name === 'togglePlay' && state) {
-    // Optimistic, as the card does; the next push corrects it.
+  if (!name || !state) return;
+  // Optimistic, as the card is; the next push corrects it.
+  if (name === 'togglePlay') {
     posBase = position();
     posAt = performance.now();
     state = { ...state, isPlaying: !state.isPlaying };
-    render();
   }
+  if (name === 'shuffle') state = { ...state, shuffle: !state.shuffle };
+  // A press means "the other mode"; from a mode not yet known, the read-back
+  // is the first honest answer (see the `repeat` command).
+  if (name === 'repeat' && state.repeat) {
+    state = { ...state, repeat: state.repeat.toUpperCase() === 'ALL' ? 'ONE' : 'ALL' };
+  }
+  render();
   command(name);
 });
 
-// A sideways two-finger swipe over the open sheet skips, like swiping a
-// notification away. Folded, the window lets everything through.
+// Right-click: the heart dislikes, as on the card; anywhere else on the open
+// sheet brings up the strip's menu.
+root.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  if (!open) return;
+  if (event.target.closest('.btn.like')) command('dislike');
+  else invoke('strip_menu');
+});
+
+// ------------------------------------------------------------------ views
+
+// The open sheet is the main view, or a list in its place: playlists, or the
+// artists on the track. The list keeps one height, so the window's fixed box
+// always holds it.
+
+const shuffleBtn = document.getElementById('shuffle');
+const repeatBtn = document.getElementById('repeat');
+const repeatGlyph = document.getElementById('repeat-glyph');
+const byline = document.getElementById('byline');
+const cover3 = sheet.querySelector('.record.lg .cover');
+const mainView = sheet.querySelector('.view.main');
+const listView = sheet.querySelector('.view.list');
+const listTitle = document.getElementById('list-title');
+const listScroll = document.getElementById('list-scroll');
+let view = 'main';
+/** Bumped on every view change, so a reply for a view that was left is
+ *  dropped rather than drawn. */
+let viewSeq = 0;
+
+function showView(name, title = '') {
+  viewSeq += 1;
+  clearInterval(playlistArtTimer);
+  if (name === 'playlists') playlistArtTimer = setInterval(loadPlaylistArt, PLAYLIST_ART_CHECK_MS);
+  if (view === name && name === 'main') return;
+  view = name;
+  mainView.hidden = name !== 'main';
+  listView.hidden = name === 'main';
+  listTitle.textContent = title;
+  if (name === 'main') listScroll.replaceChildren();
+}
+
+let bylineKey = '';
+
+/** "Artist · Album". On YouTube Music the whole credit is one link to the
+ *  artist view; local credits have no page, so theirs is plain text. */
+function renderByline(song) {
+  const linked = (song?.artists || []).length > 0;
+  const key = JSON.stringify([song?.artist, song?.album, (song?.artists || []).map((a) => a.id || a.query)]);
+  if (key === bylineKey) return;
+  bylineKey = key;
+  const parts = [];
+  if (song?.artist) {
+    const credit = document.createElement('span');
+    credit.textContent = song.artist;
+    if (linked) {
+      credit.className = 'artist-link';
+      credit.title = 'Top songs';
+    }
+    parts.push(credit);
+  }
+  if (song?.album) parts.push(document.createTextNode(`${song.artist ? ' · ' : ''}${song.album}`));
+  byline.replaceChildren(...parts);
+  // New links while the pointer is on the sheet: warm them, as the card does.
+  if (open) warmArtists();
+}
+
+const note = (text) => {
+  const node = document.createElement('div');
+  node.className = 'note';
+  node.textContent = text;
+  return node;
+};
+
+const group = (text) => {
+  const node = document.createElement('div');
+  node.className = 'group';
+  node.textContent = text;
+  return node;
+};
+
+/** A list row: a cover (or a folder tile), the title over a subtitle. */
+function listRow({ kind, id, title, sub, art, current, disabled }) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'row';
+  row.dataset.kind = kind;
+  row.dataset.id = id;
+  let lead;
+  if (kind === 'folder') {
+    lead = document.createElement('span');
+    lead.className = 'tile';
+    lead.innerHTML = '<svg><use href="#i-folder"/></svg>';
+  } else {
+    lead = document.createElement('img');
+    lead.className = 'tile';
+    lead.alt = '';
+    if (art) lead.src = art;
+  }
+  const words = document.createElement('span');
+  words.className = 'words';
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = title;
+  const s = document.createElement('span');
+  s.className = 's';
+  s.textContent = sub || '';
+  words.append(t, s);
+  row.append(lead, words);
+  row.disabled = !!disabled;
+  if (current) row.classList.add('current');
+  return row;
+}
+
+// ---- playlists: YouTube Music playlists and saved folders, as on the card.
+
+/** Covers already resolved, by source URL: reopening draws them at once. */
+const playlistArt = new Map();
+const playlistArtPending = new Set();
+/** URLs that came back empty, by when they may be asked again. */
+const playlistArtFailed = new Map();
+const PLAYLIST_ART_RETRY_MS = 60 * 1000;
+// Scroll events belong to the rendering steps a never-active window's page
+// may skip, so while the list is up the rows in view are also rechecked on a
+// timer, as the card's picker does. It asks for nothing already in flight.
+const PLAYLIST_ART_CHECK_MS = 300;
+let playlistArtTimer = 0;
+
+async function openPlaylists() {
+  showView('playlists', 'Playlists');
+  const seq = viewSeq;
+  listScroll.replaceChildren(note('Loading playlists…'));
+  const data = await invoke('list_playlists').catch(() => null);
+  if (seq !== viewSeq) return;
+  if (!data?.ok) {
+    listScroll.replaceChildren(note('Could not load playlists.'));
+    return;
+  }
+  const youtube = [group('YouTube Music')];
+  if (!data.youtube?.ok) {
+    youtube.push(note(data.youtube?.error || 'YouTube Music did not answer.'));
+  } else if (!data.youtube.playlists.length) {
+    youtube.push(note('No playlists in your library.'));
+  } else {
+    for (const item of data.youtube.playlists) {
+      const row = listRow({
+        kind: 'youtube',
+        id: item.id,
+        title: item.title,
+        sub: item.subtitle,
+        art: playlistArt.get(item.art),
+        current: item.id === data.currentPlaylist,
+      });
+      if (item.art && !playlistArt.has(item.art)) row.querySelector('img').dataset.art = item.art;
+      youtube.push(row);
+    }
+  }
+  const folders = [group('Folders')];
+  if (!data.folders.length) folders.push(note('Add a folder from Source > Choose Folder… in the menu.'));
+  for (const folder of data.folders) {
+    folders.push(
+      listRow({
+        kind: 'folder',
+        id: folder.path,
+        title: folder.name,
+        sub: folder.present ? folder.parent : 'Not connected',
+        current: folder.current,
+        disabled: !folder.present,
+      }),
+    );
+  }
+  // The source that is playing leads.
+  listScroll.replaceChildren(...(data.local ? [...folders, ...youtube] : [...youtube, ...folders]));
+  listScroll.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
+  loadPlaylistArt();
+}
+
+/** Covers come from Rust, and only for the rows in view. */
+function loadPlaylistArt() {
+  const top = listScroll.scrollTop - 60;
+  const bottom = listScroll.scrollTop + listScroll.clientHeight + 60;
+  const urls = [];
+  for (const img of listScroll.querySelectorAll('img[data-art]')) {
+    const row = img.closest('.row');
+    if (row.offsetTop + row.offsetHeight < top || row.offsetTop > bottom) continue;
+    const url = img.dataset.art;
+    if ((playlistArtFailed.get(url) ?? 0) > performance.now()) continue;
+    if (!playlistArtPending.has(url)) {
+      playlistArtPending.add(url);
+      urls.push(url);
+    }
+  }
+  if (!urls.length) return;
+  invoke('playlist_art', { urls })
+    .then((reply) => {
+      for (const url of urls) {
+        const data = reply?.art?.[url];
+        if (data) playlistArt.set(url, data);
+        else playlistArtFailed.set(url, performance.now() + PLAYLIST_ART_RETRY_MS);
+      }
+      for (const img of listScroll.querySelectorAll('img[data-art]')) {
+        const data = playlistArt.get(img.dataset.art);
+        if (data) {
+          img.src = data;
+          delete img.dataset.art;
+        }
+      }
+    })
+    .catch(() => {})
+    .finally(() => urls.forEach((url) => playlistArtPending.delete(url)));
+}
+
+listScroll.addEventListener('scroll', () => {
+  if (view === 'playlists') loadPlaylistArt();
+}, { passive: true });
+
+// ---- artists: the Top songs of each artist on the track, as on the card.
+
+const ARTISTS_MAX = 4;
+const ARTIST_REUSE_MS = 10 * 60 * 1000;
+const ARTIST_PAGES_MAX = 24;
+/** A section still loading says so only if its reply is not in quickly. */
+const ARTIST_LOADING_NOTE_MS = 150;
+const artistPages = new Map();
+
+const songArtists = () => (state?.song?.artists || []).slice(0, ARTISTS_MAX);
+
+/** By artist id, or by name for an artist without one. Rust caches too
+ *  (artist.rs); this side saves the IPC on a reopen. */
+function fetchArtist({ id, query }) {
+  const key = id || `~${query}`;
+  const held = artistPages.get(key);
+  if (held && performance.now() - held.at < ARTIST_REUSE_MS) return held;
+  const entry = { at: performance.now(), data: null };
+  entry.reply = invoke('artist_page', { id, query }).catch((err) => ({ ok: false, error: String(err) }));
+  entry.reply.then((data) => {
+    if (data?.ok) entry.data = data;
+    else if (artistPages.get(key) === entry) artistPages.delete(key);
+  });
+  artistPages.delete(key);
+  artistPages.set(key, entry);
+  if (artistPages.size > ARTIST_PAGES_MAX) artistPages.delete(artistPages.keys().next().value);
+  return entry;
+}
+
+/** The sheet opening is the pointer resting on the strip: the cue the card
+ *  takes to warm its artists, so a click draws them in the same frame. */
+function warmArtists() {
+  if (state?.status === 'connected') songArtists().forEach(fetchArtist);
+}
+
+function artistSection(artist, data) {
+  const head = document.createElement('div');
+  head.className = 'section-head';
+  const name = document.createElement('span');
+  name.className = 'section-name';
+  name.textContent = artist.name;
+  head.append(name);
+  const section = document.createElement('div');
+  section.append(head);
+  if (!data) return section.append(note('Loading top songs…')), section;
+  if (!data.ok) return section.append(note(data.error || 'Could not load this artist.')), section;
+  const { songs, allSongs } = data.page;
+  if (allSongs) {
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.className = 'play-all';
+    all.dataset.id = allSongs;
+    all.textContent = 'Play all';
+    head.append(all);
+  }
+  if (!songs.length) section.append(note('No top songs on YouTube Music.'));
+  for (const song of songs) {
+    section.append(
+      listRow({
+        kind: 'song',
+        id: song.videoId,
+        title: song.title,
+        sub: song.subtitle,
+        art: song.thumbnail,
+        current: song.videoId === state?.song?.videoId,
+      }),
+    );
+  }
+  return section;
+}
+
+/** The track the artist view was opened for. */
+let artistsFor = null;
+
+function openArtists() {
+  const artists = songArtists();
+  if (!artists.length) return;
+  showView('artist', artists.map((artist) => artist.name).join(', '));
+  artistsFor = state?.song?.videoId ?? null;
+  const seq = viewSeq;
+  const entries = artists.map(fetchArtist);
+  let late = false;
+  const draw = () => {
+    if (seq !== viewSeq) return;
+    const shown = artists
+      .map((artist, i) => {
+        const data = entries[i].data || entries[i].settled || null;
+        return data || late ? artistSection(artist, data) : null;
+      })
+      .filter(Boolean);
+    listScroll.replaceChildren(...shown);
+  };
+  draw();
+  const notes = setTimeout(() => {
+    late = true;
+    draw();
+  }, ARTIST_LOADING_NOTE_MS);
+  // Each section fills in as its page lands, in credit order.
+  for (const entry of entries) {
+    entry.reply.then((data) => {
+      entry.settled = data;
+      draw();
+    });
+  }
+  Promise.all(entries.map((entry) => entry.reply)).then(() => clearTimeout(notes));
+}
+
+/** One play at a time: a second click while one is starting would race it. */
+let listPlaying = false;
+
+async function playFromList(target) {
+  if (target.disabled || listPlaying) return;
+  const seq = viewSeq;
+  listPlaying = true;
+  target.classList.add('busy');
+  const all = target.classList.contains('play-all');
+  const kind = target.dataset.kind;
+  let reply;
+  try {
+    if (all) reply = await invoke('play_playlist', { kind: 'youtube', id: target.dataset.id });
+    else if (kind === 'song') reply = await invoke('play_result', { videoId: target.dataset.id });
+    else reply = await invoke('play_playlist', { kind, id: target.dataset.id });
+  } catch (err) {
+    reply = { ok: false, error: String(err) };
+  } finally {
+    listPlaying = false;
+  }
+  if (seq !== viewSeq) return;
+  target.classList.remove('busy');
+  if (reply?.ok) {
+    showView('main');
+    return;
+  }
+  const sub = all ? null : target.querySelector('.s');
+  if (sub) sub.textContent = reply?.error || 'Could not play that.';
+}
+
+// ----------------------------------------------------------------- wheel
+
+// Over the open sheet (folded, the window lets everything through), the wheel
+// does what it does on the widget: up and down change the volume, by the
+// widget's rules. A sideways two-finger swipe skips, like swiping a
+// notification away.
+
+const VOLUME_THROTTLE_MS = 70;
+const VOLUME_SETTLE_MS = 900;
+const WHEEL_SENSITIVITY = 0.12;
+let holdVolumeUntil = 0;
+let volumeTimer = null;
+let wheelVolume = null;
+let wheelVolumeTimer = 0;
+let peekTimer = 0;
+
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+/** Throttle sends to one per 70 ms, and always send the final value. */
+function setVolume(value) {
+  state = { ...state, volume: clamp(value, 0, 100), muted: state.muted && value <= 0 };
+  holdVolumeUntil = performance.now() + VOLUME_SETTLE_MS;
+  if (volumeTimer) return;
+  volumeTimer = setTimeout(() => {
+    volumeTimer = null;
+    command('volume', { volume: Math.round(state.volume) });
+  }, VOLUME_THROTTLE_MS);
+}
+
+/** Turn the progress row into the volume for a moment. */
+const levelFill = document.getElementById('level-fill');
+const levelText = document.getElementById('level');
+const speaker = document.getElementById('speaker');
+
+function peekVolume() {
+  const level = state.muted ? 0 : state.volume;
+  // On the fill alone: a property on the sheet would restyle everything in it,
+  // and a trackpad sends this sixty times a second.
+  levelFill.style.setProperty('--vol', (level / 100).toFixed(3));
+  const text = String(Math.round(level));
+  if (levelText.textContent !== text) levelText.textContent = text;
+  const glyph = level > 0 ? '#i-volume' : '#i-muted';
+  if (speaker.getAttribute('href') !== glyph) speaker.setAttribute('href', glyph);
+  if (!sheet.classList.contains('showing-volume')) sheet.classList.add('showing-volume');
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(() => sheet.classList.remove('showing-volume'), 1100);
+}
+
 let swipe = 0;
 let swipeAt = 0;
 let wheelAt = 0;
 root.addEventListener(
   'wheel',
   (event) => {
-    if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+    if (!open || !state) return;
+    // A list view scrolls on its own; neither volume nor skipping belongs there.
+    if (view !== 'main') return;
     event.preventDefault();
     const now = performance.now();
-    // A pause between wheel events starts a new gesture.
-    if (now - wheelAt > 150) swipe = 0;
-    wheelAt = now;
-    if (now - swipeAt < 700) return;
-    swipe += event.deltaX;
-    if (Math.abs(swipe) > 80) {
-      command(swipe > 0 ? 'next' : 'previous');
-      swipe = 0;
-      swipeAt = performance.now();
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      // A pause between wheel events starts a new gesture.
+      if (now - wheelAt > 150) swipe = 0;
+      wheelAt = now;
+      if (now - swipeAt < 700) return;
+      swipe += event.deltaX;
+      if (Math.abs(swipe) > 80) {
+        command(swipe > 0 ? 'next' : 'previous');
+        swipe = 0;
+        swipeAt = now;
+      }
+      return;
     }
+    if (state.status === 'offline') return;
+    // Natural scrolling reports swiping up as a positive deltaY, so adding it
+    // makes "scroll up" raise the volume, as on the widget. A float carried
+    // between events keeps a trackpad's small deltas from rounding away.
+    const from = wheelVolume ?? (state.muted ? 0 : state.volume);
+    wheelVolume = clamp(from + event.deltaY * WHEEL_SENSITIVITY, 0, 100);
+    clearTimeout(wheelVolumeTimer);
+    wheelVolumeTimer = setTimeout(() => {
+      wheelVolume = null;
+    }, 400);
+    setVolume(wheelVolume);
+    peekVolume();
   },
   { passive: false },
 );

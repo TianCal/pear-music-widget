@@ -378,8 +378,15 @@ with a record peeking out, the song title, the artist only if the whole name
 fits (never an ellipsis), and a hairline of progress. Hovering drops a sheet
 with controls and the queue's previous and next tracks: over the bar on a
 flat display, under the menu bar beside a notch. Clicking the bar does
-nothing, and a sideways swipe over the open sheet skips. It is one design,
-not a skin: it has no skin setting and no lyrics.
+nothing. It is one design, not a skin: it has no skin setting and no lyrics.
+
+The open sheet has the card's controls: like (right-click dislikes),
+shuffle, repeat (the same "other mode" press as the card), wheel volume by
+the card's rules (70 ms throttle, final value always sent, 900 ms echo hold)
+with the progress row turning into the volume, a sideways swipe to skip, a
+right-click menu, the cover opening YouTube Music (not for local files), and
+two list views in its place: playlists (`list_playlists`) and the track's
+artists (`artist_page`, YouTube Music only; local credits are plain text).
 
 - **Its own page and window** (`strip.rs`, label `strip`, `src/strip/`), like
   Sort Songs, so it shares no globals with the card. The window exists only
@@ -411,6 +418,18 @@ not a skin: it has no skin setting and no lyrics.
   main-thread hop) every 40 ms near the top of the screen and every 150 ms
   elsewhere, and emits `strip-hover` when it crosses the drawn part. Off, the
   thread parks.
+- **Views.** A list view replaces the main view inside the sheet, at a fixed
+  height so the fixed window always holds it. `viewSeq` drops replies for a
+  view that was left; the sheet returns to the main view 300 ms after it
+  folds. The artist view leaves on a new track or going offline, not on a
+  relabelled credit, and artists are warmed when the sheet opens and again
+  when the links change while it is open. Playlist covers are request/reply
+  for the rows in view, rechecked on a 300 ms timer while the list is up
+  (scroll events may not come), and an empty reply rests a minute. In a list
+  the wheel scrolls the list only.
+- **Right-click menu.** `strip_menu` pops `tray::build_strip_menu` under the
+  pointer. It is modal, so `menu_open` makes the watcher stand down while it
+  is up; otherwise the pointer moving into the menu would fold the sheet.
 - **Queue only while open.** `strip_open` registers queue demand for the open
   sheet (`Core::want_queue`, which fetches unless a recent queue is held), so
   a strip that is merely showing never fetches `/queue`. A queue-owning skin

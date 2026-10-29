@@ -902,6 +902,45 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
+/// Right-click menu for the menu-bar strip: the track, the source, and the
+/// surfaces. The widget's look (skin, tint, corners) is the widget's menu's.
+pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let snapshot = app.state::<Arc<Core>>().snapshot();
+    let can_rate = snapshot.status == Status::Connected && snapshot.song.is_some();
+    let rating = snapshot.like;
+    let widget = app.get_webview_window(WIDGET);
+    let widget_visible = widget.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
+
+    Menu::with_items(
+        app,
+        &[
+            &CheckMenuItem::with_id(app, "like", "Like", can_rate, rating == Some(Like::Like), None::<&str>)?,
+            &CheckMenuItem::with_id(
+                app,
+                "dislike",
+                "Dislike",
+                can_rate,
+                rating == Some(Like::Dislike),
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &source_submenu(app)?,
+            &PredefinedMenuItem::separator(app)?,
+            &CheckMenuItem::with_id(
+                app,
+                "showWidget",
+                "Show floating widget",
+                widget.is_some(),
+                widget_visible,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(app, "menuBarStrip", "Hide from menu bar", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "quitWithMusic", "Quit with App", true, None::<&str>)?,
+        ],
+    )
+}
+
 /// Right-click menu for the dropdown. Only what applies to it: opacity, always
 /// on top and the reset all act on the floating widget, so they stay out of it.
 /// The lyric nudge does apply — the dropdown rolls the same words.

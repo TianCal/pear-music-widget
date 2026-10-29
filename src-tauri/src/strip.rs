@@ -84,6 +84,9 @@ pub struct StripState {
     hovered: AtomicBool,
     /// Whether the page has the sheet open (`strip_open`).
     open: AtomicBool,
+    /// Set while the strip's right-click menu is up: the pointer is in the
+    /// menu, off the sheet, and that must not fold the sheet under it.
+    menu_open: AtomicBool,
     watcher: Mutex<Option<Thread>>,
 }
 
@@ -128,6 +131,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         hot: Mutex::new(Hot::default()),
         hovered: AtomicBool::new(false),
         open: AtomicBool::new(false),
+        menu_open: AtomicBool::new(false),
         watcher: Mutex::new(None),
     }));
     let watcher = watch_pointer(app.clone());
@@ -213,6 +217,10 @@ fn watch_pointer(app: AppHandle) -> Thread {
                 continue;
             }
             let strip = state(&app);
+            if strip.menu_open.load(Ordering::SeqCst) {
+                std::thread::sleep(HOVER_FAR);
+                continue;
+            }
             let frame = *strip.frame.lock().expect("strip lock");
             let hot = *strip.hot.lock().expect("strip lock");
             let at = macos::pointer_location().map(|(x, y)| (x - frame.x, y - frame.y));
@@ -290,4 +298,24 @@ pub fn strip_open(app: AppHandle, open: bool) {
         macos::set_ignores_mouse(&window, !(open && (hovered || strip.shape.lock().expect("strip lock").pinned)));
     }
     app.state::<Arc<Core>>().want_queue(LABEL, open);
+}
+
+/// Right-click on the open sheet: the strip's menu, under the pointer. The
+/// popup is modal; the watcher stands down until it closes, then the next
+/// look folds the sheet if the pointer has gone.
+#[tauri::command]
+pub fn strip_menu(app: AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(LABEL) else {
+            return;
+        };
+        let Ok(menu) = crate::tray::build_strip_menu(&handle) else {
+            return;
+        };
+        let strip = state(&handle);
+        strip.menu_open.store(true, Ordering::SeqCst);
+        let _ = window.popup_menu(&menu);
+        strip.menu_open.store(false, Ordering::SeqCst);
+    });
 }

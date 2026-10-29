@@ -20,6 +20,21 @@
   --ease: cubic-bezier(0.25, 0.9, 0.3, 1);
   --fold: 0.24s;
   --serif: ui-serif, "New York", "Songti SC", Georgia, serif;
+  /* Type, in one place: the bar's song, the artist beside it, and the
+     sheet's title and byline. */
+  --song-font: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  --song-size: 12.5px;
+  --song-weight: 650;
+  --song-track: 0.14em;
+  --song-case: uppercase;
+  --artist-font: var(--serif);
+  --artist-style: italic;
+  --artist-size: 13px;
+  --title-font: var(--serif);
+  --title-size: 18px;
+  --title-weight: 600;
+  --byline-font: var(--serif);
+  --byline-style: normal;
   color-scheme: light dark;
 }
 
@@ -91,20 +106,21 @@ html, body {
   max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-family: var(--song-font);
+  font-size: var(--song-size);
+  font-weight: var(--song-weight);
+  letter-spacing: var(--song-track);
+  text-transform: var(--song-case);
 }
 .artist {
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--dim);
-  font-family: var(--serif);
-  font-style: italic;
+  font-family: var(--artist-font);
+  font-style: var(--artist-style);
   font-weight: 400;
-  font-size: 13px;
+  font-size: var(--artist-size);
 }
 .dash { color: var(--dim); }
 /* An artist that would need an ellipsis is left out rather than cut. */
@@ -242,8 +258,8 @@ html, body {
   text-transform: uppercase;
   color: var(--dim);
 }
-.meta .song { font-family: var(--serif); font-size: 18px; font-weight: 600; }
-.byline { font-family: var(--serif); font-style: italic; font-size: 12.5px; color: var(--dim); margin-top: 4px; }
+.meta .song { font-family: var(--title-font); font-size: var(--title-size); font-weight: var(--title-weight); }
+.byline { font-family: var(--byline-font); font-style: var(--byline-style); font-size: 12.5px; color: var(--dim); margin-top: 4px; }
 
 .record.lg { width: 74px; height: 64px; }
 .record.lg .cover { width: 64px; height: 64px; border-radius: 3px; box-shadow: 2px 0 6px rgba(0, 0, 0, 0.3); }
@@ -254,10 +270,17 @@ html, body {
 .controls {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 14px;
+  justify-content: space-between;
   margin-top: 6px;
 }
+.transport { display: flex; align-items: center; gap: 10px; }
+/* Shuffle and repeat light with the accent when on. */
+.btn.mode { color: var(--dim); }
+.btn.mode.lit { color: var(--accent); }
+.btn.mode svg { width: 16px; height: 16px; }
+.record.lg .cover:not([data-local="true"]) { cursor: pointer; }
+.artist-link { cursor: pointer; }
+.artist-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .btn {
   appearance: none;
   border: 0;
@@ -277,7 +300,7 @@ html, body {
 .btn.pp svg { width: 24px; height: 24px; }
 .btn.like { color: var(--dim); }
 .btn.like.on { color: var(--accent); }
-.btn.spacer { visibility: hidden; }
+.btn.side svg { width: 17px; height: 17px; }
 
 .progress {
   display: grid;
@@ -290,6 +313,27 @@ html, body {
   color: var(--dim);
 }
 .progress span:last-child { text-align: right; }
+
+/* The volume takes the progress row's place while it is being changed, in
+   neutral ink rather than the accent, as on the card. */
+#level-fill { --vol: 0; }
+.progress { transition: opacity 0.15s; }
+/* `!important`: the list view's own `display: flex` would otherwise win. */
+.view[hidden] { display: none !important; }
+.view.main { position: relative; }
+.progress.volume {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.sheet.showing-volume .progress:not(.volume) { opacity: 0; pointer-events: none; }
+.sheet.showing-volume .progress.volume { opacity: 1; }
+.speaker { width: 16px; height: 16px; fill: currentColor; justify-self: start; }
+.progress.volume .track b { background: var(--fg); transform: scaleX(var(--vol)); }
 .track {
   height: 4px;
   border-radius: 2px;
@@ -301,3 +345,106 @@ html, body {
 /* ------------------------------------------------------------- nothing on */
 
 #strip.empty .record, #strip.empty .line { display: none; }
+
+/* ------------------------------------------------------------ list view */
+
+/* Playlists or the artists on the track, in the sheet's place: a fixed
+   height, so the sheet keeps one size however long the list. */
+.view.list { display: flex; flex-direction: column; height: 222px; }
+#strip.notched .view.list { height: 196px; }
+.list-head {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 0.5px solid var(--edge);
+}
+.back {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: 600 20px/1 var(--title-font);
+  padding: 0 0 2px;
+  border-radius: 6px;
+  height: 24px;
+}
+.back:hover { background: var(--faint); }
+.list-title {
+  font-family: var(--title-font);
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -10px;
+  padding: 4px 10px 2px;
+}
+.list-scroll::-webkit-scrollbar { width: 6px; }
+.list-scroll::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 3px; }
+.group {
+  padding: 10px 6px 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 6px 4px;
+}
+.section-name { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.play-all {
+  appearance: none;
+  border: 0.5px solid var(--edge);
+  background: var(--faint);
+  color: var(--fg);
+  font: 600 10.5px/1 -apple-system, sans-serif;
+  padding: 4px 9px;
+  border-radius: 999px;
+  flex: none;
+}
+.note { padding: 10px 6px; font-size: 11.5px; color: var(--dim); }
+.row {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  width: 100%;
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 8px;
+  text-align: left;
+  font: inherit;
+}
+.row:hover { background: var(--faint); }
+.row:disabled { opacity: 0.45; }
+.row.busy { opacity: 0.6; }
+.row .tile {
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--faint);
+  display: grid;
+  place-items: center;
+  color: var(--dim);
+}
+.row .tile svg { width: 16px; height: 16px; fill: currentColor; }
+.row .words { gap: 3px; }
+.row .t { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .s { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.current .t { color: var(--accent); }
