@@ -444,11 +444,13 @@ static KUGECI_PROMO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:official(?:\s+music)?\s+video|official\s+audio|official\s+lyrics?|music\s+video|lyrics?\s+video|official|audio|lyrics?|m/?v|hd|4k)\b").unwrap()
 });
 
+// Empty brackets left by promotional labels are immaterial to matching.
+static KUGECI_EMPTY_BRACKETS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(\s*\)|\[\s*\]|【\s*】").unwrap());
+
 fn kugeci_title(title: &str) -> String {
     let title = KUGECI_PROMO.replace_all(title, " ");
-    // Empty brackets left by promotional labels are immaterial to matching.
-    let empty_brackets = Regex::new(r"\(\s*\)|\[\s*\]|【\s*】").expect("static regex");
-    let title = empty_brackets.replace_all(&title, " ");
+    let title = KUGECI_EMPTY_BRACKETS.replace_all(&title, " ");
     WHITESPACE.replace_all(&title, " ").trim().to_string()
 }
 
@@ -472,12 +474,19 @@ fn kugeci_titles(title: &str) -> Vec<String> {
     titles
 }
 
+/// The keys a site title may match ours under. Computed once per search:
+/// every row of the results is checked against the same ones.
+fn kugeci_title_keys(title: &str) -> Vec<String> {
+    kugeci_titles(title).iter().map(|title| kugeci_key(title)).collect()
+}
+
 fn kugeci_title_matches(candidate: &str, title: &str) -> bool {
+    kugeci_title_matches_keys(candidate, &kugeci_title_keys(title))
+}
+
+fn kugeci_title_matches_keys(candidate: &str, wanted: &[String]) -> bool {
     let candidate = kugeci_key(&kugeci_title(candidate));
-    !candidate.is_empty()
-        && kugeci_titles(title)
-            .iter()
-            .any(|title| kugeci_key(title) == candidate)
+    !candidate.is_empty() && wanted.iter().any(|title| *title == candidate)
 }
 
 /// `artwork::fold`, plus 迴→回, which the site's titles use interchangeably.
@@ -515,26 +524,61 @@ fn kugeci_artists_match(credits: &[String], artist: &str) -> bool {
     if !KUGECI_ARTIST_SPLIT.is_match(artist) && !artist.chars().any(char::is_whitespace) {
         return false;
     }
-    let names = keys
+    let names: Vec<&str> = keys
         .iter()
         .filter(|key| !key.is_empty())
-        .map(|key| regex::escape(key))
-        .collect::<Vec<_>>()
-        .join("|");
+        .map(String::as_str)
+        .collect();
     if names.is_empty() {
         return false;
     }
     // Apply the one verified alias inside a collaboration too.
     let artist_key = artist_key.replace("华云龙kle", "华云龙");
-    let pattern = format!("^(?:{names})(?:(?:featuring|feat|with|and|ft|和|与|及)?(?:{names}))+$");
-    Regex::new(&pattern)
-        .expect("escaped artist names")
-        .is_match(&artist_key)
+    // The credit must be two or more of the site's names in a row, each
+    // after the first optionally introduced by a joiner, and nothing else.
+    // Tried every way, as the regex it replaces did, so one name being a
+    // prefix of another cannot hide a match; the strings are a few words.
+    fn spelled(rest: &str, names: &[&str], count: usize) -> bool {
+        const JOINERS: [&str; 8] = ["featuring", "feat", "with", "and", "ft", "和", "与", "及"];
+        if rest.is_empty() {
+            return count >= 2;
+        }
+        let after_joiner = (count >= 1)
+            .then(|| JOINERS.iter().filter_map(|joiner| rest.strip_prefix(joiner)))
+            .into_iter()
+            .flatten();
+        std::iter::once(rest).chain(after_joiner).any(|from| {
+            names
+                .iter()
+                .filter_map(|name| from.strip_prefix(name))
+                .any(|left| spelled(left, names, count + 1))
+        })
+    }
+    spelled(&artist_key, &names, 0)
 }
 
-fn select(selector: &str) -> scraper::Selector {
-    scraper::Selector::parse(selector).expect("static lyrics selector")
+/// The page's selectors, parsed once: a search page is walked row by row
+/// and cell by cell, and parsing a selector for each was most of the walk.
+struct Selectors {
+    rows: scraper::Selector,
+    cells: scraper::Selector,
+    links: scraper::Selector,
+    heading: scraper::Selector,
+    credits: scraper::Selector,
+    lyrics: scraper::Selector,
 }
+
+static SELECT: LazyLock<Selectors> = LazyLock::new(|| {
+    let select = |selector| scraper::Selector::parse(selector).expect("static lyrics selector");
+    Selectors {
+        rows: select("#tablesort tbody tr"),
+        cells: select("td"),
+        links: select("a"),
+        heading: select("main h1"),
+        credits: select(".song-details-container a"),
+        lyrics: select("#lyricsContainer"),
+    }
+});
 
 fn kugeci_song_path(href: &str) -> Option<String> {
     let path = href.strip_prefix(KUGECI_ENDPOINT).unwrap_or(href);
@@ -551,22 +595,23 @@ fn kugeci_candidates(html: &str, title: &str, artist: &str) -> Vec<String> {
     if title_key.is_empty() || artist_key.is_empty() {
         return Vec::new();
     }
+    let wanted = kugeci_title_keys(title);
     let mut paths = Vec::new();
-    for row in document.select(&select("#tablesort tbody tr")) {
-        let cells: Vec<_> = row.select(&select("td")).collect();
+    for row in document.select(&SELECT.rows) {
+        let cells: Vec<_> = row.select(&SELECT.cells).collect();
         let Some(link) = cells
             .get(1)
-            .and_then(|cell| cell.select(&select("a")).next())
+            .and_then(|cell| cell.select(&SELECT.links).next())
         else {
             continue;
         };
         let name = link.text().collect::<String>();
-        if !kugeci_title_matches(&name, title) {
+        if !kugeci_title_matches_keys(&name, &wanted) {
             continue;
         }
         let matches_artist = cells.get(2).is_some_and(|cell| {
             let credits = cell
-                .select(&select("a"))
+                .select(&SELECT.links)
                 .map(|link| link.text().collect::<String>())
                 .collect::<Vec<_>>();
             kugeci_artists_match(&credits, artist)
@@ -585,7 +630,7 @@ fn kugeci_candidates(html: &str, title: &str, artist: &str) -> Vec<String> {
 fn shape_kugeci(html: &str, title: &str, artist: &str, duration: f64) -> Option<Lyrics> {
     let document = scraper::Html::parse_document(html);
     let name = document
-        .select(&select("main h1"))
+        .select(&SELECT.heading)
         .next()?
         .text()
         .collect::<String>();
@@ -593,7 +638,7 @@ fn shape_kugeci(html: &str, title: &str, artist: &str, duration: f64) -> Option<
         return None;
     }
     let credits: Vec<_> = document
-        .select(&select(".song-details-container a"))
+        .select(&SELECT.credits)
         .filter(|link| {
             link.value().attr("href").is_some_and(|href| {
                 href.strip_prefix(KUGECI_ENDPOINT)
@@ -614,7 +659,7 @@ fn shape_kugeci(html: &str, title: &str, artist: &str, duration: f64) -> Option<
     if !kugeci_artists_match(&credits, artist) {
         return None;
     }
-    let container = document.select(&select("#lyricsContainer")).next()?;
+    let container = document.select(&SELECT.lyrics).next()?;
     let mut lrc = String::new();
     for node in container.descendants() {
         match node.value() {
