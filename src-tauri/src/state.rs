@@ -1487,6 +1487,16 @@ impl Core {
         }
     }
 
+    /// What the slider should show for a volume the server reported: our own
+    /// value while its echo is still due, otherwise the report mapped back
+    /// through the learned curve. Every reported volume goes through here.
+    fn slider_level(&self, reported: Option<f64>) -> Option<f64> {
+        let calibration = self.volume.lock().expect("volume lock");
+        calibration
+            .own_echo()
+            .or_else(|| reported.map(|value| calibration.reported_to_slider(value)))
+    }
+
     async fn refresh_all_once(self: &Arc<Self>, force: bool) {
         let started = Instant::now();
         let track = self.cover_token.load(Ordering::SeqCst);
@@ -1523,12 +1533,7 @@ impl Core {
             .as_ref()
             .and_then(|value| value.get("isMuted").and_then(Value::as_bool));
 
-        let level = {
-            let calibration = self.volume.lock().expect("volume lock");
-            calibration
-                .own_echo()
-                .or_else(|| reported.map(|value| calibration.reported_to_slider(value)))
-        };
+        let level = self.slider_level(reported);
 
         self.update_remote(|state| {
             if let Some(shuffle) = shuffle {
@@ -1614,7 +1619,10 @@ impl Core {
         match kind {
             "PLAYER_INFO" => {
                 self.apply_song(msg.get("song"));
-                let volume = number("volume");
+                // Through the calibration like every other reported volume,
+                // or the slider snaps to the raw gain on each reconnect and
+                // only `refresh_all` puts it back.
+                let volume = self.slider_level(number("volume"));
                 // The server starts from `NONE` until the player reports a
                 // mode, so only a mode it could not have defaulted to is taken
                 // as an answer; `refresh_all`'s `/repeat-mode` settles the rest
