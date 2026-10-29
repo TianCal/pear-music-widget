@@ -31,9 +31,14 @@ const setText = (name, text) =>
     if (el.textContent !== text) el.textContent = text;
   });
 
+// Same shape as the card's `formatTime`: an hour-long local file reads
+// 1:01:40 there, so it must not read 61:40 here.
 const fmt = (seconds) => {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 };
 
 function position() {
