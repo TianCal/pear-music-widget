@@ -855,8 +855,24 @@ async fn fetch_kugeci(
 /// may have the same song with timings. Only a synced result displaces the
 /// block; nothing at all leaves the block in place.
 pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics> {
+    fetch_lyrics_traced(http, song).await.0
+}
+
+/// Where `fetch_lyrics_traced` found its answer. A miss from `Network` was
+/// just made and may be a provider failing; one from `Memory` or `Disk` has
+/// already been given its retry and is not worth another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Memory,
+    Disk,
+    Network,
+}
+
+/// `fetch_lyrics`, saying where the answer came from. A track with no id
+/// has nothing to look up and reads as `Memory`: not an answer to retry.
+pub async fn fetch_lyrics_traced(http: &reqwest::Client, song: &Song) -> (Option<Lyrics>, Origin) {
     if song.video_id.is_empty() {
-        return None;
+        return (None, Origin::Memory);
     }
     if let Some(hit) = CACHE
         .lock()
@@ -865,7 +881,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         .get(&song.video_id)
         .cloned()
     {
-        return hit;
+        return (hit, Origin::Memory);
     }
 
     // Disk before network, and a disk hit is promoted into memory so the panel
@@ -879,7 +895,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
         .flatten();
     if let Some(hit) = on_disk {
         remember(&song.video_id, &hit);
-        return hit;
+        return (hit, Origin::Disk);
     }
 
     let result = if song.video_id.starts_with(crate::local::ID_PREFIX) {
@@ -896,7 +912,7 @@ pub async fn fetch_lyrics(http: &reqwest::Client, song: &Song) -> Option<Lyrics>
     let (id, stored) = (song.video_id.clone(), result.clone());
     let _ = tauri::async_runtime::spawn_blocking(move || lyrics_cache::store(&id, &stored)).await;
 
-    result
+    (result, Origin::Network)
 }
 
 /// A YouTube Music track: its own lyrics first, then LRCLib, then Kugeci.

@@ -401,11 +401,14 @@ async fn chorus_for(sorter: &Arc<Sorter>, track: &Track) -> Chorus {
         return found.clone();
     }
     let song = sorter.song(track);
-    let mut lyrics = crate::lyrics::fetch_lyrics(&sorter.http, &song).await;
-    if lyrics.is_none() {
+    let (mut lyrics, origin) = crate::lyrics::fetch_lyrics_traced(&sorter.http, &song).await;
+    if lyrics.is_none() && origin == crate::lyrics::Origin::Network {
         // The lookup caches a provider that failed (a timeout, a refusal) as
-        // a miss for a week. Ask once more before believing it.
-        crate::lyrics::forget_miss(&track.id);
+        // a miss for a week. Ask once more before believing it — but only a
+        // miss made just now: one read back from the cache had its retry
+        // when it was made, and waiting 3 s on it again gains nothing.
+        let id = track.id.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || crate::lyrics::forget_miss(&id)).await;
         tokio::time::sleep(RETRY_AFTER).await;
         lyrics = crate::lyrics::fetch_lyrics(&sorter.http, &song).await;
     }
