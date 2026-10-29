@@ -7,7 +7,6 @@ description = "A floating now-playing widget and menu-bar player for macOS"
 authors = ["litian"]
 
 [dependencies]
-anyhow = "1"
 base64 = "0.23"
 canto-hk-g2p-core = { path = "vendor/canto-hk-g2p-core" }
 # Traditional → Simplified for the lyrics panel. Phrase-aware rather than a

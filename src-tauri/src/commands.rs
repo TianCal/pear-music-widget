@@ -662,7 +662,6 @@ async fn insert_and_jump(core: &Arc<Core>, video_id: &str) -> Value {
 /// original where it was: the queue behind the new position is untouched, so the
 /// list you just clicked comes back looking identical and the track you picked
 /// is still sitting in it.
-#[tauri::command]
 pub async fn play_queued(app: AppHandle, video_id: String) -> Value {
     if video_id.is_empty() {
         return json!({ "ok": false });
@@ -792,7 +791,6 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> A
         let art = crate::local::Local::queue_art(&core, wanted, size)
             .await
             .into_iter()
-            .map(|(id, art)| (id, SharedStr(art)))
             .collect();
         return ArtReply { ok: true, art };
     }
@@ -806,7 +804,7 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> A
             let core = Arc::clone(&core);
             async move {
                 let art = core.api.fetch_cover(Some(&src), size).await?;
-                Some((id, SharedStr(art)))
+                Some((id, art))
             }
         })
         .buffer_unordered(QUEUE_ART_CONCURRENCY)
@@ -823,17 +821,7 @@ pub async fn queue_art(app: AppHandle, ids: Vec<String>, size: Option<u32>) -> A
 #[derive(serde::Serialize)]
 pub struct ArtReply {
     ok: bool,
-    art: std::collections::BTreeMap<String, SharedStr>,
-}
-
-/// An `Arc<str>` that serialises as the string it holds (serde's `rc` feature
-/// is not enabled).
-pub struct SharedStr(Arc<str>);
-
-impl serde::Serialize for SharedStr {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
+    art: std::collections::BTreeMap<String, Arc<str>>,
 }
 
 /// Jump to a queue slot the caller can see.

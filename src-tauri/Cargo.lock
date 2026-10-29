@@ -2935,7 +2935,6 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "pear-music-widget"
 version = "1.12.1"
 dependencies = [
- "anyhow",
  "base64 0.23.0",
  "canto-hk-g2p-core",
  "fast2s",
