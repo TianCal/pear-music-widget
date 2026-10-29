@@ -617,7 +617,11 @@ writes a dated tombstone so the merge cannot bring it back. Every save tries
 the drive first and retires the fallback once the drive accepts a write. A
 drive file that exists but will not parse is never overwritten. Writes are
 temp file + `sync_all` + rename, and happen outside the session lock
-(`Likes::set` returns a `Save`). Entries are keyed by relative path,
+(`Likes::set` returns a `Save`). The player and Sort Songs each write from
+their own copy, so `Save::write` re-reads both files and merges them into the
+snapshot before writing; a key only the file holds is kept when it is newer
+than the orphan cutoff (the other writer's), not when it is an orphan the
+snapshot pruned. `at` is milliseconds; files written in seconds read as such. Entries are keyed by relative path,
 with a size/duration/title/artist fingerprint that re-links a renamed or moved
 file. States reuse YouTube Music's `LIKE`/`DISLIKE`/`INDIFFERENT`, so the
 heart, its right-click and the menus work unchanged. Pressing the current state

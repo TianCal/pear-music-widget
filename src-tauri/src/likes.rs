@@ -13,6 +13,11 @@
 //! is removed. A drive file that exists but cannot be read or parsed is never
 //! overwritten — saves go to the fallback until it is readable again.
 //!
+//! Two writers share these files — the player and the Sort Songs window — and
+//! each works from its own copy, so a save re-reads the files and merges them
+//! into what it is about to write rather than replacing them with its copy.
+//! `at` is in milliseconds; files written in seconds are read as such.
+//!
 //! Entries are keyed by path relative to the root, with a fingerprint (size,
 //! duration, title, artist) beside it. A file renamed or moved inside the folder
 //! loses its key but keeps its fingerprint, and `load` re-links it instead of
@@ -36,6 +41,9 @@ const VERSION: u32 = 1;
 /// Entries for files gone from the folder — deleted outside the app, or a
 /// tombstone — are kept this long in case the file comes back, then dropped.
 const ORPHAN_DAYS: u64 = 180;
+/// An `at` below this is in seconds (earlier builds wrote them so) and reads
+/// as milliseconds: ~1973 in milliseconds, ~5138 in seconds.
+const SECONDS_BELOW: u64 = 100_000_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -85,8 +93,15 @@ fn read(path: &Path) -> Read {
     match std::fs::read(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Read::Missing,
         Err(_) => Read::Broken,
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(file) => Read::Found(file),
+        Ok(bytes) => match serde_json::from_slice::<File>(&bytes) {
+            Ok(mut file) => {
+                for entry in file.tracks.values_mut() {
+                    if entry.at < SECONDS_BELOW {
+                        entry.at *= 1000;
+                    }
+                }
+                Read::Found(file)
+            }
             Err(_) => Read::Broken,
         },
     }
@@ -103,7 +118,7 @@ pub struct Likes {
 
 /// A pending write, produced under the session lock and performed outside it.
 pub struct Save {
-    json: Vec<u8>,
+    entries: BTreeMap<String, Entry>,
     drive: PathBuf,
     fallback: PathBuf,
     drive_broken: bool,
@@ -112,15 +127,46 @@ pub struct Save {
 impl Save {
     /// Drive first; on failure, or when the drive's file is broken, the
     /// fallback. A successful drive write retires the fallback, whose entries
-    /// were merged in at load. Blocking IO.
+    /// are merged in here. Blocking IO.
+    ///
+    /// The files are re-read first: the other writer (the sorter beside the
+    /// player, or the reverse) may have saved since this snapshot was taken,
+    /// and a plain replace would drop its rating. Newest `at` wins per key; a
+    /// key only the file has is kept when it is recent (the other writer's),
+    /// not when it is an orphan this snapshot pruned.
     pub fn write(self) {
-        if !self.drive_broken && write_atomic(&self.drive, &self.json).is_ok() {
+        let json = self.json();
+        if !self.drive_broken && write_atomic(&self.drive, &json).is_ok() {
             let _ = std::fs::remove_file(&self.fallback);
             return;
         }
-        if let Err(err) = write_atomic(&self.fallback, &self.json) {
+        if let Err(err) = write_atomic(&self.fallback, &json) {
             eprintln!("likes: cannot save ratings: {err}");
         }
+    }
+
+    /// The bytes to write: this snapshot with what the files hold merged in.
+    fn json(&self) -> Vec<u8> {
+        let mut tracks = self.entries.clone();
+        let cutoff = orphan_cutoff();
+        for path in [&self.drive, &self.fallback] {
+            if let Read::Found(file) = read(path) {
+                for (key, entry) in file.tracks {
+                    match tracks.get(&key) {
+                        Some(held) if held.at >= entry.at => {}
+                        Some(_) => {
+                            tracks.insert(key, entry);
+                        }
+                        None if entry.at >= cutoff => {
+                            tracks.insert(key, entry);
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        let file = File { version: VERSION, tracks };
+        serde_json::to_vec_pretty(&file).unwrap_or_default()
     }
 }
 
@@ -136,11 +182,17 @@ fn fallback_file(root: &Path) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
+/// Milliseconds since the epoch.
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Orphans older than this are dropped.
+fn orphan_cutoff() -> u64 {
+    now().saturating_sub(ORPHAN_DAYS * 24 * 60 * 60 * 1000)
 }
 
 fn relative(root: &Path, track: &Track) -> Option<String> {
@@ -231,7 +283,7 @@ impl Likes {
             }
         }
 
-        let cutoff = now().saturating_sub(ORPHAN_DAYS * 24 * 60 * 60);
+        let cutoff = orphan_cutoff();
         let before = self.entries.len();
         self.entries.retain(|key, entry| present.contains(key.as_str()) || entry.at >= cutoff);
         let pruned = self.entries.len() != before;
@@ -297,12 +349,8 @@ impl Likes {
     }
 
     fn save(&self) -> Save {
-        let file = File {
-            version: VERSION,
-            tracks: self.entries.clone(),
-        };
         Save {
-            json: serde_json::to_vec_pretty(&file).unwrap_or_default(),
+            entries: self.entries.clone(),
             drive: drive_file(&self.root),
             fallback: fallback_file(&self.root),
             drive_broken: self.drive_broken,
@@ -401,7 +449,7 @@ mod tests {
 
         // The drive was away for this one: it only reached the fallback.
         let save = likes.set(&b, Some(Rating::Dislike)).unwrap();
-        write_atomic(&save.fallback, &save.json).unwrap();
+        write_atomic(&save.fallback, &save.json()).unwrap();
         let mut drive = read_file(&drive_file(&root.0));
         drive.tracks.remove("Album/b.flac");
         write_atomic(&drive_file(&root.0), &serde_json::to_vec(&drive).unwrap()).unwrap();
@@ -420,7 +468,7 @@ mod tests {
         let a = track(&root.0, "Album/a.flac", "A", 1);
         let mut likes = Likes::load(&root.0, std::slice::from_ref(&a));
         let liked = likes.set(&a, Some(Rating::Like)).unwrap();
-        let mut old = read_json(&liked.json);
+        let mut old = read_json(&liked.json());
         liked.write();
         // An older copy in the fallback still says LIKE.
         for entry in old.tracks.values_mut() {
@@ -430,6 +478,59 @@ mod tests {
         write_atomic(&fallback_file(&root.0), &serde_json::to_vec(&old).unwrap()).unwrap();
 
         assert_eq!(Likes::load(&root.0, &[a.clone()]).get(&a.id), None);
+    }
+
+    #[test]
+    fn two_writers_keep_each_others_ratings() {
+        let root = Scratch::new("writers");
+        let a = track(&root.0, "Album/a.flac", "A", 1);
+        let b = track(&root.0, "Album/b.flac", "B", 2);
+        // The player and the sorter each load their own copy…
+        let mut player = Likes::load(&root.0, &[a.clone(), b.clone()]);
+        let mut sorter = Likes::load(&root.0, &[a.clone(), b.clone()]);
+        // …the player rates one track, then the sorter, from its older copy,
+        // rates another. A plain replace would drop the player's rating.
+        rate(&mut player, &a, Some(Rating::Like));
+        rate(&mut sorter, &b, Some(Rating::Dislike));
+
+        let back = Likes::load(&root.0, &[a.clone(), b.clone()]);
+        assert_eq!(back.get(&a.id), Some(Rating::Like));
+        assert_eq!(back.get(&b.id), Some(Rating::Dislike));
+    }
+
+    #[test]
+    fn a_newer_tombstone_in_the_file_beats_a_stale_copy() {
+        let root = Scratch::new("stale-copy");
+        let a = track(&root.0, "Album/a.flac", "A", 1);
+        let mut player = Likes::load(&root.0, std::slice::from_ref(&a));
+        let mut sorter = Likes::load(&root.0, std::slice::from_ref(&a));
+        rate(&mut sorter, &a, Some(Rating::Like));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Cleared later in the player, then the sorter saves something else
+        // from its copy that still says LIKE.
+        rate(&mut player, &a, None);
+        let unrelated = track(&root.0, "Album/z.flac", "Z", 9);
+        rate(&mut sorter, &unrelated, Some(Rating::Like));
+
+        assert_eq!(Likes::load(&root.0, &[a.clone()]).get(&a.id), None);
+    }
+
+    #[test]
+    fn seconds_in_an_old_file_read_as_milliseconds() {
+        let root = Scratch::new("seconds");
+        let a = track(&root.0, "Album/a.flac", "A", 1);
+        let mut likes = Likes::load(&root.0, std::slice::from_ref(&a));
+        rate(&mut likes, &a, Some(Rating::Like));
+        let mut file = read_file(&drive_file(&root.0));
+        for entry in file.tracks.values_mut() {
+            entry.at /= 1000;
+        }
+        write_atomic(&drive_file(&root.0), &serde_json::to_vec(&file).unwrap()).unwrap();
+
+        // Not an ancient orphan: still liked, and still kept in the file.
+        let back = Likes::load(&root.0, &[]);
+        assert!(back.entries["Album/a.flac"].at >= SECONDS_BELOW);
+        assert_eq!(Likes::load(&root.0, &[a.clone()]).get(&a.id), Some(Rating::Like));
     }
 
     #[test]
