@@ -70,6 +70,7 @@ el.setupOpen.addEventListener('click', () => {
 // away closes the picker, whose art timer would otherwise keep running.
 window.widget.onOnScreen(({ label, shown }) => {
   if (IS_PANEL || label !== 'widget') return;
+  heardLive.add('onScreen');
   widgetOnScreen = shown;
   renderTurning();
   if (shown) {
@@ -114,6 +115,12 @@ const listening = [
 Promise.all(listening)
   .then(() => window.widget.getState())
   .then((boot) => {
+    // A widget built hidden (`showWidget` off) hears no `on-screen` until it
+    // is first shown, so it learns it is away here, before anything ticks.
+    if (!IS_PANEL && !heardLive.has('onScreen') && boot.onScreen === false) {
+      widgetOnScreen = false;
+      renderTurning();
+    }
     if (!heardLive.has('cover')) applyCover(boot.cover);
     if (!heardLive.has('queue')) applyQueue(boot.queue);
     if (!heardLive.has('lyrics')) applyLyrics(boot.lyrics);

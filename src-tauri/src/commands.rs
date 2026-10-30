@@ -144,8 +144,8 @@ fn playing_id(core: &Core) -> Option<String> {
 /// on four separate events afterwards, but a window loading from cold needs all
 /// four before it can draw anything.
 #[tauri::command]
-pub fn widget_state(app: AppHandle) -> Bootstrap {
-    core(&app).bootstrap()
+pub fn widget_state(app: AppHandle, window: tauri::WebviewWindow) -> Bootstrap {
+    core(&app).bootstrap(window.label())
 }
 
 #[tauri::command]

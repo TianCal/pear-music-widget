@@ -17,7 +17,7 @@
 use std::ffi::{CStr, CString};
 
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{class, msg_send};
+use objc2::{class, msg_send, AnyThread, DefinedClass};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use tauri::{AppHandle, WebviewWindow};
 
@@ -337,6 +337,90 @@ pub fn confirm(
             apply();
         }
     });
+}
+
+objc2::define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and this does not
+    // implement `Drop`.
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[name = "PMWColourTarget"]
+    #[ivars = Box<dyn Fn(String)>]
+    struct ColourTarget;
+
+    impl ColourTarget {
+        #[unsafe(method(colourChanged:))]
+        fn colour_changed(&self, panel: *mut AnyObject) {
+            if let Some(hex) = unsafe { panel_hex(panel) } {
+                (self.ivars())(hex);
+            }
+        }
+    }
+);
+
+thread_local! {
+    /// The panel's target is weak, so whoever is listening is kept here
+    /// until the next `pick_colour` replaces it.
+    static COLOUR_TARGET: std::cell::RefCell<Option<objc2::rc::Retained<ColourTarget>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The shared Colours panel's colour as sRGB `#rrggbb`.
+unsafe fn panel_hex(panel: *mut AnyObject) -> Option<String> {
+    let colour: *mut AnyObject = msg_send![panel, color];
+    let space: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let srgb: *mut AnyObject = msg_send![colour, colorUsingColorSpace: space];
+    if srgb.is_null() {
+        return None;
+    }
+    let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (r, g, b): (f64, f64, f64) = (
+        msg_send![srgb, redComponent],
+        msg_send![srgb, greenComponent],
+        msg_send![srgb, blueComponent],
+    );
+    Some(format!("#{:02x}{:02x}{:02x}", channel(r), channel(g), channel(b)))
+}
+
+/// Open the system Colours panel, starting at `start` (`#rrggbb`), and call
+/// `apply` with every colour picked until the next `pick_colour`. It stays up
+/// when you click elsewhere, since the app is never the active one for long,
+/// and floats, so it is not lost behind the app you were in.
+pub fn pick_colour(app: &AppHandle, start: Option<String>, apply: impl Fn(String) + Send + 'static) {
+    let _ = app.run_on_main_thread(move || unsafe {
+        let target = ColourTarget::alloc().set_ivars(Box::new(apply) as Box<dyn Fn(String)>);
+        let target: objc2::rc::Retained<ColourTarget> = msg_send![super(target), init];
+
+        let panel: *mut AnyObject = msg_send![class!(NSColorPanel), sharedColorPanel];
+        let _: () = msg_send![panel, setShowsAlpha: false];
+        let _: () = msg_send![panel, setHidesOnDeactivate: false];
+        // NSFloatingWindowLevel.
+        let _: () = msg_send![panel, setLevel: 3isize];
+        // Before the target is set, so the starting colour is not sent back.
+        let _: () = msg_send![panel, setTarget: std::ptr::null_mut::<AnyObject>()];
+        if let Some((r, g, b)) = start.as_deref().and_then(parse_hex) {
+            let colour: *mut AnyObject = msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: r, green: g, blue: b, alpha: 1.0f64
+            ];
+            let _: () = msg_send![panel, setColor: colour];
+        }
+        let _: () = msg_send![panel, setTarget: &*target];
+        let _: () = msg_send![panel, setAction: objc2::sel!(colourChanged:)];
+        let _: () = msg_send![panel, setContinuous: true];
+        COLOUR_TARGET.with(|slot| *slot.borrow_mut() = Some(target));
+
+        // Brought up on its own, not by activating the app: activation brings
+        // every one of the app's windows forward, so a widget left behind
+        // other windows would come up with it. Clicking the panel activates
+        // the app for that window only.
+        let _: () = msg_send![panel, orderFrontRegardless];
+    });
+}
+
+fn parse_hex(hex: &str) -> Option<(f64, f64, f64)> {
+    let hex = hex.strip_prefix('#')?;
+    let byte = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok().map(|v| v as f64 / 255.0);
+    Some((byte(0)?, byte(2)?, byte(4)?))
 }
 
 /// An accessory app's alert otherwise opens behind whatever is frontmost.

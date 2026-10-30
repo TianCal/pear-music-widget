@@ -528,8 +528,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if std::env::var("PMW_DEVTOOLS").is_ok() {
         window.open_devtools();
     }
-    let _ = window.show();
-    crate::on_screen(app, WIDGET, true);
+    // Left hidden, it stays hidden: the tray brings it back.
+    if store.get(|s| s.show_widget) {
+        let _ = window.show();
+        crate::on_screen(app, WIDGET, true);
+    }
 
     Ok(window)
 }
@@ -545,9 +548,11 @@ pub fn hide_window(app: &AppHandle, label: &str) {
 }
 
 /// "Hide widget" in the menus, the card's close button and the tray's
-/// checkbox all put the widget away the same way.
+/// checkbox all put the widget away the same way, and it stays away across a
+/// relaunch (`show_widget`).
 pub fn hide_widget(app: &AppHandle) {
     hide_window(app, WIDGET);
+    app.state::<Arc<Store>>().update_soon(|s| s.show_widget = false);
 }
 
 /// The shape the window should hold: the skin's, plus the height of whichever

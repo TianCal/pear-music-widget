@@ -251,6 +251,9 @@ pub struct PlayerState {
     /// Seconds of stillness before they fade; 0 keeps them up. Driven in the
     /// renderer, so — like `tint` — it travels as state.
     pub corners_autohide: f64,
+    /// The folded strip's text colour (`strip::valid_ink`). The strip paints it,
+    /// so — like `tint` — it travels as state.
+    pub strip_ink: String,
     pub song: Option<Song>,
     pub is_playing: bool,
     pub position: f64,
@@ -301,6 +304,7 @@ impl PlayerState {
             lyrics_offset,
             corners,
             corners_autohide,
+            strip_ink: "auto".to_string(),
             song: None,
             is_playing: false,
             position: 0.0,
@@ -326,6 +330,10 @@ pub struct Bootstrap {
     pub lyrics: LyricsView,
     /// The panel the widget was last left showing, for the renderer to reopen.
     pub panel: Option<String>,
+    /// Whether the asking window is on screen. The widget cannot tell from
+    /// `document.hidden`, and one built hidden (`showWidget` off) never gets
+    /// an `on-screen` event to say so.
+    pub on_screen: bool,
 }
 
 // ------------------------------------------------------------------- volume
@@ -615,6 +623,7 @@ impl Core {
         let corners = store.get(|s| s.corners.clone());
         // Hand-editable file, so clamp rather than trust.
         let corners_autohide = store.get(|s| s.corners_autohide.clamp(0.0, 60.0));
+        let strip_ink = crate::strip::ink_of(&store);
         let queue_wanted_by = match store.get(|s| s.panel.clone()).as_deref() {
             Some("queue") => HashSet::from([crate::window::WIDGET.to_string()]),
             _ => HashSet::new(),
@@ -623,15 +632,18 @@ impl Core {
             app,
             store,
             api,
-            player: Mutex::new(Arc::new(PlayerState::new(
-                skin,
-                panel_skin,
-                liquid_glass,
-                tint,
-                lyrics_offset,
-                corners,
-                corners_autohide,
-            ))),
+            player: Mutex::new(Arc::new(PlayerState {
+                strip_ink,
+                ..PlayerState::new(
+                    skin,
+                    panel_skin,
+                    liquid_glass,
+                    tint,
+                    lyrics_offset,
+                    corners,
+                    corners_autohide,
+                )
+            })),
             cover: Mutex::new(None),
             queue: Mutex::new(QueueView::empty()),
             lyrics: Mutex::new(LyricsView::idle()),
@@ -766,8 +778,9 @@ impl Core {
     }
 
     /// Everything a window needs to draw itself from cold.
-    pub fn bootstrap(&self) -> Bootstrap {
+    pub fn bootstrap(&self, label: &str) -> Bootstrap {
         Bootstrap {
+            on_screen: self.on_screen.lock().expect("screen lock").contains(label),
             state: self.snapshot(),
             cover: self.cover.lock().expect("cover lock").clone(),
             queue: self.queue.lock().expect("queue lock").clone(),
@@ -777,6 +790,10 @@ impl Core {
                 .get(|s| s.panel.clone())
                 .filter(|which| crate::window::panel_fits_skin(which, &crate::window::skin_of(&self.store))),
         }
+    }
+
+    pub fn has_cover(&self) -> bool {
+        self.cover.lock().expect("cover lock").is_some()
     }
 
     pub fn status(&self) -> Status {

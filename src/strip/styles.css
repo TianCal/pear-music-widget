@@ -83,6 +83,8 @@ html, body {
   gap: 6px;
   padding: 0 10px;
   white-space: nowrap;
+  /* Here rather than inherited, so the Text colour rules below take. */
+  color: var(--fg);
   transition: opacity 0.15s ease-out, translate 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 /* Open, the bar's words give way to the sheet's. */
@@ -127,6 +129,19 @@ html, body {
   font-size: var(--artist-size);
 }
 .dash { color: var(--dim); }
+/* Text colour (`stripInk`): the menu bar's own words follow the wallpaper,
+   not the appearance, so the bar can be told which to match. Only the folded
+   bar's words: the hairline keeps the cover's tint, and the sheet keeps its
+   own colours on its own background. */
+#strip[data-ink="picked"] .bar {
+  --fg: var(--ink);
+  --dim: color-mix(in srgb, var(--ink) 70%, transparent);
+}
+#strip[data-ink="cover"] .bar {
+  --fg: var(--accent);
+  --dim: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
 /* An artist that would need an ellipsis is left out rather than cut. */
 .bar.solo .artist, .bar.solo .dash { display: none; }
 

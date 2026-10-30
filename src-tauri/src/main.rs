@@ -200,7 +200,11 @@ fn on_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
                 return;
             }
             api.prevent_close();
-            window::hide_window(app, label);
+            if label == WIDGET {
+                window::hide_widget(app);
+            } else {
+                window::hide_window(app, label);
+            }
         }
 
         // A dropdown that stays up after you click elsewhere is not a dropdown.
@@ -294,6 +298,9 @@ fn main() {
             if let Some(window) = app.get_webview_window(WIDGET) {
                 let _ = window.show();
                 on_screen(app, WIDGET, true);
+                if let Some(store) = app.try_state::<Arc<Store>>() {
+                    store.update_soon(|s| s.show_widget = true);
+                }
             }
         }))
         .plugin(tauri_plugin_autostart::init(

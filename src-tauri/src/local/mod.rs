@@ -746,7 +746,7 @@ impl Local {
             return;
         };
         crate::artwork::forget_misses(&Self::wanted(core, &track));
-        if core.bootstrap().cover.is_none() {
+        if !core.has_cover() {
             self.fetch_cover(core, track);
         }
     }

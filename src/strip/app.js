@@ -27,6 +27,8 @@ let queue = { items: [], current: null };
  *  Read with `peek`, so insertion order stays the eviction order. */
 const thumbs = window.shared.artCache();
 
+let lastInk = '';
+
 let posBase = 0;
 let posAt = performance.now();
 
@@ -113,6 +115,16 @@ function render() {
   const song = state?.song;
   root.classList.toggle('playing', !!state?.isPlaying);
   root.classList.toggle('empty', !song);
+  // The folded bar's text colour (Text colour in the right-click menu):
+  // `auto`, `cover`, or a picked `#rrggbb`.
+  const ink = state?.stripInk || 'auto';
+  if (lastInk !== ink) {
+    lastInk = ink;
+    const picked = ink.startsWith('#');
+    root.dataset.ink = picked ? 'picked' : ink;
+    if (picked) root.style.setProperty('--ink', ink);
+    else root.style.removeProperty('--ink');
+  }
 
   const idle = state?.status === 'offline' ? 'Music is not running' : 'Nothing playing';
   setText('title', song?.title || idle);

@@ -134,6 +134,18 @@ where
     })
 }
 
+/// A hand edit that is not a string reads as Automatic rather than setting the
+/// whole file aside.
+fn ink_from_file<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(de)? {
+        serde_json::Value::String(ink) => Some(ink),
+        _ => None,
+    })
+}
+
 fn default_host() -> String {
     "127.0.0.1".into()
 }
@@ -147,6 +159,9 @@ fn default_skin() -> String {
     "stack".into()
 }
 fn default_always_on_top() -> bool {
+    true
+}
+fn default_show_widget() -> bool {
     true
 }
 fn default_opacity() -> f64 {
@@ -189,6 +204,14 @@ pub struct Settings {
     /// Whether the strip at the top centre of the menu bar is up.
     #[serde(rename = "menuBarStrip", default, deserialize_with = "strip_from_file")]
     pub menu_bar_strip: bool,
+    /// The folded strip's text colour: `auto`, `cover` or `#rrggbb` (see
+    /// `strip::valid_ink`); Automatic when missing or unknown.
+    #[serde(rename = "stripInk", default, deserialize_with = "ink_from_file")]
+    pub strip_ink: Option<String>,
+    /// Whether the floating widget was left showing, so hiding it lasts
+    /// across a relaunch.
+    #[serde(rename = "showWidget", default = "default_show_widget")]
+    pub show_widget: bool,
     #[serde(rename = "alwaysOnTop", default = "default_always_on_top")]
     pub always_on_top: bool,
     #[serde(default = "default_opacity")]
@@ -288,6 +311,8 @@ impl Default for Settings {
             skin: default_skin(),
             panel_skin: default_skin(),
             menu_bar_strip: false,
+            show_widget: default_show_widget(),
+            strip_ink: None,
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
             liquid_glass: default_liquid_glass(),
@@ -559,6 +584,18 @@ mod tests {
         assert!(!read(r#"{ "menuBarStrip": "off" }"#));
         assert!(!read(r#"{ "menuBarStrip": 3 }"#));
         assert!(!read("{}"));
+    }
+
+    /// A `stripInk` that is not a string reads as unset, and a missing
+    /// `showWidget` as shown, rather than setting the file aside.
+    #[test]
+    fn reads_strip_ink_and_show_widget_leniently() {
+        let read = |text: &str| serde_json::from_str::<Settings>(text).expect("parses");
+        assert_eq!(read(r##"{ "stripInk": "#ff0000" }"##).strip_ink.as_deref(), Some("#ff0000"));
+        assert_eq!(read(r#"{ "stripInk": 1 }"#).strip_ink, None);
+        assert_eq!(read(r#"{ "stripInk": {} }"#).strip_ink, None);
+        assert!(read("{}").show_widget);
+        assert!(!read(r#"{ "showWidget": false }"#).show_widget);
     }
 
     /// A settings file that fails to parse is silently replaced by the defaults

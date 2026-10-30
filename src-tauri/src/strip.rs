@@ -26,6 +26,45 @@ use crate::store::Store;
 
 pub const LABEL: &str = "strip";
 
+/// The colour of the folded bar's words (`stripInk`): `auto` (follows the
+/// appearance), `cover` (the cover's accent), or a `#rrggbb` picked in the
+/// system Colours panel. The menu bar's own text follows the wallpaper rather
+/// than the appearance, so Automatic can come out unreadable over it.
+pub fn valid_ink(ink: &str) -> bool {
+    matches!(ink, "auto" | "cover")
+        || (ink.len() == 7
+            && ink.starts_with('#')
+            && ink[1..].chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The stored ink, or Automatic for anything else: the file is hand-editable.
+pub fn ink_of(store: &Store) -> String {
+    store.get(|s| match s.strip_ink.as_deref() {
+        Some(ink) if valid_ink(ink) => ink.to_ascii_lowercase(),
+        _ => "auto".to_string(),
+    })
+}
+
+pub fn set_ink(app: &AppHandle, ink: &str) {
+    if !valid_ink(ink) {
+        return;
+    }
+    let ink = ink.to_ascii_lowercase();
+    app.state::<Arc<Store>>().update_soon(|s| s.strip_ink = Some(ink.clone()));
+    // The strip paints it, so it travels as state, like `tint`.
+    app.state::<Arc<Core>>().update(|state| state.strip_ink = ink.clone());
+}
+
+/// Text colour → Choose colour…: the system Colours panel, starting from the
+/// current custom colour. Each change applies at once, so the bar follows
+/// the wheel while it is dragged.
+pub fn choose_ink(app: &AppHandle) {
+    let current = ink_of(&app.state::<Arc<Store>>());
+    let start = current.starts_with('#').then_some(current);
+    let handle = app.clone();
+    macos::pick_colour(app, start, move |hex| set_ink(&handle, &hex));
+}
+
 /// `NSStatusWindowLevel`: over the menu bar (24), under the menus it opens.
 const LEVEL_STATUS: isize = 25;
 
@@ -410,4 +449,19 @@ pub fn strip_menu(app: AppHandle) {
         let _ = window.popup_menu(&menu);
         strip.menu_open.store(false, Ordering::SeqCst);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_ink;
+
+    #[test]
+    fn inks_are_auto_cover_or_a_hex_colour() {
+        for ink in ["auto", "cover", "#ffffff", "#1A2b3C"] {
+            assert!(valid_ink(ink), "{ink}");
+        }
+        for ink in ["", "white", "#fff", "#gggggg", "ffffff", "#1234567", "#ééé"] {
+            assert!(!valid_ink(ink), "{ink}");
+        }
+    }
 }

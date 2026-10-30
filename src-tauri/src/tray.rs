@@ -301,6 +301,25 @@ fn tint_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::W
     Submenu::with_items(app, "Cover tint", true, &refs(&items))
 }
 
+/// The folded strip's words: see `strip::valid_ink`. Choose colour… is
+/// ticked while a colour picked there is in use.
+fn strip_ink_submenu(app: &AppHandle, current: &str) -> tauri::Result<Submenu<tauri::Wry>> {
+    let check = |id: &str, label: &str, on: bool| {
+        CheckMenuItem::with_id(app, format!("stripInk:{id}"), label, true, on, None::<&str>)
+    };
+    Submenu::with_items(
+        app,
+        "Text colour",
+        true,
+        &[
+            &check("auto", "Automatic", current == "auto")?,
+            &check("cover", "Cover colour", current == "cover")?,
+            &PredefinedMenuItem::separator(app)?,
+            &check("choose", "Choose colour…", current.starts_with('#'))?,
+        ],
+    )
+}
+
 /// Global default for tracks without a Song Time override.
 fn lyric_offset_submenu(app: &AppHandle, current: f64) -> tauri::Result<Submenu<tauri::Wry>> {
     let selected = (current * 1000.0).round() as i32;
@@ -918,7 +937,9 @@ pub fn build_widget_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// surfaces. The widget's own look (skin, corners) is the widget's menu's.
 pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let [like, dislike] = rating_items(app)?;
-    let tint = app.state::<Arc<Store>>().get(|s| s.tint);
+    let store = app.state::<Arc<Store>>();
+    let tint = store.get(|s| s.tint);
+    let ink = crate::strip::ink_of(&store);
     let widget = app.get_webview_window(WIDGET);
     let widget_visible = widget.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
 
@@ -930,6 +951,7 @@ pub fn build_strip_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &source_submenu(app)?,
             &tint_submenu(app, tint)?,
+            &strip_ink_submenu(app, &ink)?,
             &PredefinedMenuItem::separator(app)?,
             &show_widget_item(app, widget.is_some(), widget_visible)?,
             &MenuItem::with_id(app, "menuBarStrip", "Hide from menu bar", true, None::<&str>)?,
@@ -1029,6 +1051,7 @@ pub fn show_widget(app: &AppHandle) {
     let Some(widget) = app.get_webview_window(WIDGET) else {
         return;
     };
+    app.state::<Arc<Store>>().update_soon(|s| s.show_widget = true);
     if !widget.is_visible().unwrap_or(false) {
         let _ = widget.show();
         // The pollers stand down while nothing is on screen, so a widget coming
@@ -1233,7 +1256,7 @@ fn handle_source(app: &AppHandle, store: &Arc<Store>, id: &str) {
     }
 }
 
-/// Parameterised items: `corner:`, `opacity:`, `tint:`, `lyricsOffset:`,
+/// Parameterised items: `corner:`, `opacity:`, `tint:`, `stripInk:`, `lyricsOffset:`,
 /// `songTime:`, `lyricsCache:`, `cornerFade:` and `artistName:`.
 fn handle_setting(app: &AppHandle, store: &Arc<Store>, widget: Option<&tauri::WebviewWindow>, other: &str) {
     if let Some(from) = other.strip_prefix("artistName:") {
@@ -1287,6 +1310,12 @@ fn handle_setting(app: &AppHandle, store: &Arc<Store>, widget: Option<&tauri::We
             // The wash is mixed in the renderer, so the strength has to
             // reach it like any other piece of state.
             app.state::<Arc<Core>>().update(|state| state.tint = tint);
+        }
+    } else if let Some(ink) = other.strip_prefix("stripInk:") {
+        if ink == "choose" {
+            crate::strip::choose_ink(app);
+        } else {
+            crate::strip::set_ink(app, ink);
         }
     } else if let Some(ms) = other.strip_prefix("lyricsOffset:") {
         if let Ok(ms) = ms.parse::<f64>() {

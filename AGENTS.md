@@ -163,7 +163,9 @@ surfaces on screen (`emit_to`); while nothing shows, queue/lyrics refreshes
 only mark themselves stale. Coming on screen emits the latest snapshot to that
 surface and runs the stale refreshes. The
 widget learns its own visibility from the `on-screen` event, since its
-`document.hidden` is always true. A superseded lyrics lookup is dropped at its
+`document.hidden` is always true; a widget built hidden (`showWidget` off,
+which every hide and show path writes) learns it from `widget_state`'s
+`onScreen` instead, as it hears no event until it is first shown. A superseded lyrics lookup is dropped at its
 next await (it caches nothing). Settings writes from the main thread or an
 async worker use `Store::update_soon`: the edit applies at once, and one
 background writer per burst (a `dirty` flag; the writer goes round again
@@ -517,6 +519,12 @@ markup.
   the three washes behind the open sheet come from the same algorithm and
   the same Cover tint setting as the widget and dropdown, and are redone when
   `state.tint` changes. The washes are painted once per cover, never animated.
+  The folded bar's words take **Text colour** from the strip's menu
+  (`stripInk`: `auto`, `cover`, or a `#rrggbb` from the system Colours panel
+  via `macos::pick_colour`; `strip::valid_ink`), carried on `state`
+  and applied as `data-ink` on `#strip`. It recolours only the words in
+  `.bar` (the hairline keeps the cover's tint), since the menu bar's own text
+  follows the wallpaper, not the appearance.
 - **Right-click menu.** `strip_menu` pops `tray::build_strip_menu` (which
   carries Cover tint) under the
   pointer. It is modal, so `menu_open` makes the watcher stand down while it
