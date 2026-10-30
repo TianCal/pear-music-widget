@@ -20,7 +20,7 @@
 //! rows is asked for by id, for the rows a surface is actually showing, and
 //! comes back in a command reply — see `commands::queue_art`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -336,6 +336,36 @@ pub struct Bootstrap {
     pub on_screen: bool,
 }
 
+/// How often a surface in `slow_ticks` hears steady play move the position.
+/// Position arrives about once a second, so this lets every other one through.
+const SLOW_TICK: Duration = Duration::from_millis(1500);
+/// The most a position tick moves forward in steady play, in seconds; a
+/// longer step is a seek.
+const STEADY_STEP: f64 = 2.0;
+
+/// Whether `next` is a tick of steady play after `held`: only the position
+/// moved, forward by about what a second of playing takes it. A seek, or
+/// anything while paused, is not one, so `slow_ticks` never holds it back.
+/// `next` is borrowed mutably to compare without a clone, and left as it was.
+fn steady_tick(held: &PlayerState, next: &mut PlayerState) -> bool {
+    let step = next.position - held.position;
+    next.is_playing && step > 0.0 && step <= STEADY_STEP && {
+        let moved = next.position;
+        next.position = held.position;
+        let same = next == held;
+        next.position = moved;
+        same
+    }
+}
+
+/// A `slow_ticks` surface: when it last heard `state`, and whether a tick has
+/// been held back since.
+#[derive(Default)]
+struct SlowTick {
+    heard: Option<Instant>,
+    dropped: bool,
+}
+
 // ------------------------------------------------------------------- volume
 
 /// YouTube Music applies its own curve between the volume we POST and the
@@ -582,6 +612,12 @@ pub struct Core {
     /// per-second `state` push is not emitted and the queue and lyrics are not
     /// fetched; showing a surface catches it up. See `set_on_screen`.
     on_screen: Mutex<HashSet<String>>,
+    /// Surfaces that hear a steady-play tick (`update`'s `steady`) at most
+    /// every `SLOW_TICK`: the folded strip, whose hairline moves no more often
+    /// than that. Every push is a script WebKit runs and then redraws for,
+    /// which starts the display link in this process even when nothing on the
+    /// page changed.
+    slow_ticks: Mutex<HashMap<String, SlowTick>>,
     cover_token: AtomicU64,
     /// Bumped by each shuffle change; see `refresh_queue_after_reorder`.
     reorder_token: AtomicU64,
@@ -606,6 +642,14 @@ pub struct Core {
     /// player plays and not at all while it is paused, which is what lets the
     /// play-state poller tell when the glyph is likely to be wrong.
     position_at: Mutex<Option<Instant>>,
+}
+
+/// The `state` event as one surface hears it: `state:<label>`. Tauri runs an
+/// event's script in every page listening for that name, even when `emit_to`
+/// targets another, so a shared name had the hidden widget and dropdown parse
+/// and redraw the strip's state every second.
+pub fn state_event(label: &str) -> String {
+    format!("state:{label}")
 }
 
 impl Core {
@@ -658,6 +702,7 @@ impl Core {
             // being an empty list corrected a round trip later.
             queue_demand: Demand::new(queue_wanted_by),
             on_screen: Mutex::new(HashSet::new()),
+            slow_ticks: Mutex::new(HashMap::new()),
             cover_token: AtomicU64::new(0),
             reorder_token: AtomicU64::new(0),
             lyrics_superseded: tokio::sync::Notify::new(),
@@ -676,10 +721,11 @@ impl Core {
         age(&self.position_at)
     }
 
-    /// Push `state` to the surfaces on screen only. A hidden webview would
-    /// still have Tauri format and evaluate the payload once a second for
-    /// nobody; `set_on_screen` hands one the latest as it comes back.
-    fn emit_state(&self, state: &PlayerState) {
+    /// Push `state` to the surfaces on screen only, each under its own name
+    /// (`state_event`). A hidden webview would still have Tauri format and
+    /// evaluate the payload once a second for nobody; `set_on_screen` hands
+    /// one the latest as it comes back.
+    fn emit_state(&self, state: &PlayerState, steady: bool) {
         let labels: Vec<String> = self
             .on_screen
             .lock()
@@ -688,7 +734,41 @@ impl Core {
             .cloned()
             .collect();
         for label in labels {
-            let _ = self.app.emit_to(label.as_str(), "state", state);
+            if !self.tick_due(&label, steady) {
+                continue;
+            }
+            let _ = self.app.emit_to(label.as_str(), &state_event(&label), state);
+        }
+    }
+
+    /// Whether `label` hears this push, stamping it if so (`slow_ticks`).
+    fn tick_due(&self, label: &str, steady: bool) -> bool {
+        let mut slow = self.slow_ticks.lock().expect("ticks lock");
+        let Some(tick) = slow.get_mut(label) else {
+            return true;
+        };
+        if steady && tick.heard.is_some_and(|at| at.elapsed() < SLOW_TICK) {
+            tick.dropped = true;
+            return false;
+        }
+        *tick = SlowTick { heard: Some(Instant::now()), dropped: false };
+        true
+    }
+
+    /// Whether `label` hears steady-play ticks every second or only every
+    /// `SLOW_TICK`. Back to every second, it is sent a tick it missed.
+    pub fn set_slow_ticks(&self, label: &str, slow: bool) {
+        let missed = {
+            let mut ticks = self.slow_ticks.lock().expect("ticks lock");
+            if slow {
+                ticks.entry(label.to_string()).or_default();
+                false
+            } else {
+                ticks.remove(label).is_some_and(|tick| tick.dropped)
+            }
+        };
+        if missed && self.on_screen.lock().expect("screen lock").contains(label) {
+            let _ = self.app.emit_to(label, &state_event(label), &self.snapshot());
         }
     }
 
@@ -732,7 +812,7 @@ impl Core {
             return;
         }
         // This surface heard no `state` while it was hidden.
-        let _ = self.app.emit_to(label, "state", &self.snapshot());
+        let _ = self.app.emit_to(label, &state_event(label), &self.snapshot());
         let remote = !self.is_local() && self.status() == Status::Connected;
         let queue_old = remote
             && self
@@ -917,13 +997,14 @@ impl Core {
             if next == **player {
                 return None;
             }
+            let steady = steady_tick(&player, &mut next);
             let next = Arc::new(next);
             *player = Arc::clone(&next);
-            Some(next)
+            Some((next, steady))
         });
-        let Some(next) = next else { return };
+        let Some((next, steady)) = next else { return };
         // Nobody to draw it; `set_on_screen` sends the latest when one shows.
-        self.emit_state(&next);
+        self.emit_state(&next, steady);
     }
 
     /// `update` for writes that come from YouTube Music. Dropped once a folder
@@ -1410,6 +1491,34 @@ mod tests {
             ..Song::default()
         });
         state
+    }
+
+    #[test]
+    fn only_steady_play_counts_as_a_slow_tick() {
+        let mut held = playback_state();
+        held.is_playing = true;
+        held.position = 30.0;
+        let tick = |held: &PlayerState, patch: &dyn Fn(&mut PlayerState)| {
+            let mut next = held.clone();
+            patch(&mut next);
+            let before = next.clone();
+            let steady = steady_tick(held, &mut next);
+            assert_eq!(next, before, "left as it was");
+            steady
+        };
+        assert!(tick(&held, &|s| s.position = 31.0), "a second of play");
+        assert!(!tick(&held, &|s| s.position = 45.0), "a seek forward");
+        assert!(!tick(&held, &|s| s.position = 12.0), "a seek back");
+        assert!(!tick(&held, &|s| s.position = 30.0), "nothing moved");
+        assert!(!tick(&held, &|s| {
+            s.position = 31.0;
+            s.like = Some(Like::Like);
+        }), "something else changed too");
+        held.is_playing = false;
+        assert!(!tick(&held, &|s| {
+            s.is_playing = false;
+            s.position = 31.0;
+        }), "paused");
     }
 
     #[test]

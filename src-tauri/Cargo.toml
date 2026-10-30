@@ -31,8 +31,11 @@ image = { version = "0.25.9", default-features = false, features = ["jpeg", "png
 
 # Only the handful of AppKit calls Tauri does not wrap: aspect ratio, window
 # alpha, window level and collection behaviour. Raw `msg_send!` rather than the
-# typed objc2-app-kit bindings keeps the dependency surface to two crates.
+# typed objc2-app-kit bindings keeps the dependency surface small. `block2`
+# (already in the tree through Tauri) is for the event monitors and
+# notification observers, which take blocks.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 

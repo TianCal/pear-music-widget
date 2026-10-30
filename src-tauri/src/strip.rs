@@ -13,7 +13,7 @@
 //! part counts as hovering.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
@@ -72,19 +72,23 @@ const LEVEL_STATUS: isize = 25;
 /// open sheet with its shadow, so the window never has to grow.
 const WINDOW: (f64, f64) = (840.0, 300.0);
 
-/// How often the pointer is checked while it is near the top of the screen,
-/// and while it is further away. Off, the watcher parks.
+/// While the pointer moves, at most how often it is looked at near the top
+/// of the screen, and further away. A still pointer is not looked at: the
+/// watcher sleeps until macOS says it moved (`macos::watch_pointer`).
 const HOVER_NEAR: Duration = Duration::from_millis(40);
 const HOVER_FAR: Duration = Duration::from_millis(150);
 
-/// How often to look for a display change: a dock, an unplug, a new
-/// resolution, which move the menu bar or its notch.
-const DISPLAY_CHECK: Duration = Duration::from_secs(2);
-
-/// How often to look for a fullscreen app over the menu-bar display, and how
-/// often while in one with the pointer near the top or the menu bar down, so
-/// the strip comes and goes with the menu bar's own slide.
-const FULLSCREEN_CHECK: Duration = Duration::from_secs(1);
+/// After a Space change, another app coming forward or a display change
+/// (`macos::watch_screens`), look for a fullscreen app this often, for this
+/// long, while the switch animates; after a display change, re-measure the
+/// menu bar too.
+const SETTLE_CHECK: Duration = Duration::from_millis(250);
+const SETTLE: Duration = Duration::from_millis(1500);
+/// Otherwise this seldom, for whatever changes unannounced: an app hiding
+/// the menu bar without a Space of its own.
+const FALLBACK_CHECK: Duration = Duration::from_secs(5);
+/// In fullscreen with the pointer near the top, or the menu bar down: it
+/// slides with no event to say so, and the strip comes and goes with it.
 const MENU_BAR_CHECK: Duration = Duration::from_millis(100);
 /// How far down the pointer counts as "near the top" for that.
 const NEAR_TOP: f64 = 60.0;
@@ -137,10 +141,28 @@ pub struct StripState {
     /// Set while a fullscreen app is up and its menu bar is not down: the
     /// strip is hidden, with the setting still on.
     covered: AtomicBool,
-    /// `menuBarStrip`, for the watcher: it looks every 40 ms, and reading the
-    /// setting itself took the settings lock each time.
+    /// `menuBarStrip`, for the watcher: it can look every 40 ms, and reading
+    /// the setting itself took the settings lock each time.
     on: AtomicBool,
-    watcher: Mutex<Option<Thread>>,
+    /// Something to look at: the pointer moved, or the drawn part changed.
+    look: AtomicBool,
+    /// A Space, app or display changed (`macos::watch_screens`).
+    screens_changed: AtomicBool,
+    /// A display changed.
+    displays_changed: AtomicBool,
+    watcher: OnceLock<Thread>,
+}
+
+impl StripState {
+    /// Wake the watcher for a look. Called for every pointer event, so it
+    /// unparks only the first time before the watcher has looked.
+    fn nudge(&self) {
+        if !self.look.swap(true, Ordering::SeqCst) {
+            if let Some(watcher) = self.watcher.get() {
+                watcher.unpark();
+            }
+        }
+    }
 }
 
 fn state(app: &AppHandle) -> Arc<StripState> {
@@ -187,10 +209,23 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         menu_open: AtomicBool::new(false),
         covered: AtomicBool::new(false),
         on: AtomicBool::new(app.state::<Arc<Store>>().get(|s| s.menu_bar_strip)),
-        watcher: Mutex::new(None),
+        look: AtomicBool::new(false),
+        screens_changed: AtomicBool::new(false),
+        displays_changed: AtomicBool::new(false),
+        watcher: OnceLock::new(),
     }));
-    let watcher = watch_pointer(app.clone());
-    *state(app).watcher.lock().expect("strip lock") = Some(watcher);
+    let strip = state(app);
+    let _ = strip.watcher.set(watch_pointer(app.clone()));
+    macos::watch_screens(move |display| {
+        if display {
+            strip.displays_changed.store(true, Ordering::SeqCst);
+        }
+        strip.screens_changed.store(true, Ordering::SeqCst);
+        strip.look.store(true, Ordering::SeqCst);
+        if let Some(watcher) = strip.watcher.get() {
+            watcher.unpark();
+        }
+    });
     if state(app).on.load(Ordering::SeqCst) {
         show(app)?;
     }
@@ -215,8 +250,10 @@ pub fn set_shown(app: &AppHandle, shown: bool) {
 fn show(app: &AppHandle) -> tauri::Result<()> {
     let strip = state(app);
     // Built visible; if a fullscreen app is up with its menu bar away, the
-    // watcher hides it again within `FULLSCREEN_CHECK`.
+    // watcher's first look hides it again.
     strip.covered.store(false, Ordering::SeqCst);
+    strip.screens_changed.store(true, Ordering::SeqCst);
+    strip.displays_changed.store(true, Ordering::SeqCst);
     if app.get_webview_window(LABEL).is_none() {
         let frame = frame(app);
         *strip.frame.lock().expect("strip lock") = frame;
@@ -244,14 +281,18 @@ fn show(app: &AppHandle) -> tauri::Result<()> {
         macos::set_ignores_mouse(&window, true);
         macos::accept_mouse_moved(&window);
     }
+    // Folded until the page says otherwise (`strip_open`).
+    app.state::<Arc<Core>>().set_slow_ticks(LABEL, true);
     crate::on_screen(app, LABEL, true);
-    if let Some(watcher) = strip.watcher.lock().expect("strip lock").as_ref() {
-        watcher.unpark();
-    }
+    let moved = strip.clone();
+    macos::watch_pointer(move || moved.nudge());
+    strip.look.store(false, Ordering::SeqCst);
+    strip.nudge();
     Ok(())
 }
 
 fn hide(app: &AppHandle) {
+    macos::unwatch_pointer();
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.destroy();
     }
@@ -262,22 +303,31 @@ fn hide(app: &AppHandle) {
     *strip.hot.lock().expect("strip lock") = Hot::default();
     let core = app.state::<Arc<Core>>();
     core.set_queue_wanted(LABEL, false);
+    core.set_slow_ticks(LABEL, false);
     crate::on_screen(app, LABEL, false);
 }
 
 /// The strip never belongs to the active app, so its page hears no hover;
 /// look where the pointer is instead, and say when it enters or leaves the
 /// drawn part (`strip-hover`). The pointer is read off the main thread
-/// (`macos::pointer_location`), so a look costs no hop. Parked while off.
+/// (`macos::pointer_location`), so a look costs no hop.
+///
+/// Looks happen when there is something to see, not on a clock: the pointer
+/// moved or the drawn part changed (`StripState::nudge`), at most every
+/// `HOVER_NEAR` or `HOVER_FAR`; a Space, app or display changed; or one of
+/// the timed checks below is due. In between the thread parks, so a still
+/// pointer costs nothing. Parked while off.
 fn watch_pointer(app: AppHandle) -> Thread {
     std::thread::spawn(move || {
-        let mut checked = Instant::now();
-        let mut fullscreen_checked: Option<Instant> = None;
+        let strip = state(&app);
+        let mut display_checked: Option<Instant> = None;
+        let mut top_checked: Option<Instant> = None;
+        let mut settle_until: Option<Instant> = None;
+        let mut display_settle_until: Option<Instant> = None;
         let mut fullscreen = false;
         let mut menu_bar_was: Option<f64> = None;
         let mut pointed: Option<(f64, f64)> = None;
         loop {
-            let strip = state(&app);
             if !strip.on.load(Ordering::SeqCst) {
                 std::thread::park();
                 continue;
@@ -286,16 +336,34 @@ fn watch_pointer(app: AppHandle) -> Thread {
                 std::thread::sleep(HOVER_FAR);
                 continue;
             }
+            let moved = strip.look.swap(false, Ordering::SeqCst);
+            if strip.screens_changed.swap(false, Ordering::SeqCst) {
+                settle_until = Some(Instant::now() + SETTLE);
+                top_checked = None;
+            }
+            if strip.displays_changed.swap(false, Ordering::SeqCst) {
+                display_settle_until = Some(Instant::now() + SETTLE);
+                display_checked = None;
+            }
+            let settling = settle_until.is_some_and(|until| Instant::now() < until);
+            let display_settling = display_settle_until.is_some_and(|until| Instant::now() < until);
             let frame = *strip.frame.lock().expect("strip lock");
             let pointer = macos::pointer_location();
             let near_top = pointer.is_some_and(|(_, y)| y - frame.y < NEAR_TOP);
             // In fullscreen the menu bar comes down when the pointer reaches
             // the top, and the strip comes with it; look often then, and while
             // it is down, so the strip leaves with it too.
-            let quick = fullscreen && (near_top || !strip.covered.load(Ordering::SeqCst));
-            let every = if quick { MENU_BAR_CHECK } else { FULLSCREEN_CHECK };
-            if fullscreen_checked.is_none_or(|at| at.elapsed() >= every) {
-                fullscreen_checked = Some(Instant::now());
+            let top_every = |fullscreen: bool| {
+                if fullscreen && (near_top || !strip.covered.load(Ordering::SeqCst)) {
+                    MENU_BAR_CHECK
+                } else if settling {
+                    SETTLE_CHECK
+                } else {
+                    FALLBACK_CHECK
+                }
+            };
+            if top_checked.is_none_or(|at| at.elapsed() >= top_every(fullscreen)) {
+                top_checked = Some(Instant::now());
                 let top = macos::top_of_main_display();
                 fullscreen = top.fullscreen;
                 // Moving down into the open sheet makes macOS put its menu bar
@@ -316,38 +384,54 @@ fn watch_pointer(app: AppHandle) -> Thread {
                     let _ = app.run_on_main_thread(move || set_covered(&handle, covered));
                 }
             }
-            if strip.covered.load(Ordering::SeqCst) {
-                pointed = None;
-                std::thread::sleep(if near_top { HOVER_NEAR } else { HOVER_FAR });
-                continue;
-            }
-            let hot = *strip.hot.lock().expect("strip lock");
-            let at = pointer.map(|(x, y)| (x - frame.x, y - frame.y));
-            let inside = at.is_some_and(|at| hot.contains(at));
-            if strip.hovered.swap(inside, Ordering::SeqCst) != inside {
-                if let Some(window) = app.get_webview_window(LABEL) {
-                    // Take clicks only while the pointer is on the open
-                    // sheet, so the menu bar beside it never loses one to
-                    // the fold delay.
-                    macos::set_ignores_mouse(&window, !(inside && strip.open.load(Ordering::SeqCst)));
-                }
-                let _ = app.emit_to(LABEL, "strip-hover", inside);
-            }
-            // Over the open sheet, say where: WebKit's own hover reaches a
-            // never-active app's page late, so the page highlights from this.
-            let over = at.filter(|_| inside && strip.open.load(Ordering::SeqCst));
-            if over != pointed {
-                pointed = over;
-                let (x, y) = over.unwrap_or((-1.0, -1.0));
-                let _ = app.emit_to(LABEL, "strip-pointer", serde_json::json!({ "x": x, "y": y }));
-            }
-            if checked.elapsed() >= DISPLAY_CHECK {
-                checked = Instant::now();
+            let display_every = if display_settling { SETTLE_CHECK } else { FALLBACK_CHECK };
+            if display_checked.is_none_or(|at| at.elapsed() >= display_every) {
+                display_checked = Some(Instant::now());
                 let handle = app.clone();
                 let _ = app.run_on_main_thread(move || follow_display(&handle));
             }
-            let near = at.is_some_and(|(_, y)| y < WINDOW.1 + 40.0);
-            std::thread::sleep(if near { HOVER_NEAR } else { HOVER_FAR });
+            let mut near = near_top;
+            if strip.covered.load(Ordering::SeqCst) {
+                pointed = None;
+            } else {
+                let hot = *strip.hot.lock().expect("strip lock");
+                let at = pointer.map(|(x, y)| (x - frame.x, y - frame.y));
+                let inside = at.is_some_and(|at| hot.contains(at));
+                if strip.hovered.swap(inside, Ordering::SeqCst) != inside {
+                    if let Some(window) = app.get_webview_window(LABEL) {
+                        // Take clicks only while the pointer is on the open
+                        // sheet, so the menu bar beside it never loses one to
+                        // the fold delay.
+                        macos::set_ignores_mouse(&window, !(inside && strip.open.load(Ordering::SeqCst)));
+                    }
+                    let _ = app.emit_to(LABEL, "strip-hover", inside);
+                }
+                // Over the open sheet, say where: WebKit's own hover reaches a
+                // never-active app's page late, so the page highlights from this.
+                let over = at.filter(|_| inside && strip.open.load(Ordering::SeqCst));
+                if over != pointed {
+                    pointed = over;
+                    let (x, y) = over.unwrap_or((-1.0, -1.0));
+                    let _ = app.emit_to(LABEL, "strip-pointer", serde_json::json!({ "x": x, "y": y }));
+                }
+                near = at.is_some_and(|(_, y)| y < WINDOW.1 + 40.0);
+            }
+            // A moving pointer is looked at no more often than this.
+            if moved {
+                std::thread::sleep(if near { HOVER_NEAR } else { HOVER_FAR });
+            }
+            // Then sleep until it moves again or a timed check is due.
+            let due = [
+                top_checked.map(|at| at + top_every(fullscreen)),
+                display_checked.map(|at| at + display_every),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let wait = due.map_or(Duration::ZERO, |due| due.saturating_duration_since(Instant::now()));
+            if !wait.is_zero() && !strip.look.load(Ordering::SeqCst) {
+                std::thread::park_timeout(wait);
+            }
         }
     })
     .thread()
@@ -414,7 +498,10 @@ pub fn strip_shape(app: AppHandle) -> Shape {
 /// The page's drawn part changed: the bar folded, or the sheet open.
 #[tauri::command]
 pub fn strip_hot(app: AppHandle, hot: Hot) {
-    *state(&app).hot.lock().expect("strip lock") = hot;
+    let strip = state(&app);
+    *strip.hot.lock().expect("strip lock") = hot;
+    // The pointer may be still over what just became drawn.
+    strip.nudge();
 }
 
 /// The sheet opened or folded. Open, it takes clicks while the pointer is on
@@ -428,7 +515,11 @@ pub fn strip_open(app: AppHandle, open: bool) {
         let hovered = strip.hovered.load(Ordering::SeqCst);
         macos::set_ignores_mouse(&window, !(open && (hovered || strip.shape.lock().expect("strip lock").pinned)));
     }
-    app.state::<Arc<Core>>().want_queue(LABEL, open);
+    let core = app.state::<Arc<Core>>();
+    core.want_queue(LABEL, open);
+    // Folded, only the hairline shows the position, every `HAIRLINE_MS`.
+    core.set_slow_ticks(LABEL, !open);
+    strip.nudge();
 }
 
 /// Right-click on the open sheet: the strip's menu, under the pointer. The

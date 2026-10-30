@@ -49,7 +49,9 @@ const on = (event, handler) => {
 
 window.widget = {
   getState: () => invoke('widget_state'),
-  onState: (handler) => on('state', handler),
+  // `state:<label>`, not `state`: Tauri runs an event's script in every page
+  // listening for its name, whichever window `emit_to` named.
+  onState: (handler) => on(`state:${getCurrentWindow().label}`, handler),
   // Artwork, the queue and the lyrics are each far larger than the state they
   // used to ride on, and each changes about once a track where the state
   // changes once a second. They get their own channels so the position tick

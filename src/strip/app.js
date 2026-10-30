@@ -188,8 +188,10 @@ new ResizeObserver((entries) => {
 
 /** Steady play moves the hairline at most this often. Every write is a frame
  *  the app draws, and WebKit keeps its display link running for about 200 ms
- *  after each: a pixel a second kept it running half the time. */
-const HAIRLINE_MS = 2000;
+ *  after each: a pixel a second kept it running half the time. Folded, Rust
+ *  sends the position every other second (`slow_ticks`), which this lets
+ *  through. */
+const HAIRLINE_MS = 1500;
 let hairlineAt = 0;
 let hairlinePos = 0; // the position, in seconds, last written
 
@@ -288,10 +290,14 @@ function applyQueue(next) {
 // would draw is on screen, so the hairline waits until it is back.
 let away = false;
 
-// The hairline moves a pixel every few seconds; the sheet's clock every second.
-setInterval(() => {
-  if (state?.isPlaying && !away) tick();
-}, 250);
+// The sheet's clock reads every second, looked at four times a second so it
+// turns over on time. Folded, the hairline needs nothing between the `state`
+// pushes, which tick it every other second, so the timer runs only while open.
+let clockTimer = 0;
+function runClock() {
+  clearInterval(clockTimer);
+  clockTimer = open && !away ? setInterval(() => state?.isPlaying && tick(), 250) : 0;
+}
 
 // --------------------------------------------------------------- hot area
 
@@ -338,6 +344,7 @@ function setOpen(want) {
     open = want;
     // The sheet's clock stands still while folded; bring it up to date first.
     if (open) tick();
+    runClock();
     root.classList.toggle('open', open);
     // Open takes clicks and wants the queue; folded lets clicks through.
     invoke('strip_open', { open });
@@ -392,6 +399,7 @@ listen('strip-away', ({ payload }) => {
   root.classList.toggle('away', away);
   // Catch the hairline up on what it skipped while away.
   if (!away) tick();
+  runClock();
 });
 
 // --------------------------------------------------------------- controls
@@ -897,7 +905,7 @@ root.addEventListener(
 // event heard before the reply is newer than it.
 const heard = { state: false, cover: false, queue: false };
 Promise.all([
-  listen('state', ({ payload }) => {
+  listen('state:strip', ({ payload }) => {
     heard.state = true;
     applyState(payload);
   }),

@@ -69,7 +69,16 @@ src-tauri/src/ws.rs → state/ → Tauri IPC → src/app.js
    the event is newer. Pages listen through `getCurrentWindow().listen`, never
    the global `event.listen`: a global listener hears every `emit_to` whatever
    its target, so hidden surfaces got the `state` meant for the one on screen
-   and redrew their playhead every second.
+   and redrew their playhead every second. Each surface also hears `state`
+   under its own name, `state:<label>` (`state::state_event`): Tauri runs an
+   event's script in every page that listens for that name, even when
+   `emit_to` names another page, so hidden pages woke every second to run
+   it for nothing. Ticks of steady play (`steady_tick`: playing, only the
+   position moved, forward by at most 2 s) reach a `slow_ticks` surface (the
+   folded strip) only every other second: each push makes WebKit redraw,
+   which runs the display link even when nothing on the page changed. A
+   seek, or anything while paused, goes at once, and leaving slow ticks
+   sends the latest state if a tick was held back.
 3. **Queue artwork is request/reply data, not an event.** Each surface calls
    `queue_art` only for visible rows. The only queue-art event is the
    payload-free `queue-art-ready` nudge, which makes surfaces ask again. Keep `ImageCache::get` promotion and the
@@ -439,8 +448,10 @@ markup.
   surface like the others: `crate::on_screen` on every show and hide, and it
   reads `state`, `cover` and `queue`. While it is up something is on screen,
   so the pollers keep running. It joins every desktop but not fullscreen
-  Spaces. On top of that, the watcher asks Quartz once a second whether
-  another app's ordinary window reaches the menu-bar display's top edge,
+  Spaces. On top of that, the watcher asks Quartz whether another app's
+  ordinary window reaches the menu-bar display's top edge (after a Space
+  change, an app coming forward or a display change, `macos::watch_screens`,
+  every 250 ms while it settles; otherwise every 5 s as a fallback),
   where in a normal Space only the menu bar can be
   (`macos::top_of_main_display`: a fullscreen app, Split View, whose windows
   do not span the display, a game). `visibleFrame` cannot tell: it keeps the
@@ -463,27 +474,34 @@ markup.
   menu bar beside the sheet never loses a click to the fold delay. Position
   it at build time or through `macos::set_frame`; a `set_frame` posted right
   after building loses to the builder's own position. The watcher re-checks
-  the menu bar's display every 2 s and re-centres and re-shapes after a dock,
-  unplug or resolution change.
+  the menu bar's display on the same notifications and fallback, and
+  re-centres and re-shapes after a dock, unplug or resolution change.
 - **Animate transform and opacity only.** The sheet is always laid out
   (`visibility: hidden` when folded) and opens by transform and opacity, which
   the compositor runs without WebKit laying out each frame. Animating height,
   width or grid rows dropped frames. Progress is a `scaleX`, written only when
-  the hairline moves a whole pixel and, in steady play, at most every 2 s
-  (`HAIRLINE_MS`; a seek, new track or pause writes at once): each write
+  the hairline moves a whole pixel and, in steady play, at most every 1.5 s
+  (`HAIRLINE_MS`, paired with Rust's `SLOW_TICK`, so folded it moves on
+  every other push; a seek, new track or pause writes at once): each write
   keeps WebKit's display link running for about 200 ms, so a pixel a second
   kept the app drawing frames half the time. The sheet's bar and clock are
   written only while it is open; a transition on it would run every frame
   while playing. The
   hairline's width comes from a `ResizeObserver`, never `offsetWidth` in
-  `tick`, and the 250 ms tick stands down while the bar is `away`.
+  `tick`. The 250 ms clock runs only while the sheet is open and the bar
+  is not `away`; folded, the `state` pushes tick the hairline.
 - **Hover comes from Rust.** The app is never active, so WebKit sends the
   page no hover. The page reports the drawn part of the window (`strip_hot`:
   the bar, or the sheet plus slack while open). While the strip is on, a
   thread reads the pointer through Quartz (`macos::pointer_location`, no
-  main-thread hop) every 40 ms near the top of the screen and every 150 ms
-  elsewhere, and emits `strip-hover` when it crosses the drawn part. Off, the
-  thread parks. It reads whether the strip is on from `StripState.on`
+  main-thread hop) when it moves, at most every 40 ms near the top of the
+  screen and every 150 ms elsewhere, and emits `strip-hover` when it crosses
+  the drawn part. NSEvent global and local monitors (`macos::watch_pointer`,
+  installed by `show`, removed by `hide`) wake it through
+  `StripState::nudge`, as do `strip_hot` and `strip_open`; a still pointer
+  costs nothing, where polling woke the app seven times a second. A moving
+  pointer does wake the main thread for each event the monitor sees; the
+  callback only sets a flag. Off, the thread parks. It reads whether the strip is on from `StripState.on`
   (written with the setting by `set_shown`), not from the settings lock, and
   `macos::top_of_main_display` takes its dictionary keys from `window_keys`,
   built once.

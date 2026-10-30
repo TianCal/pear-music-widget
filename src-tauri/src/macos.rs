@@ -551,6 +551,88 @@ pub fn pointer_location() -> Option<(f64, f64)> {
     }
 }
 
+/// `NSEventMask` for the pointer moving: mouse moved and the three drags.
+const POINTER_MOVES: u64 = (1 << 5) | (1 << 6) | (1 << 7) | (1 << 27);
+
+thread_local! {
+    /// The monitors `watch_pointer` installed, until `unwatch_pointer`.
+    static POINTER_MONITORS: std::cell::RefCell<Vec<objc2::rc::Retained<AnyObject>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Main thread. Call `moved` whenever the pointer moves: over other apps'
+/// windows (a global monitor, which needs no permission for mouse events)
+/// and over ours (a local one). Replaces an earlier call's monitors.
+///
+/// A still pointer calls nothing, so a watcher can sleep until it moves
+/// rather than read it several times a second for nothing.
+pub fn watch_pointer(moved: impl Fn() + 'static) {
+    unwatch_pointer();
+    let moved = std::rc::Rc::new(moved);
+    let global = {
+        let moved = moved.clone();
+        block2::RcBlock::new(move |_: std::ptr::NonNull<AnyObject>| moved())
+    };
+    let local = block2::RcBlock::new(move |event: std::ptr::NonNull<AnyObject>| -> *mut AnyObject {
+        moved();
+        event.as_ptr()
+    });
+    unsafe {
+        let global: Option<objc2::rc::Retained<AnyObject>> = msg_send![
+            class!(NSEvent),
+            addGlobalMonitorForEventsMatchingMask: POINTER_MOVES,
+            handler: &*global
+        ];
+        let local: Option<objc2::rc::Retained<AnyObject>> = msg_send![
+            class!(NSEvent),
+            addLocalMonitorForEventsMatchingMask: POINTER_MOVES,
+            handler: &*local
+        ];
+        POINTER_MONITORS.with(|monitors| monitors.borrow_mut().extend(global.into_iter().chain(local)));
+    }
+}
+
+/// Main thread. Remove `watch_pointer`'s monitors.
+pub fn unwatch_pointer() {
+    POINTER_MONITORS.with(|monitors| {
+        for monitor in monitors.borrow_mut().drain(..) {
+            unsafe {
+                let _: () = msg_send![class!(NSEvent), removeMonitor: &*monitor];
+            }
+        }
+    });
+}
+
+/// Main thread, once. Call `changed(false)` when the Space changes or another
+/// app comes forward, when a fullscreen app can have come or gone, and
+/// `changed(true)` when a display is added, removed or rearranged, which can
+/// move the menu bar too. For the app's lifetime; the observers are never
+/// removed.
+pub fn watch_screens(changed: impl Fn(bool) + 'static) {
+    let changed = std::rc::Rc::new(changed);
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let workspace: *mut AnyObject = msg_send![workspace, notificationCenter];
+        let application: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+        for (center, name, display) in [
+            (workspace, "NSWorkspaceActiveSpaceDidChangeNotification", false),
+            (workspace, "NSWorkspaceDidActivateApplicationNotification", false),
+            (application, "NSApplicationDidChangeScreenParametersNotification", true),
+        ] {
+            let changed = changed.clone();
+            let block = block2::RcBlock::new(move |_: std::ptr::NonNull<AnyObject>| changed(display));
+            let observer: Option<objc2::rc::Retained<AnyObject>> = msg_send![
+                center,
+                addObserverForName: ns_string(name),
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            std::mem::forget(observer);
+        }
+    }
+}
+
 /// On every desktop Space, but not over another app's fullscreen window.
 pub fn join_all_desktops(window: &WebviewWindow) {
     with_ns_window(window, move |handle| unsafe {
@@ -605,7 +687,7 @@ pub struct TopOfDisplay {
 }
 
 /// The dictionary keys `top_of_main_display` reads, as retained `NSString`s
-/// built once: it runs every second, or every 100 ms in fullscreen, and was
+/// built once: it runs every few seconds, or every 100 ms in fullscreen, and was
 /// making the eight strings each time. Kept as addresses because a raw
 /// pointer cannot sit in a static; an immutable string is safe to share.
 fn window_keys() -> [usize; 8] {
