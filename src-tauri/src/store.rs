@@ -134,6 +134,15 @@ where
     })
 }
 
+/// A hand edit that is not a boolean reads as off rather than setting the
+/// whole file aside.
+fn flag_from_file<'de, D>(de: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(matches!(serde_json::Value::deserialize(de)?, serde_json::Value::Bool(true)))
+}
+
 /// A hand edit that is not a string reads as Automatic rather than setting the
 /// whole file aside.
 fn ink_from_file<'de, D>(de: D) -> Result<Option<String>, D::Error>
@@ -208,6 +217,9 @@ pub struct Settings {
     /// `strip::valid_ink`); Automatic when missing or unknown.
     #[serde(rename = "stripInk", default, deserialize_with = "ink_from_file")]
     pub strip_ink: Option<String>,
+    /// Leave the strip out while the menu bar is on a display with a notch.
+    #[serde(rename = "stripSkipNotch", default, deserialize_with = "flag_from_file")]
+    pub strip_skip_notch: bool,
     /// Whether the floating widget was left showing, so hiding it lasts
     /// across a relaunch.
     #[serde(rename = "showWidget", default = "default_show_widget")]
@@ -313,6 +325,7 @@ impl Default for Settings {
             menu_bar_strip: false,
             show_widget: default_show_widget(),
             strip_ink: None,
+            strip_skip_notch: false,
             always_on_top: default_always_on_top(),
             opacity: default_opacity(),
             liquid_glass: default_liquid_glass(),
@@ -594,6 +607,9 @@ mod tests {
         assert_eq!(read(r##"{ "stripInk": "#ff0000" }"##).strip_ink.as_deref(), Some("#ff0000"));
         assert_eq!(read(r#"{ "stripInk": 1 }"#).strip_ink, None);
         assert_eq!(read(r#"{ "stripInk": {} }"#).strip_ink, None);
+        assert!(read(r#"{ "stripSkipNotch": true }"#).strip_skip_notch);
+        assert!(!read(r#"{ "stripSkipNotch": "yes" }"#).strip_skip_notch);
+        assert!(!read("{}").strip_skip_notch);
         assert!(read("{}").show_widget);
         assert!(!read(r#"{ "showWidget": false }"#).show_widget);
     }

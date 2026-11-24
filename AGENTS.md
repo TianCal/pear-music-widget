@@ -557,6 +557,12 @@ markup.
   housing's width; with a notch the song sits left of it and the artist right,
   in equal columns so the camera stays centred. `PMW_NOTCH=<points>` fakes a
   notch on a flat display and `PMW_STRIP_OPEN=1` pins the sheet open.
+- **Hide on notched display.** `stripSkipNotch` (tray, under the strip's
+  item) keeps the strip off while the menu bar's display has a notch
+  (`Shape::notch > 0`, so `PMW_NOTCH` fakes it too). The window is not
+  built there, not merely covered; `follow_display` builds it when the menu
+  bar moves to a flat display and destroys it when it comes back, so the
+  watcher keeps running while the setting is on.
 - **Settings.** Test builds stored a design name in `menuBarStrip`;
   `strip_from_file` reads any name but `off` as shown, so those files still
   parse.

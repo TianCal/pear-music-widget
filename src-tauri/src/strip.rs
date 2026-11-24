@@ -141,6 +141,10 @@ pub struct StripState {
     /// Set while a fullscreen app is up and its menu bar is not down: the
     /// strip is hidden, with the setting still on.
     covered: AtomicBool,
+    /// `stripSkipNotch`: leave the strip out while the menu bar is on a
+    /// display with a notch (a MacBook's own screen), where the camera
+    /// housing already crowds the menu bar.
+    skip_notch: AtomicBool,
     /// `menuBarStrip`, for the watcher: it can look every 40 ms, and reading
     /// the setting itself took the settings lock each time.
     on: AtomicBool,
@@ -208,6 +212,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         open: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
         covered: AtomicBool::new(false),
+        skip_notch: AtomicBool::new(app.state::<Arc<Store>>().get(|s| s.strip_skip_notch)),
         on: AtomicBool::new(app.state::<Arc<Store>>().get(|s| s.menu_bar_strip)),
         look: AtomicBool::new(false),
         screens_changed: AtomicBool::new(false),
@@ -226,10 +231,29 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             watcher.unpark();
         }
     });
-    if state(app).on.load(Ordering::SeqCst) {
+    if state(app).on.load(Ordering::SeqCst) && !skipped(app) {
         show(app)?;
     }
     Ok(())
+}
+
+/// Whether Hide on notched display keeps the strip away from the menu bar's
+/// current display. The window is not built at all then, so the strip costs
+/// nothing there; `follow_display` builds it when the menu bar moves to a
+/// flat display, and takes it down when it comes back.
+fn skipped(app: &AppHandle) -> bool {
+    let strip = state(app);
+    strip.skip_notch.load(Ordering::SeqCst) && strip.shape.lock().expect("strip lock").notch > 0.0
+}
+
+/// From the tray menu, on the main thread.
+pub fn set_skip_notch(app: &AppHandle, skip: bool) {
+    app.state::<Arc<Store>>().update_soon(|s| s.strip_skip_notch = skip);
+    let strip = state(app);
+    strip.skip_notch.store(skip, Ordering::SeqCst);
+    if strip.on.load(Ordering::SeqCst) {
+        follow_display(app);
+    }
 }
 
 /// From the tray menu, on the main thread.
@@ -239,6 +263,9 @@ pub fn set_shown(app: &AppHandle, shown: bool) {
     if shown {
         // The menu bar may have moved to another display since launch.
         *state(app).shape.lock().expect("strip lock") = measure();
+        if skipped(app) {
+            return;
+        }
         if let Err(err) = show(app) {
             eprintln!("[strip] {err}");
         }
@@ -462,11 +489,10 @@ fn set_covered(app: &AppHandle, covered: bool) {
     crate::on_screen(app, LABEL, !covered);
 }
 
-/// Main thread. Re-centre and re-shape after a display change.
+/// Main thread. Re-centre and re-shape after a display change, and build or
+/// take down the window as the menu bar moves on or off a notched display
+/// while Hide on notched display is set.
 fn follow_display(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(LABEL) else {
-        return;
-    };
     let strip = state(app);
     let shape = measure();
     let changed = {
@@ -474,6 +500,25 @@ fn follow_display(app: &AppHandle) {
         let changed = *held != shape;
         *held = shape.clone();
         changed
+    };
+    if !strip.on.load(Ordering::SeqCst) {
+        return;
+    }
+    let exists = app.get_webview_window(LABEL).is_some();
+    if skipped(app) {
+        if exists {
+            hide(app);
+        }
+        return;
+    }
+    if !exists {
+        if let Err(err) = show(app) {
+            eprintln!("[strip] {err}");
+        }
+        return;
+    }
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
     };
     if changed {
         let _ = app.emit_to(LABEL, "strip-shape", &shape);

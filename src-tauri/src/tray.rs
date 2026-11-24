@@ -817,6 +817,14 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 store.get(|s| s.menu_bar_strip),
                 None::<&str>,
             )?,
+            &CheckMenuItem::with_id(
+                app,
+                "stripSkipNotch",
+                "Hide on notched display",
+                store.get(|s| s.menu_bar_strip),
+                store.get(|s| s.strip_skip_notch),
+                None::<&str>,
+            )?,
             &skin_submenu(app, "skin", "Skin", &widget_skin)?,
             &skin_submenu(app, "panelSkin", "Dropdown skin", &window::panel_skin_of(&store))?,
             &tint_submenu(app, tint)?,
@@ -1095,6 +1103,7 @@ pub fn handle_menu(app: &AppHandle, event: MenuEvent) {
             }
         }
         "menuBarStrip" => crate::strip::set_shown(app, !store.get(|s| s.menu_bar_strip)),
+        "stripSkipNotch" => crate::strip::set_skip_notch(app, !store.get(|s| s.strip_skip_notch)),
         "hideWidget" => window::hide_widget(app),
         "alwaysOnTop" => {
             let next = !store.get(|s| s.always_on_top);
